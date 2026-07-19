@@ -1,0 +1,58 @@
+{
+  "title": "Prolog family rules walkthrough",
+  "workbench": "execution",
+  "metadata": { "language": "prolog", "query": "grandfather(X, Y)?" },
+  "trace": [
+    {
+      "title": "Start query",
+      "explanation": "Create the initial goal from the user query.",
+      "state": {
+        "program": ["father(orville, abe).", "father(abe, homer).", "father(homer, bart).", "father(homer, lisa).", "parent(X, Y) :- father(X, Y).", "grandfather(X, Y) :- father(X, Z), parent(Z, Y)."],
+        "currentLine": 6,
+        "goals": ["grandfather(X, Y)"],
+        "stack": [{ "rule": "query", "goals": ["grandfather(X, Y)"], "bindings": {} }]
+      }
+    },
+    {
+      "title": "Apply grandfather rule",
+      "explanation": "Expand grandfather/2 into father/2 followed by parent/2.",
+      "state": {
+        "program": ["father(orville, abe).", "father(abe, homer).", "father(homer, bart).", "father(homer, lisa).", "parent(X, Y) :- father(X, Y).", "grandfather(X, Y) :- father(X, Z), parent(Z, Y)."],
+        "currentLine": 6,
+        "goals": ["father(X, Z)", "parent(Z, Y)"],
+        "stack": [{ "rule": "grandfather/2", "goals": ["father(X, Z)", "parent(Z, Y)"], "bindings": {} }]
+      }
+    },
+    {
+      "title": "Unify first father fact",
+      "explanation": "The first fact binds X=orville and Z=abe.",
+      "state": {
+        "program": ["father(orville, abe).", "father(abe, homer).", "father(homer, bart).", "father(homer, lisa).", "parent(X, Y) :- father(X, Y).", "grandfather(X, Y) :- father(X, Z), parent(Z, Y)."],
+        "currentLine": 1,
+        "goals": ["parent(abe, Y)"],
+        "stack": [{ "rule": "father(orville, abe)", "goals": ["parent(abe, Y)"], "bindings": { "X": "orville", "Z": "abe" } }, { "rule": "grandfather/2", "goals": ["father(X, Z)", "parent(Z, Y)"], "bindings": {} }]
+      }
+    },
+    {
+      "title": "Apply parent rule",
+      "explanation": "parent(abe,Y) becomes father(abe,Y).",
+      "state": {
+        "program": ["father(orville, abe).", "father(abe, homer).", "father(homer, bart).", "father(homer, lisa).", "parent(X, Y) :- father(X, Y).", "grandfather(X, Y) :- father(X, Z), parent(Z, Y)."],
+        "currentLine": 5,
+        "goals": ["father(abe, Y)"],
+        "stack": [{ "rule": "parent/2", "goals": ["father(abe, Y)"], "bindings": { "X": "orville", "Z": "abe" } }, { "rule": "grandfather/2", "goals": ["father(X, Z)", "parent(Z, Y)"], "bindings": {} }]
+      }
+    },
+    {
+      "title": "Resolve final fact",
+      "explanation": "father(abe,homer) binds Y=homer and completes the proof.",
+      "state": {
+        "program": ["father(orville, abe).", "father(abe, homer).", "father(homer, bart).", "father(homer, lisa).", "parent(X, Y) :- father(X, Y).", "grandfather(X, Y) :- father(X, Z), parent(Z, Y)."],
+        "currentLine": 2,
+        "goals": [],
+        "result": "X = orville, Y = homer",
+        "stack": [{ "rule": "father(abe, homer)", "goals": [], "bindings": { "X": "orville", "Z": "abe", "Y": "homer" } }]
+      }
+    }
+  ]
+}

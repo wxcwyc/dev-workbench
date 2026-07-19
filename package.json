@@ -1,0 +1,15 @@
+{
+  "name": "dev-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-guided execution explorer and migration command center",
+  "scripts": {
+    "start": "node apps/server/src/server.js",
+    "dev": "node --watch apps/server/src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

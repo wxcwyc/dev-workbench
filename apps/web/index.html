@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dev Workbench</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="brand-mark">◆</span> DEV WORKBENCH <span class="muted">/ explainable execution</span></div>
+    <div id="health">connecting…</div>
+  </header>
+  <div class="layout">
+    <aside>
+      <section>
+        <h2>Start</h2>
+        <button id="logic-demo">Open logic debugger</button>
+        <button id="migration-demo">Open migration center</button>
+        <label class="file-button">Import session JSON<input id="session-file" type="file" accept="application/json,.json"></label>
+      </section>
+      <section class="grow">
+        <h2>Sessions</h2>
+        <div id="sessions" class="session-list"></div>
+      </section>
+      <section class="boundary">
+        <h2>Execution boundary</h2>
+        <p id="allowed-root" class="muted"></p>
+        <p class="muted">Commands run only after confirmation and never through a shell string.</p>
+      </section>
+    </aside>
+    <main>
+      <div id="empty" class="empty">
+        <div class="empty-icon">◇</div>
+        <h1>Build understanding by operating the system</h1>
+        <p>Replay an execution trace or advance a migration one visible checkpoint at a time.</p>
+      </div>
+      <div id="workbench" class="hidden">
+        <div class="session-header">
+          <div><span id="workbench-badge" class="badge"></span><h1 id="session-title"></h1><p id="session-path" class="muted"></p></div>
+          <div><span id="session-status"></span><button id="run-next" class="primary">Run next step</button></div>
+        </div>
+        <div id="execution-view" class="hidden"></div>
+        <div id="migration-view" class="hidden"></div>
+        <section class="timeline-panel">
+          <div class="timeline-heading"><strong>Timeline</strong><span id="step-counter"></span></div>
+          <div id="timeline" class="timeline"></div>
+          <div class="timeline-actions"><button id="previous">‹ Previous</button><button id="next">Next ›</button><button id="latest">Latest</button></div>
+        </section>
+        <section class="notes-panel">
+          <h2 id="notes-title">Notes</h2>
+          <div id="notes"></div>
+          <form id="note-form"><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add note</button></form>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

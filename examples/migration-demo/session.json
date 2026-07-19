@@ -1,0 +1,16 @@
+{
+  "title": "Framework migration command center",
+  "workbench": "migration",
+  "metadata": {
+    "sourceLabel": "Legacy site",
+    "targetLabel": "Modern site",
+    "sourceUrl": "about:blank",
+    "targetUrl": "about:blank"
+  },
+  "steps": [
+    { "title": "Reset target workspace", "description": "Create a clean target project while keeping the legacy source visible.", "action": { "command": ["node", "step-runner.js", "reset"] } },
+    { "title": "Create application shell", "description": "Add the target package and base HTML shell.", "action": { "command": ["node", "step-runner.js", "shell"] } },
+    { "title": "Migrate content", "description": "Transform legacy content into the target content collection.", "action": { "command": ["node", "step-runner.js", "content"] } },
+    { "title": "Migrate styles", "description": "Bring the visual language across as an explicit stylesheet.", "action": { "command": ["node", "step-runner.js", "styles"] } }
+  ]
+}
