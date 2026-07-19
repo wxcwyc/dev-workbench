@@ -7,6 +7,13 @@
 - **Execution Explorer**：回放解释器、规则引擎、算法或 Agent 的结构化 trace，查看程序位置、目标、堆栈、绑定和每步注释。
 - **Migration Center**：逐步确认并运行迁移计划，同时查看命令输出、文件树变化、Git diff 以及新旧系统预览。
 
+## 项目文档
+
+- [项目创建目的与产品原则](docs/PROJECT_PURPOSE.md)
+- [初始技术方案与当前边界](docs/INITIAL_SOLUTION.md)
+- [总体开发计划与下一阶段功能方案](docs/DEVELOPMENT_PLAN.md)
+- [架构与安全边界](docs/ARCHITECTURE.md)
+
 ## 启动
 
 要求 Node.js 22+，没有运行时 npm 依赖。
@@ -88,4 +95,4 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 npm test
 ```
 
-架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+下一步开发范围和验收条件见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
