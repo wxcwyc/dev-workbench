@@ -26,7 +26,7 @@ test("confirmed command runner uses argv without a shell and stays inside projec
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const command = process.platform === "win32"
     ? [process.execPath, "-e", "process.stdout.write('safe')"]
-    : ["/usr/bin/printf", "%s", "safe"];
+    : ["/usr/bin/printf", "%.4s", "safe;exit 99"];
   const result = await runConfirmedCommand(root, { command });
   assert.equal(result.stdout, "safe");
   assert.throws(() => resolveInsideProject(root, "../escape"), /escapes project root/);
