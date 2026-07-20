@@ -112,3 +112,61 @@ test("list and record keep only the recent-project schema fields", async (t) => 
     lastUsedAt: stored.lastUsedAt,
   });
 });
+
+test("concurrent records on one store are serialized in call order", async (t) => {
+  const store = await makeStore(t, { limit: 3 });
+  const projectRoots = ["one", "two", "three", "four", "five"]
+    .map((name) => `/projects/${name}`);
+
+  const results = await Promise.all(projectRoots.map((projectRoot) => store.record({
+    projectRoot,
+    workbench: "execution",
+  })));
+
+  assert.equal(results.length, projectRoots.length);
+  assert.deepEqual((await store.list()).map(({ projectRoot }) => projectRoot), [
+    "/projects/five",
+    "/projects/four",
+    "/projects/three",
+  ]);
+});
+
+test("list deduplicates paths in stored order and applies the limit", async (t) => {
+  const store = await makeStore(t, { limit: 2 });
+  const timestamp = "2026-07-20T08:00:00.000Z";
+  const state = [
+    { projectRoot: "/projects/one", workbench: "migration", lastUsedAt: timestamp, extra: true },
+    { projectRoot: "/projects/two", workbench: "execution", lastUsedAt: timestamp },
+    { projectRoot: "/projects/one", workbench: "execution", lastUsedAt: timestamp },
+    { projectRoot: "/projects/three", workbench: "migration", lastUsedAt: timestamp },
+  ];
+
+  await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+  await fs.writeFile(store.filePath, JSON.stringify(state), "utf8");
+
+  assert.deepEqual(await store.list(), [
+    { projectRoot: "/projects/one", workbench: "migration", lastUsedAt: timestamp },
+    { projectRoot: "/projects/two", workbench: "execution", lastUsedAt: timestamp },
+  ]);
+});
+
+test("record removes its temporary file when rename fails", async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "recent-project-store-rename-"));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const destination = path.join(parent, "recent-projects.json");
+  await fs.mkdir(destination);
+
+  class RenameFailingStore extends RecentProjectStore {
+    async list() { return []; }
+  }
+
+  const store = new RenameFailingStore(destination);
+  await assert.rejects(
+    store.record({ projectRoot: "/projects/one", workbench: "execution" }),
+  );
+
+  const temporaryPrefix = `${path.basename(destination)}.`;
+  const remnants = (await fs.readdir(parent))
+    .filter((name) => name.startsWith(temporaryPrefix));
+  assert.deepEqual(remnants, []);
+});

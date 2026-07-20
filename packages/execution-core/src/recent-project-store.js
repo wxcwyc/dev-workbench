@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -34,6 +35,8 @@ export class RecentProjectStore {
     this.filePath = filePath;
     this.limit = limit;
     this.warn = warn;
+    // Serializes writes made through this store instance; it is not a cross-process lock.
+    this.pending = Promise.resolve();
   }
 
   async list() {
@@ -54,14 +57,28 @@ export class RecentProjectStore {
       return [];
     }
 
-    const entries = state.filter(isRecentProject);
-    if (entries.length !== state.length) {
+    const validEntries = state.filter(isRecentProject);
+    if (validEntries.length !== state.length) {
       this.warn(`Recent projects state contains malformed entries: ${this.filePath}`);
     }
-    return entries.map(normalizeRecentProject);
+    const seen = new Set();
+    return validEntries
+      .filter((entry) => {
+        if (seen.has(entry.projectRoot)) return false;
+        seen.add(entry.projectRoot);
+        return true;
+      })
+      .slice(0, this.limit)
+      .map(normalizeRecentProject);
   }
 
-  async record({ projectRoot, workbench }) {
+  record(entry) {
+    const operation = this.pending.then(() => this.#writeRecord(entry));
+    this.pending = operation.catch(() => {});
+    return operation;
+  }
+
+  async #writeRecord({ projectRoot, workbench }) {
     if (!isNonEmptyString(projectRoot)) throw new TypeError("projectRoot must be a non-empty string");
     if (!WORKBENCHES.has(workbench)) throw new TypeError("workbench must be execution or migration");
 
@@ -72,9 +89,13 @@ export class RecentProjectStore {
     ].slice(0, this.limit);
 
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.tmp`;
-    await fs.writeFile(temporary, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
-    await fs.rename(temporary, this.filePath);
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+      await fs.rename(temporary, this.filePath);
+    } finally {
+      await fs.unlink(temporary).catch(() => {});
+    }
     return entries.map(normalizeRecentProject);
   }
 }
