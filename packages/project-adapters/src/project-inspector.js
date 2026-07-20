@@ -40,35 +40,42 @@ const frameworksByDependency = new Map([
 ]);
 
 export async function inspectProject(projectRoot) {
-  const { entries } = await captureFileTree(projectRoot, 2000);
+  const { entries, truncated } = await captureFileTree(projectRoot, 2000);
   const files = entries.filter((entry) => entry.type === "file");
-  const filePaths = new Set(files.map((entry) => entry.path));
   const evidence = new Set();
-  const warnings = [];
+  const warnings = truncated ? ["Language scan truncated after 2000 file-tree entries."] : [];
 
   let git = false;
   try {
-    git = (await fs.stat(path.join(projectRoot, ".git"))).isDirectory();
+    await fs.stat(path.join(projectRoot, ".git"));
+    git = true;
   } catch (error) {
-    if (error.code !== "ENOENT") warnings.push(`Could not inspect .git: ${error.message}`);
+    if (error.code !== "ENOENT") throw error;
   }
 
   let packageManager = null;
   for (const [lockfile, manager] of packageManagers) {
-    if (!filePaths.has(lockfile)) continue;
-    evidence.add(lockfile);
-    if (packageManager === null) packageManager = manager;
+    try {
+      if (!(await fs.stat(path.join(projectRoot, lockfile))).isFile()) continue;
+      evidence.add(lockfile);
+      if (packageManager === null) packageManager = manager;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
   }
 
   let packageManifest = null;
-  if (filePaths.has("package.json")) {
+  try {
+    const packageJson = await fs.readFile(path.join(projectRoot, "package.json"), "utf8");
     evidence.add("package.json");
     try {
-      packageManifest = JSON.parse(await fs.readFile(path.join(projectRoot, "package.json"), "utf8"));
+      packageManifest = JSON.parse(packageJson);
       if (packageManager === null) packageManager = "npm";
     } catch (error) {
       warnings.push(`Could not read package.json: ${error.message}`);
     }
+  } catch (error) {
+    if (error.code !== "ENOENT") warnings.push(`Could not read package.json: ${error.message}`);
   }
 
   const languageCounts = new Map();

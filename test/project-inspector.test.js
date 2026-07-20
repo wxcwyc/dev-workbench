@@ -65,3 +65,34 @@ test("falls back to npm and sorts languages by frequency then name", async (cont
   assert.deepEqual(result.languages, ["JavaScript", "Python", "TypeScript"]);
   assert.deepEqual(result.frameworks, ["Vite"]);
 });
+
+test("detects root package metadata when the language scan is truncated", async (context) => {
+  const projectRoot = await createProject(context);
+  const crowdedDirectory = path.join(projectRoot, "a-crowded-directory");
+  await fs.mkdir(crowdedDirectory);
+  await Promise.all(Array.from(
+    { length: 1999 },
+    (_, index) => fs.mkdir(path.join(crowdedDirectory, `entry-${String(index).padStart(4, "0")}`))
+  ));
+  await fs.writeFile(path.join(projectRoot, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  await fs.writeFile(path.join(projectRoot, "package.json"), JSON.stringify({
+    dependencies: { next: "latest" }
+  }));
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(result.packageManager, "pnpm");
+  assert.deepEqual(result.frameworks, ["Next.js"]);
+  assert.ok(result.evidence.includes("package.json"));
+  assert.ok(result.evidence.includes("pnpm-lock.yaml"));
+  assert.deepEqual(result.warnings, ["Language scan truncated after 2000 file-tree entries."]);
+});
+
+test("recognizes a Git worktree metadata file", async (context) => {
+  const projectRoot = await createProject(context);
+  await fs.writeFile(path.join(projectRoot, ".git"), "gitdir: ../.git/worktrees/example\n");
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(result.git, true);
+});
