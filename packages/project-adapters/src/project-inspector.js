@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { captureFileTree } from "./file-tree.js";
 
+const maxPackageJsonSize = 1024 * 1024;
+
 const packageManagers = [
   ["pnpm-lock.yaml", "pnpm"],
   ["yarn.lock", "yarn"],
@@ -39,43 +41,63 @@ const frameworksByDependency = new Map([
   ["express", "Express"]
 ]);
 
+async function inspectOptionalEntry(projectRoot, name, warnings) {
+  try {
+    const entry = await fs.lstat(path.join(projectRoot, name));
+    if (entry.isSymbolicLink()) {
+      warnings.push(`Ignored ${name}: symbolic links are not allowed.`);
+      return null;
+    }
+    return entry;
+  } catch (error) {
+    if (error.code !== "ENOENT") warnings.push(`Could not inspect ${name}: ${error.message}`);
+    return null;
+  }
+}
+
 export async function inspectProject(projectRoot) {
   const { entries, truncated } = await captureFileTree(projectRoot, 2000);
   const files = entries.filter((entry) => entry.type === "file");
   const evidence = new Set();
   const warnings = truncated ? ["Language scan truncated after 2000 file-tree entries."] : [];
 
-  let git = false;
-  try {
-    await fs.stat(path.join(projectRoot, ".git"));
-    git = true;
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  const gitEntry = await inspectOptionalEntry(projectRoot, ".git", warnings);
+  const git = gitEntry?.isFile() || gitEntry?.isDirectory() || false;
+  if (gitEntry && !git) {
+    warnings.push("Ignored .git: expected a regular file or directory.");
   }
 
   let packageManager = null;
   for (const [lockfile, manager] of packageManagers) {
-    try {
-      if (!(await fs.stat(path.join(projectRoot, lockfile))).isFile()) continue;
-      evidence.add(lockfile);
-      if (packageManager === null) packageManager = manager;
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+    const lockfileEntry = await inspectOptionalEntry(projectRoot, lockfile, warnings);
+    if (!lockfileEntry) continue;
+    if (!lockfileEntry.isFile()) {
+      warnings.push(`Ignored ${lockfile}: expected a regular file.`);
+      continue;
     }
+    evidence.add(lockfile);
+    if (packageManager === null) packageManager = manager;
   }
 
   let packageManifest = null;
-  try {
-    const packageJson = await fs.readFile(path.join(projectRoot, "package.json"), "utf8");
-    evidence.add("package.json");
+  const packageJsonEntry = await inspectOptionalEntry(projectRoot, "package.json", warnings);
+  if (packageJsonEntry && !packageJsonEntry.isFile()) {
+    warnings.push("Ignored package.json: expected a regular file.");
+  } else if (packageJsonEntry?.size > maxPackageJsonSize) {
+    warnings.push(`Ignored package.json: too large (maximum ${maxPackageJsonSize} bytes).`);
+  } else if (packageJsonEntry) {
     try {
-      packageManifest = JSON.parse(packageJson);
-      if (packageManager === null) packageManager = "npm";
+      const packageJson = await fs.readFile(path.join(projectRoot, "package.json"), "utf8");
+      evidence.add("package.json");
+      try {
+        packageManifest = JSON.parse(packageJson);
+        if (packageManager === null) packageManager = "npm";
+      } catch (error) {
+        warnings.push(`Could not read package.json: ${error.message}`);
+      }
     } catch (error) {
       warnings.push(`Could not read package.json: ${error.message}`);
     }
-  } catch (error) {
-    if (error.code !== "ENOENT") warnings.push(`Could not read package.json: ${error.message}`);
   }
 
   const languageCounts = new Map();

@@ -96,3 +96,37 @@ test("recognizes a Git worktree metadata file", async (context) => {
 
   assert.equal(result.git, true);
 });
+
+test("does not follow a package.json symlink outside the project", async (context) => {
+  const projectRoot = await createProject(context);
+  const outsideRoot = await createProject(context);
+  const outsideManifest = path.join(outsideRoot, "outside-package.json");
+  await fs.writeFile(outsideManifest, JSON.stringify({
+    dependencies: { next: "latest" }
+  }));
+  await fs.symlink(outsideManifest, path.join(projectRoot, "package.json"));
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(result.packageManager, null);
+  assert.deepEqual(result.frameworks, []);
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /package\.json.*symbolic link/i);
+});
+
+test("does not read a package.json larger than one MiB", async (context) => {
+  const projectRoot = await createProject(context);
+  await fs.writeFile(path.join(projectRoot, "package.json"), JSON.stringify({
+    dependencies: { next: "latest" },
+    padding: "x".repeat(1_048_576)
+  }));
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(result.packageManager, null);
+  assert.deepEqual(result.frameworks, []);
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /package\.json.*too large/i);
+});
