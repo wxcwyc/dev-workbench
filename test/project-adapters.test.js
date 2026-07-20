@@ -24,7 +24,10 @@ test("file snapshots expose added and modified files", async (context) => {
 test("confirmed command runner uses argv without a shell and stays inside project", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
-  const result = await runConfirmedCommand(root, { command: [process.execPath, "-e", "process.stdout.write('safe')"] });
+  const command = process.platform === "win32"
+    ? [process.execPath, "-e", "process.stdout.write('safe')"]
+    : ["/usr/bin/printf", "%s", "safe"];
+  const result = await runConfirmedCommand(root, { command });
   assert.equal(result.stdout, "safe");
   assert.throws(() => resolveInsideProject(root, "../escape"), /escapes project root/);
   assert.equal(await resolveProjectRoot(root, os.tmpdir()), await fs.realpath(root));
