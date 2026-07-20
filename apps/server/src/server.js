@@ -3,11 +3,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { SessionEngine } from "../../../packages/execution-core/src/session-engine.js";
+import { RecentProjectStore } from "../../../packages/execution-core/src/recent-project-store.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
 import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
 import { ProtocolValidationError, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
 import { resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
+import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
 import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
 import { manifest as prologManifest, prologAdapter } from "../../../packages/prolog-adapter/src/index.js";
 import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot } from "./config.js";
@@ -72,9 +74,14 @@ function traceSteps(trace) {
   }));
 }
 
-export async function createApp() {
+export async function createApp(options = {}) {
+  const runtime = {
+    allowedRoot: options.allowedRoot ?? allowedRoot,
+    stateRoot: options.stateRoot ?? stateRoot
+  };
   const engine = new SessionEngine();
-  const store = new SessionStore(stateRoot);
+  const store = new SessionStore(runtime.stateRoot);
+  const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"));
   const events = new EventEmitter();
   const runningSessions = new Set();
   await store.initialize();
@@ -88,7 +95,10 @@ export async function createApp() {
 
   async function createSession(input) {
     assertSessionInput(input);
-    const resolvedRoot = await resolveProjectRoot(input.projectRoot, allowedRoot);
+    const candidateRoot = path.isAbsolute(input.projectRoot)
+      ? input.projectRoot
+      : path.join(runtime.allowedRoot, input.projectRoot);
+    const resolvedRoot = await resolveProjectRoot(candidateRoot, runtime.allowedRoot);
     const steps = input.trace ? traceSteps(input.trace) : input.steps ?? [];
     const session = engine.create({ ...input, projectRoot: resolvedRoot, steps });
     if (input.trace?.length) {
@@ -99,6 +109,11 @@ export async function createApp() {
       engine.seek(session, 0);
     }
     await store.save(session);
+    try {
+      await recentProjects.record({ projectRoot: resolvedRoot, workbench: input.workbench });
+    } catch (error) {
+      console.warn(`Could not record recent project ${resolvedRoot}: ${error.message}`);
+    }
     emit(session);
     return publicSession(session);
   }
@@ -132,8 +147,18 @@ export async function createApp() {
     try {
       const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
       const pathname = url.pathname;
-      if (request.method === "GET" && pathname === "/api/health") return sendJson(response, 200, { ok: true, version: "0.1.0", allowedRoot });
+      if (request.method === "GET" && pathname === "/api/health") return sendJson(response, 200, { ok: true, version: "0.1.0", allowedRoot: runtime.allowedRoot });
       if (request.method === "GET" && pathname === "/api/adapters") return sendJson(response, 200, [prologManifest]);
+      if (request.method === "GET" && pathname === "/api/projects/recent") return sendJson(response, 200, await recentProjects.list());
+      if (request.method === "POST" && pathname === "/api/projects/inspect") {
+        const body = await readJson(request);
+        if (typeof body.projectRoot !== "string" || !body.projectRoot.trim()) throw new Error("projectRoot must be a non-empty string");
+        const candidateRoot = path.isAbsolute(body.projectRoot)
+          ? body.projectRoot
+          : path.join(runtime.allowedRoot, body.projectRoot);
+        const resolvedRoot = await resolveProjectRoot(candidateRoot, runtime.allowedRoot);
+        return sendJson(response, 200, await inspectProject(resolvedRoot));
+      }
       if (request.method === "GET" && pathname === "/api/sessions") {
         const sessions = await store.list();
         return sendJson(response, 200, sessions.map(({ snapshots, events: sessionEvents, ...session }) => ({ ...session, snapshotCount: snapshots.length, eventCount: sessionEvents.length })));
