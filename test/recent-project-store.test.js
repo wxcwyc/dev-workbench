@@ -76,6 +76,7 @@ test("list rejects non-array state and filters malformed entries", async (t) => 
     { ...valid, projectRoot: "" },
     { ...valid, workbench: "other" },
     { ...valid, lastUsedAt: "" },
+    { ...valid, lastUsedAt: "not-a-date" },
     null,
   ];
   await fs.writeFile(store.filePath, JSON.stringify([valid, ...malformed]), "utf8");
@@ -83,4 +84,31 @@ test("list rejects non-array state and filters malformed entries", async (t) => 
   assert.deepEqual(await store.list(), [valid]);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /recent projects.*malformed/i);
+});
+
+test("list and record keep only the recent-project schema fields", async (t) => {
+  const store = await makeStore(t);
+  const stored = {
+    projectRoot: "/projects/existing",
+    workbench: "execution",
+    lastUsedAt: "2026-07-20T08:00:00.000Z",
+    extra: "must not escape storage",
+  };
+
+  await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+  await fs.writeFile(store.filePath, JSON.stringify([stored]), "utf8");
+
+  assert.deepEqual(await store.list(), [{
+    projectRoot: stored.projectRoot,
+    workbench: stored.workbench,
+    lastUsedAt: stored.lastUsedAt,
+  }]);
+
+  await store.record({ projectRoot: "/projects/new", workbench: "migration" });
+  const persisted = JSON.parse(await fs.readFile(store.filePath, "utf8"));
+  assert.deepEqual(persisted[1], {
+    projectRoot: stored.projectRoot,
+    workbench: stored.workbench,
+    lastUsedAt: stored.lastUsedAt,
+  });
 });

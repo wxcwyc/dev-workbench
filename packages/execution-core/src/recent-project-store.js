@@ -7,12 +7,26 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+function isIsoTimestamp(value) {
+  if (!isNonEmptyString(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
 function isRecentProject(entry) {
   return entry !== null
     && typeof entry === "object"
     && isNonEmptyString(entry.projectRoot)
     && WORKBENCHES.has(entry.workbench)
-    && isNonEmptyString(entry.lastUsedAt);
+    && isIsoTimestamp(entry.lastUsedAt);
+}
+
+function normalizeRecentProject(entry) {
+  return {
+    projectRoot: entry.projectRoot,
+    workbench: entry.workbench,
+    lastUsedAt: entry.lastUsedAt,
+  };
 }
 
 export class RecentProjectStore {
@@ -44,7 +58,7 @@ export class RecentProjectStore {
     if (entries.length !== state.length) {
       this.warn(`Recent projects state contains malformed entries: ${this.filePath}`);
     }
-    return entries.map((entry) => ({ ...entry }));
+    return entries.map(normalizeRecentProject);
   }
 
   async record({ projectRoot, workbench }) {
@@ -61,6 +75,6 @@ export class RecentProjectStore {
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     await fs.writeFile(temporary, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
     await fs.rename(temporary, this.filePath);
-    return entries.map((entry) => ({ ...entry }));
+    return entries.map(normalizeRecentProject);
   }
 }
