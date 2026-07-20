@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/adapter-manifest.schema.json",
+  "title": "Dev Workbench Adapter Manifest v1",
+  "type": "object",
+  "required": ["id", "name", "version", "protocolVersion", "capabilities"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "protocolVersion": { "const": "1.0" },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["trace", "artifacts", "source-locations"] }
+    },
+    "description": { "type": "string" }
+  },
+  "additionalProperties": false
+}

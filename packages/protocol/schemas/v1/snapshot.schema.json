@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/snapshot.schema.json",
+  "title": "Dev Workbench Snapshot v1",
+  "type": "object",
+  "properties": {
+    "trace": { "type": "object" },
+    "files": { "type": "array" },
+    "changes": { "type": "array" },
+    "git": { "type": ["object", "null"] },
+    "command": { "type": ["object", "null"] },
+    "artifacts": { "type": "array", "items": { "$ref": "artifact.schema.json" } }
+  },
+  "additionalProperties": true
+}

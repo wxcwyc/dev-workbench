@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/session.schema.json",
+  "title": "Dev Workbench Session Input v1",
+  "type": "object",
+  "required": ["title", "workbench", "projectRoot"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "workbench": { "enum": ["execution", "migration"] },
+    "projectRoot": { "type": "string", "minLength": 1 },
+    "metadata": { "type": "object" },
+    "steps": { "type": "array", "items": { "$ref": "step.schema.json" } },
+    "trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["state"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "enum": ["evaluation", "branch", "failure", "backtrack", "solution"] },
+          "title": { "type": "string", "minLength": 1 },
+          "explanation": { "type": "string" },
+          "state": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "not": { "required": ["steps", "trace"] },
+  "additionalProperties": false
+}

@@ -1,0 +1,8 @@
+.timeline button.trace-branch { background: #b87926; }
+.timeline button.trace-failure { background: var(--danger); }
+.timeline button.trace-backtrack { background: #9b56d9; }
+.timeline button.trace-solution { background: #38c8d9; }
+.trace-heading { border: 1px solid #28543b; border-bottom: 0; padding: 7px 10px; }
+.trace-heading strong { color: var(--gold); text-transform: uppercase; }
+.trace-heading.trace-failure,
+.trace-heading.trace-backtrack { border-color: var(--danger); }

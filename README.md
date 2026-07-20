@@ -77,6 +77,27 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 
 命令必须是 argv 数组，不接受 shell 字符串。工作目录必须位于项目根目录内，每一步都需要在 UI 中确认后才执行。
 
+## 流式提交 Trace
+
+先创建一个空的 Execution 会话，然后向 `/api/sessions/{sessionId}/trace` 提交 `application/json` 或 `application/x-ndjson`。事件的 `sequence` 必须从当前步骤数开始连续递增：
+
+```json
+{"protocolVersion":"1.0","sessionId":"SESSION_ID","sequence":0,"kind":"branch","title":"Choose rule","state":{"goals":["parent(X, Y)"]}}
+```
+
+服务会逐条校验、持久化并通过会话 SSE 更新 UI。若 NDJSON 中途出现坏行，响应会返回已接受的事件数量，之前的事件不会回滚或丢失。
+
+内置逻辑示例由 `packages/prolog-adapter` 中的 Prolog runtime 实时执行，不再读取手写 trace。也可以为已有 Execution 会话生成 NDJSON：
+
+```bash
+node packages/prolog-adapter/src/cli.js \
+  --source examples/logic-trace/program.pl \
+  --query "grandfather(X, Y)?" \
+  --session SESSION_ID
+```
+
+当前 runtime 支持纯 Horn 子集：事实、规则、原子与复合项、变量、合一、深度优先搜索和回溯；暂不支持 cut、否定、算术、动态谓词或 SWI-Prolog 内建谓词。可通过 `GET /api/adapters` 查询 manifest 和 capability。
+
 ## 当前能力
 
 - 不可变步骤事件和 JSON 会话持久化；
@@ -87,7 +108,7 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 - 同一会话互斥运行；
 - SSE 实时更新；
 - 两个独立工作台和可导入协议；
-- 内置 Prolog 风格 trace 与框架迁移示例。
+- 内置 Prolog runtime trace 与框架迁移示例。
 
 ## 测试
 

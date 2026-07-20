@@ -4,10 +4,12 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { SessionEngine } from "../../../packages/execution-core/src/session-engine.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
-import { publicSession } from "../../../packages/protocol/src/index.js";
+import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
+import { ProtocolValidationError, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
 import { resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
 import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
+import { manifest as prologManifest, prologAdapter } from "../../../packages/prolog-adapter/src/index.js";
 import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot } from "./config.js";
 
 const mimeTypes = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8" };
@@ -26,6 +28,22 @@ async function readJson(request, limit = 1024 * 1024) {
     chunks.push(chunk);
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+}
+
+async function* readTraceEvents(request) {
+  const contentType = request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType === "application/x-ndjson" || contentType === "application/ndjson") {
+    yield* decodeNdjson(request);
+    return;
+  }
+  if (contentType === "application/json") {
+    const body = await readJson(request);
+    for (const value of Array.isArray(body) ? body : [body]) yield assertTraceEvent(value);
+    return;
+  }
+  const error = new Error("Trace ingestion requires application/json or application/x-ndjson");
+  error.statusCode = 415;
+  throw error;
 }
 
 async function serveStatic(response, pathname) {
@@ -49,7 +67,8 @@ function traceSteps(trace) {
     id: item.id ?? `trace-${index + 1}`,
     title: item.title ?? `Evaluation ${index + 1}`,
     description: item.explanation ?? "",
-    traceState: item.state
+    traceState: item.state,
+    traceKind: item.kind ?? "evaluation"
   }));
 }
 
@@ -68,6 +87,7 @@ export async function createApp() {
   };
 
   async function createSession(input) {
+    assertSessionInput(input);
     const resolvedRoot = await resolveProjectRoot(input.projectRoot, allowedRoot);
     const steps = input.trace ? traceSteps(input.trace) : input.steps ?? [];
     const session = engine.create({ ...input, projectRoot: resolvedRoot, steps });
@@ -87,7 +107,25 @@ export async function createApp() {
     if (!/^[a-z-]+$/.test(name)) throw new Error("Invalid example name");
     const input = JSON.parse(await fs.readFile(path.join(examplesRoot, name, "session.json"), "utf8"));
     input.projectRoot = path.join(examplesRoot, name);
-    return createSession(input);
+    const session = await createSession(input);
+    if (name !== "logic-trace") return session;
+
+    const sourcePath = path.join(examplesRoot, name, input.metadata.sourceFile);
+    const source = await fs.readFile(sourcePath, "utf8");
+    const stored = await requireSession(session.id);
+    engine.startTraceStream(stored); await store.save(stored); emit(stored);
+    try {
+      for await (const traceEvent of prologAdapter.run({
+        sessionId: stored.id, source, sourcePath: input.metadata.sourceFile, query: input.metadata.query
+      })) {
+        engine.appendTraceEvent(stored, traceEvent); await store.save(stored); emit(stored);
+      }
+      engine.finishTraceStream(stored); await store.save(stored); emit(stored);
+      return publicSession(stored);
+    } catch (error) {
+      engine.finishTraceStream(stored, error); await store.save(stored); emit(stored);
+      throw error;
+    }
   }
 
   return http.createServer(async (request, response) => {
@@ -95,6 +133,7 @@ export async function createApp() {
       const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
       const pathname = url.pathname;
       if (request.method === "GET" && pathname === "/api/health") return sendJson(response, 200, { ok: true, version: "0.1.0", allowedRoot });
+      if (request.method === "GET" && pathname === "/api/adapters") return sendJson(response, 200, [prologManifest]);
       if (request.method === "GET" && pathname === "/api/sessions") {
         const sessions = await store.list();
         return sendJson(response, 200, sessions.map(({ snapshots, events: sessionEvents, ...session }) => ({ ...session, snapshotCount: snapshots.length, eventCount: sessionEvents.length })));
@@ -118,6 +157,30 @@ export async function createApp() {
         request.on("close", () => { clearInterval(heartbeat); events.off(`session:${session.id}`, listener); });
         send(publicSession(session));
         return;
+      }
+
+      const traceMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/trace$/i);
+      if (request.method === "POST" && traceMatch) {
+        const id = traceMatch[1];
+        if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
+        const session = await requireSession(id);
+        let accepted = 0;
+        let started = false;
+        runningSessions.add(id);
+        try {
+          engine.startTraceStream(session); started = true; await store.save(session); emit(session);
+          for await (const traceEvent of readTraceEvents(request)) {
+            engine.appendTraceEvent(session, traceEvent);
+            await store.save(session); emit(session);
+            accepted += 1;
+          }
+          engine.finishTraceStream(session); await store.save(session); emit(session);
+          return sendJson(response, 202, { accepted, nextSequence: session.steps.length, status: session.status });
+        } catch (error) {
+          if (started) { engine.finishTraceStream(session, error); await store.save(session); emit(session); }
+          error.accepted = accepted;
+          throw error;
+        } finally { runningSessions.delete(id); }
       }
 
       const seekMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/seek$/i);
@@ -164,7 +227,11 @@ export async function createApp() {
       if (request.method === "GET" && await serveStatic(response, pathname)) return;
       sendJson(response, 404, { error: "Not found" });
     } catch (error) {
-      sendJson(response, error.statusCode ?? 400, { error: error.message });
+      const details = error instanceof ProtocolValidationError ? error.issues : undefined;
+      sendJson(response, error.statusCode ?? 400, {
+        error: error.message, ...(details ? { details } : {}),
+        ...(Number.isInteger(error.accepted) ? { accepted: error.accepted } : {})
+      });
     }
   });
 }

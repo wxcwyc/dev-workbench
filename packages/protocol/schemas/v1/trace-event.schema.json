@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/trace-event.schema.json",
+  "title": "Dev Workbench Trace Event v1",
+  "type": "object",
+  "required": ["protocolVersion", "sessionId", "sequence", "kind", "title", "state"],
+  "properties": {
+    "protocolVersion": { "const": "1.0" },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "kind": { "enum": ["evaluation", "branch", "failure", "backtrack", "solution"] },
+    "title": { "type": "string", "minLength": 1 },
+    "explanation": { "type": "string" },
+    "state": { "type": "object" },
+    "artifacts": { "type": "array", "items": { "$ref": "artifact.schema.json" } }
+  },
+  "additionalProperties": false
+}

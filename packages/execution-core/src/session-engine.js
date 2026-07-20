@@ -10,7 +10,8 @@ function normalizeStep(step, index) {
     id: step.id ?? `step-${String(index + 1).padStart(2, "0")}`,
     title: step.title.trim(), description: step.description?.trim() ?? "",
     action: step.action ?? null, expected: step.expected ?? null,
-    traceState: step.traceState ?? null, status: "pending",
+    traceState: step.traceState ?? null, traceKind: step.traceKind ?? null,
+    artifacts: step.artifacts ?? [], adapterSequence: step.adapterSequence ?? null, status: "pending",
     startedAt: null, completedAt: null, error: null
   };
 }
@@ -32,6 +33,52 @@ export class SessionEngine {
 
   nextRunnable(session) {
     return session.steps.findIndex((step) => ["pending", "failed"].includes(step.status));
+  }
+
+  startTraceStream(session) {
+    if (session.workbench !== "execution") throw new Error("Trace events require an execution session");
+    session.status = "running";
+    session.events.push(event("trace.stream.started", { nextSequence: session.steps.length }));
+    this.touch(session);
+  }
+
+  appendTraceEvent(session, traceEvent) {
+    if (session.workbench !== "execution") throw new Error("Trace events require an execution session");
+    const expectedSequence = session.steps.length;
+    if (traceEvent.sessionId !== session.id) throw new Error(`Trace event sessionId must equal ${session.id}`);
+    if (traceEvent.sequence !== expectedSequence) throw new Error(`Expected trace sequence ${expectedSequence}, received ${traceEvent.sequence}`);
+
+    const followLatest = session.cursor === expectedSequence - 1;
+    const capturedAt = timestamp();
+    const step = normalizeStep({
+      id: `trace-${traceEvent.sequence + 1}`,
+      title: traceEvent.title,
+      description: traceEvent.explanation,
+      traceState: traceEvent.state,
+      traceKind: traceEvent.kind,
+      artifacts: traceEvent.artifacts,
+      adapterSequence: traceEvent.sequence
+    }, expectedSequence);
+    Object.assign(step, { status: "completed", startedAt: capturedAt, completedAt: capturedAt });
+    session.steps.push(step);
+    session.snapshots[expectedSequence] = {
+      trace: structuredClone(traceEvent.state), artifacts: structuredClone(traceEvent.artifacts ?? []),
+      traceKind: traceEvent.kind, stepIndex: expectedSequence, capturedAt
+    };
+    if (followLatest) session.cursor = expectedSequence;
+    session.events.push(event("trace.event.appended", {
+      stepIndex: expectedSequence, stepId: step.id, sequence: traceEvent.sequence, kind: traceEvent.kind
+    }));
+    this.touch(session);
+    return step;
+  }
+
+  finishTraceStream(session, error = null) {
+    session.status = error ? "failed" : (session.steps.length ? "completed" : "ready");
+    session.events.push(event(error ? "trace.stream.failed" : "trace.stream.completed", {
+      eventCount: session.steps.length, ...(error ? { error: { name: error.name, message: error.message } } : {})
+    }));
+    this.touch(session);
   }
 
   startStep(session, index) {

@@ -7,10 +7,23 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 下一阶段 |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
+
+## 当前开发进度（2026-07-20）
+
+Phase 1 的 Milestone 1 已完成首个可运行版本：
+
+- 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
+- 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
+- 提供 JSON/NDJSON 流式 ingestion，逐事件校验、持久化和 SSE 发布，并保留失败前已接收的历史；
+- 实现零依赖纯 Horn 子集 Prolog runtime adapter，覆盖解析、规则选择、合一、choice point、失败、回溯、源码位置和多解搜索；
+- Execution Explorer 已区分 evaluation、branch、failure、backtrack 和 solution，并展示合一与回溯证据；
+- 内置逻辑示例已从静态手写 trace 切换为 runtime 实际执行。
+
+当前自动化回归共 16 项，覆盖协议、SDK、NDJSON、SessionEngine、项目适配器和 Prolog runtime。下一步进入 Milestone 2，优先完成真实项目接入和迁移计划生命周期。
 
 ## Phase 0：交互与架构验证
 
@@ -170,6 +183,8 @@ Prolog adapter 至少产生：
 
 ### Milestone 1：协议与真实 Execution Adapter
 
+状态：已实现首个可运行版本。当前 Prolog adapter 覆盖纯 Horn 子集，SWI-Prolog 内建谓词桥接留待后续 adapter 扩展。
+
 1. 固化 v1 JSON Schema；
 2. Adapter manifest 与 SDK；
 3. 流式 trace ingestion；
@@ -179,6 +194,8 @@ Prolog adapter 至少产生：
 交付结果：Execution Explorer 可以用于一个真实解释器。
 
 ### Milestone 2：真实 Migration Runtime
+
+状态：下一步。
 
 1. UI 项目接入；
 2. 迁移计划编辑器；

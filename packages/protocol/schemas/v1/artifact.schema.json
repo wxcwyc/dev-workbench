@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/artifact.schema.json",
+  "title": "Dev Workbench Artifact v1",
+  "type": "object",
+  "required": ["id", "type", "label"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "type": { "enum": ["source", "log", "result", "diff", "custom"] },
+    "label": { "type": "string", "minLength": 1 },
+    "uri": { "type": "string", "minLength": 1 },
+    "data": {}
+  },
+  "additionalProperties": false
+}

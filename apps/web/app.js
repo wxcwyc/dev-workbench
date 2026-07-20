@@ -18,7 +18,7 @@ function renderSessions(){
 }
 
 function renderTimeline(session){
-  $("#timeline").innerHTML=session.steps.map((step,index)=>`<button title="${escapeHtml(step.title)}" class="${step.status} ${index===session.cursor?"current":""}" data-index="${index}" ${!session.snapshots[index]&&!step.traceState?"disabled":""}></button>`).join("");
+  $("#timeline").innerHTML=session.steps.map((step,index)=>`<button title="${escapeHtml(step.traceKind?`${step.traceKind}: ${step.title}`:step.title)}" class="${step.status} trace-${escapeHtml(step.traceKind??"")} ${index===session.cursor?"current":""}" data-index="${index}" ${!session.snapshots[index]&&!step.traceState?"disabled":""}></button>`).join("");
   document.querySelectorAll("#timeline button:not(:disabled)").forEach((button)=>button.onclick=()=>seek(Number(button.dataset.index)));
   $("#step-counter").textContent=session.cursor<0?`Before start · ${session.steps.length} steps`:`Step ${session.cursor+1} of ${session.steps.length}`;
   $("#previous").disabled=session.cursor<=0;
@@ -30,8 +30,12 @@ function renderTimeline(session){
 
 function renderExecution(session){
   const trace=currentTrace(session)??{};
+  const step=session.steps[session.cursor];
   const program=trace.program??[];
-  $("#execution-view").innerHTML=`<div class="grid-two"><section class="panel"><div class="panel-title">Program</div><div class="panel-body">${program.map((line,index)=>`<div class="code-line ${trace.currentLine===index+1?"active":""}">${String(index+1).padStart(2,"0")} ${escapeHtml(line)}</div>`).join("")||`<span class="muted">No program state</span>`}</div></section><section class="panel"><div class="panel-title">Stack & goals</div><div class="panel-body">${(trace.stack??[]).map((frame,index)=>`<div class="goal"><strong>R${(trace.stack.length-index)} ${escapeHtml(frame.rule)}</strong><div>Goals: ${escapeHtml((frame.goals??[]).join(", ")||"✓ complete")}</div><div>Bindings: ${escapeHtml(JSON.stringify(frame.bindings??{}))}</div></div>`).join("")}<p>Current goals: <strong>${escapeHtml((trace.goals??[]).join(", ")||"none")}</strong></p>${trace.result?`<div class="result">Result: ${escapeHtml(trace.result)}</div>`:""}</div></section></div>`;
+  const unification=trace.unification?`<div class="goal"><strong>Unification ${trace.unification.succeeded?"succeeded":"failed"}</strong><div>${escapeHtml(trace.unification.goal)} ⇔ ${escapeHtml(trace.unification.head)}</div><div>Before: ${escapeHtml(JSON.stringify(trace.unification.before))}</div><div>After: ${escapeHtml(JSON.stringify(trace.unification.after))}</div></div>`:"";
+  const choicePoint=trace.choicePoint?`<div class="goal"><strong>Choice point: ${escapeHtml(trace.choicePoint.goal)}</strong>${trace.choicePoint.candidates.map((candidate)=>`<div>Line ${candidate.line}: ${escapeHtml(candidate.rule)}</div>`).join("")}</div>`:"";
+  const backtracking=trace.backtracking?`<div class="goal"><strong>Backtracking</strong><div>From: ${escapeHtml(trace.backtracking.fromRule)}</div><div>Reason: ${escapeHtml(trace.backtracking.reason)}</div></div>`:"";
+  $("#execution-view").innerHTML=`${step?.traceKind?`<div class="trace-heading trace-${escapeHtml(step.traceKind)}"><strong>${escapeHtml(step.traceKind)}</strong> ${escapeHtml(step.title)}${step.description?` · ${escapeHtml(step.description)}`:""}</div>`:""}<div class="grid-two"><section class="panel"><div class="panel-title">Program</div><div class="panel-body">${program.map((line,index)=>`<div class="code-line ${trace.currentLine===index+1?"active":""}">${String(index+1).padStart(2,"0")} ${escapeHtml(line)}</div>`).join("")||`<span class="muted">No program state</span>`}</div></section><section class="panel"><div class="panel-title">Stack, goals & evidence</div><div class="panel-body">${(trace.stack??[]).map((frame,index)=>`<div class="goal"><strong>R${(trace.stack.length-index)} ${escapeHtml(frame.rule)}</strong><div>Goals: ${escapeHtml((frame.goals??[]).join(", ")||"✓ complete")}</div><div>Bindings: ${escapeHtml(JSON.stringify(frame.bindings??{}))}</div></div>`).join("")}<p>Current goals: <strong>${escapeHtml((trace.goals??[]).join(", ")||"none")}</strong></p><p>Query bindings: <strong>${escapeHtml(JSON.stringify(trace.bindings??{}))}</strong></p>${unification}${choicePoint}${backtracking}${trace.failureReason?`<div class="goal"><strong>Failure: ${escapeHtml(trace.failureReason)}</strong></div>`:""}${trace.result?`<div class="result">Result: ${escapeHtml(trace.result)}</div>`:""}</div></section></div>`;
 }
 
 function renderTree(snapshot){
