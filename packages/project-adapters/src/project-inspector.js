@@ -68,6 +68,22 @@ async function readProjectRootIdentity(projectRoot) {
   return { device: entry.dev, inode: entry.ino };
 }
 
+export async function readBoundedFileHandle(handle, maximumSize) {
+  const content = Buffer.alloc(maximumSize + 1);
+  let totalBytesRead = 0;
+  while (totalBytesRead < content.length) {
+    const { bytesRead } = await handle.read(
+      content,
+      totalBytesRead,
+      content.length - totalBytesRead,
+      null,
+    );
+    if (bytesRead === 0) return content.subarray(0, totalBytesRead);
+    totalBytesRead += bytesRead;
+  }
+  throw new Error(`File is too large (maximum ${maximumSize} bytes).`);
+}
+
 async function readPackageJson(projectRoot, initialEntry, warnings) {
   const packagePath = path.join(projectRoot, "package.json");
   let packageHandle;
@@ -86,7 +102,7 @@ async function readPackageJson(projectRoot, initialEntry, warnings) {
       warnings.push(`Ignored package.json: too large (maximum ${maxPackageJsonSize} bytes).`);
       return null;
     }
-    return await packageHandle.readFile("utf8");
+    return (await readBoundedFileHandle(packageHandle, maxPackageJsonSize)).toString("utf8");
   } catch (error) {
     warnings.push(`Could not read package.json: ${error.message}`);
     return null;

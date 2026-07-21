@@ -11,6 +11,28 @@ async function createProject(context) {
   return projectRoot;
 }
 
+function createPartialReadHandle(content, chunkSizes = []) {
+  const source = Buffer.from(content);
+  const calls = [];
+  let sourceOffset = 0;
+  let chunkIndex = 0;
+  return {
+    calls,
+    async read(buffer, offset, length, position) {
+      const call = { offset, length, position, bytesRead: 0 };
+      calls.push(call);
+      const requestedChunk = chunkSizes[chunkIndex++] ?? length;
+      const bytesRead = Math.min(requestedChunk, length, source.length - sourceOffset);
+      call.bytesRead = bytesRead;
+      if (bytesRead > 0) {
+        source.copy(buffer, offset, sourceOffset, sourceOffset + bytesRead);
+        sourceOffset += bytesRead;
+      }
+      return { bytesRead, buffer };
+    },
+  };
+}
+
 test("inspects a pnpm Next.js TypeScript project", async (context) => {
   const projectRoot = await createProject(context);
   await fs.mkdir(path.join(projectRoot, ".git"));
@@ -167,7 +189,7 @@ test("warns and closes the handle when package.json cannot be read", async (cont
     if (path.resolve(target) !== packagePath) return originalOpen(target, ...args);
     return {
       stat: () => fs.stat(packagePath),
-      readFile: async () => { throw new Error("read denied"); },
+      read: async () => { throw new Error("read denied"); },
       close: async () => { closed = true; },
     };
   });
@@ -179,6 +201,32 @@ test("warns and closes the handle when package.json cannot be read", async (cont
   assert.ok(result.warnings.some((warning) => /package\.json.*read denied/i.test(warning)));
 });
 
+test("rejects package.json growth after a small handle stat", async (context) => {
+  const projectRoot = await createProject(context);
+  const packagePath = path.join(projectRoot, "package.json");
+  const maximumSize = 1024 * 1024;
+  await fs.writeFile(packagePath, "{}\n");
+  const growingHandle = createPartialReadHandle(
+    Buffer.alloc(maximumSize + 1, "x"),
+    [2, 3, maximumSize],
+  );
+  growingHandle.stat = () => fs.stat(packagePath);
+  growingHandle.close = async () => { growingHandle.closed = true; };
+  const originalOpen = fs.open.bind(fs);
+  context.mock.method(fs, "open", async (target, ...args) => {
+    if (path.resolve(target) === packagePath) return growingHandle;
+    return originalOpen(target, ...args);
+  });
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(growingHandle.closed, true);
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.ok(result.warnings.some((warning) => /package\.json.*too large/i.test(warning)));
+  assert.ok(growingHandle.calls.every(({ offset, length }) => offset + length <= maximumSize + 1));
+  assert.equal(growingHandle.calls.reduce((total, { bytesRead }) => total + bytesRead, 0), maximumSize + 1);
+});
+
 test("reads package.json only through a bounded no-follow file handle", async () => {
   const source = await fs.readFile(
     new URL("../packages/project-adapters/src/project-inspector.js", import.meta.url),
@@ -187,9 +235,40 @@ test("reads package.json only through a bounded no-follow file handle", async ()
 
   assert.match(source, /fs\.open\([^\n]+O_NOFOLLOW/);
   assert.match(source, /packageHandle\.stat\(/);
-  assert.match(source, /packageHandle\.readFile\(/);
+  assert.match(source, /\.read\(/);
   assert.match(source, /packageHandle\.close\(/);
+  assert.doesNotMatch(source, /packageHandle\.readFile\(/);
   assert.doesNotMatch(source, /fs\.readFile\(path\.join\(projectRoot,\s*["']package\.json["']/);
+});
+
+test("bounded handle reads combine partial reads through EOF", async () => {
+  const { readBoundedFileHandle } = await import("../packages/project-adapters/src/project-inspector.js");
+  assert.equal(typeof readBoundedFileHandle, "function");
+  const handle = createPartialReadHandle('{"dependencies":{"react":"latest"}}', [1, 2, 3, 5, 8]);
+
+  const content = await readBoundedFileHandle(handle, 64);
+
+  assert.deepEqual(JSON.parse(content.toString("utf8")), {
+    dependencies: { react: "latest" },
+  });
+  assert.ok(handle.calls.length > 1);
+  assert.equal(handle.calls.at(-1).position, null);
+});
+
+test("bounded handle reads reject growth beyond the limit without reading past max plus one", async () => {
+  const { readBoundedFileHandle } = await import("../packages/project-adapters/src/project-inspector.js");
+  assert.equal(typeof readBoundedFileHandle, "function");
+  const maximumSize = 5;
+  const handle = createPartialReadHandle("123456", [2, 1, 3]);
+
+  await assert.rejects(
+    readBoundedFileHandle(handle, maximumSize),
+    /too large.*5 bytes/i,
+  );
+
+  assert.ok(handle.calls.every(({ offset, length }) => offset + length <= maximumSize + 1));
+  assert.equal(Math.max(...handle.calls.map(({ offset, length }) => offset + length)), maximumSize + 1);
+  assert.equal(handle.calls.reduce((total, { bytesRead }) => total + bytesRead, 0), maximumSize + 1);
 });
 
 test("inspectProject rejects a project root replaced by a symlink", async (context) => {
