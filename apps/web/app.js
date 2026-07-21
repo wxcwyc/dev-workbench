@@ -1,6 +1,6 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, summarizeOnboarding } from "./onboarding.js";
 
-const state={sessions:[],active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,dialogGeneration:0,creating:false}};
+const state={sessions:[],sessionsRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false}};
 const $=(selector)=>document.querySelector(selector);
 
 async function api(path,options={}){
@@ -48,34 +48,33 @@ function renderRecentProjects(){
   });
 }
 
-async function refreshRecentProjects(){
+async function refreshRecentProjects(reportError=true){
   const generation=state.onboarding.dialogGeneration;
+  const request=++state.onboarding.recentRequest;
   const container=$("#onboarding-recent");
   container.innerHTML=`<span class="muted">Loading recent projects…</span>`;
   try{
     const recent=await api("/api/projects/recent");
-    if(generation!==state.onboarding.dialogGeneration)return;
+    if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return;
     state.onboarding.recent=Array.isArray(recent)?recent:[];
     renderRecentProjects();
   }catch(error){
-    if(generation!==state.onboarding.dialogGeneration)return;
+    if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return;
     state.onboarding.recent=[];
     container.innerHTML=`<span class="inline-error">${escapeHtml(error.message)}</span>`;
-    if($("#project-onboarding").open)setOnboardingStatus(`Could not load recent projects: ${error.message}`,"error");
+    if(reportError&&$("#project-onboarding").open)setOnboardingStatus(`Could not load recent projects: ${error.message}`,"error");
   }
 }
 
 function resetOnboarding(){
   state.onboarding.inspectRequest+=1;
   state.onboarding.importRequest+=1;
-  state.onboarding.creating=false;
   state.onboarding.inspection=null;
   state.onboarding.draft=null;
   $("#project-inspect-form").reset();
   $("#onboarding-session-title").value="";
   $("#onboarding-import").value="";
   $("#onboarding-file").value="";
-  setOnboardingCreating(false);
   document.querySelector('input[name="onboarding-workbench"][value="execution"]').checked=true;
   $("#onboarding-config").disabled=true;
   $("#onboarding-preview-action").disabled=true;
@@ -84,7 +83,8 @@ function resetOnboarding(){
   $("#detection-evidence").replaceChildren();
   $("#detection-warnings").replaceChildren();
   clearOnboardingPreview();
-  setOnboardingStatus("Waiting for project inspection.");
+  setOnboardingCreating(state.onboarding.creating);
+  setOnboardingStatus(state.onboarding.creating?"Session creation is still in progress. You may close this dialog safely.":"Waiting for project inspection.",state.onboarding.creating?"loading":"");
   renderRecentProjects();
 }
 
@@ -92,7 +92,7 @@ function openOnboarding(){
   resetOnboarding();
   $("#project-onboarding").showModal();
   refreshRecentProjects();
-  $("#project-path").focus();
+  $(state.onboarding.creating?"#onboarding-close":"#project-path").focus();
 }
 
 function renderInspection(inspection){
@@ -184,27 +184,38 @@ function previewOnboarding(){
 }
 
 async function createOnboardingSession(){
+  if(state.onboarding.creating)return;
   const draft=state.onboarding.draft;
   if(!draft)return;
   const generation=state.onboarding.dialogGeneration;
+  const request=++state.onboarding.creationRequest;
   setOnboardingCreating(true);
   setOnboardingStatus("Creating session without executing commands…","loading");
   let session;
+  let creationError;
   try{
     session=await api("/api/sessions",{method:"POST",body:JSON.stringify(draft)});
   }catch(error){
-    if(generation!==state.onboarding.dialogGeneration)return;
-    setOnboardingCreating(false);
-    setOnboardingStatus(error.message,"error");
-    return;
+    creationError=error;
+  }finally{
+    if(request===state.onboarding.creationRequest)state.onboarding.creating=false;
+    if(generation!==state.onboarding.dialogGeneration&&request===state.onboarding.creationRequest)setOnboardingCreating(false);
   }
   if(generation!==state.onboarding.dialogGeneration){
-    await Promise.allSettled([refreshSessions()]);
+    if($("#project-onboarding").open)setOnboardingStatus(creationError?`Session creation failed: ${creationError.message}`:"Session created. You can inspect another project.",creationError?"error":"success");
+    await Promise.allSettled([refreshSessions(),refreshRecentProjects(false)]);
+    return;
+  }
+  if(creationError){
+    setOnboardingCreating(state.onboarding.creating);
+    setOnboardingStatus(creationError.message,"error");
     return;
   }
   await Promise.allSettled([refreshSessions(),refreshRecentProjects()]);
-  if(generation!==state.onboarding.dialogGeneration)return;
-  state.onboarding.creating=false;
+  if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.creationRequest){
+    if(request===state.onboarding.creationRequest)setOnboardingCreating(state.onboarding.creating);
+    return;
+  }
   $("#project-onboarding").close();
   try{await openSession(session.id);}catch(error){$("#health").textContent=`session created; open failed: ${error.message}`;}
 }
@@ -269,7 +280,13 @@ function renderSession(session){
   renderSessions();
 }
 
-async function refreshSessions(){state.sessions=await api("/api/sessions");renderSessions();}
+async function refreshSessions(){
+  const request=++state.sessionsRequest;
+  const sessions=await api("/api/sessions");
+  if(request!==state.sessionsRequest)return;
+  state.sessions=sessions;
+  renderSessions();
+}
 async function openSession(id){
   if(state.events)state.events.close();
   renderSession(await api(`/api/sessions/${id}`));
@@ -282,7 +299,7 @@ async function createExample(name){const session=await api(`/api/examples/${name
 $("#open-project").onclick=openOnboarding;
 $("#open-project-mobile").onclick=openOnboarding;
 $("#onboarding-close").onclick=()=>$("#project-onboarding").close();
-$("#project-onboarding").onclose=()=>{state.onboarding.dialogGeneration+=1;state.onboarding.creating=false;};
+$("#project-onboarding").onclose=()=>{state.onboarding.dialogGeneration+=1;};
 $("#project-inspect-form").onsubmit=(event)=>{event.preventDefault();inspectOnboardingProject($("#project-path").value);};
 $("#project-path").oninput=()=>{
   const hadActiveInspection=Boolean(state.onboarding.inspection)||$("#onboarding-inspect").disabled;
@@ -322,7 +339,7 @@ $("#onboarding-file").onchange=async(event)=>{
     $("#onboarding-preview-action").disabled=!state.onboarding.inspection;
     setOnboardingStatus(`Could not read JSON file: ${error.message}`,"error");
   }finally{
-    if(request===state.onboarding.importRequest)event.target.value="";
+    if(event.target.files?.[0]===file)event.target.value="";
   }
 };
 $("#onboarding-preview-action").onclick=previewOnboarding;
