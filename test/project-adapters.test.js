@@ -39,3 +39,45 @@ test("command runner rejects shell syntax in the executable", async () => {
     /shell syntax/
   );
 });
+
+test("command runner rejects a cwd symlink that escapes the project", async (context) => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-cwd-boundary-"));
+  const projectRoot = path.join(temporaryRoot, "project");
+  const outsideRoot = path.join(temporaryRoot, "outside");
+  const marker = path.join(outsideRoot, "executed.txt");
+  context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
+  await fs.mkdir(projectRoot);
+  await fs.mkdir(outsideRoot);
+  await fs.symlink(outsideRoot, path.join(projectRoot, "link"), process.platform === "win32" ? "junction" : "dir");
+
+  await assert.rejects(
+    runConfirmedCommand(projectRoot, {
+      command: [process.execPath, "-e", "require('node:fs').writeFileSync('executed.txt', 'unsafe')"],
+      cwd: "link",
+    }),
+    /project boundary/i,
+  );
+  await assert.rejects(fs.access(marker), { code: "ENOENT" });
+});
+
+test("command runner rejects a canonical project root replaced by a symlink", async (context) => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-root-boundary-"));
+  const projectRoot = path.join(temporaryRoot, "project");
+  const movedRoot = path.join(temporaryRoot, "moved-project");
+  const outsideRoot = path.join(temporaryRoot, "outside");
+  const marker = path.join(outsideRoot, "executed.txt");
+  context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
+  await fs.mkdir(projectRoot);
+  await fs.mkdir(outsideRoot);
+  const canonicalRoot = await fs.realpath(projectRoot);
+  await fs.rename(projectRoot, movedRoot);
+  await fs.symlink(outsideRoot, projectRoot, process.platform === "win32" ? "junction" : "dir");
+
+  await assert.rejects(
+    runConfirmedCommand(canonicalRoot, {
+      command: [process.execPath, "-e", "require('node:fs').writeFileSync('executed.txt', 'unsafe')"],
+    }),
+    /project root.*symbolic link/i,
+  );
+  await assert.rejects(fs.access(marker), { code: "ENOENT" });
+});

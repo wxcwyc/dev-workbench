@@ -8,6 +8,17 @@ function formatArgument(argument) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(argument) ? argument : JSON.stringify(argument);
 }
 
+export function safePreviewUrl(value) {
+  if (value === "about:blank") return value;
+  if (typeof value !== "string") return "about:blank";
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "about:blank";
+  } catch {
+    return "about:blank";
+  }
+}
+
 export function parseSessionImport(text) {
   if (typeof text !== "string" || text.trim().length === 0) return null;
 

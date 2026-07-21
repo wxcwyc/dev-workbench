@@ -6,6 +6,7 @@ import {
   buildOnboardingInput,
   formatApiError,
   parseSessionImport,
+  safePreviewUrl,
   summarizeOnboarding,
 } from "../apps/web/onboarding.js";
 
@@ -66,6 +67,10 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   const eventHandler = openHandler.slice(openHandler.indexOf("sessionEvents.onmessage"));
   assert.match(eventHandler, /if\(state\.events!==sessionEvents\)return;/);
   assert.ok(eventHandler.indexOf("if(state.events!==sessionEvents)return") < eventHandler.indexOf("renderSession("));
+  const migrationHandler = app.slice(app.indexOf("function renderMigration"), app.indexOf("function renderSession(session)"));
+  assert.equal(migrationHandler.match(/src="\$\{escapeHtml\(safePreviewUrl\(session\.metadata\.(?:source|target)Url\)\)\}"/g)?.length, 2);
+  assert.equal(migrationHandler.match(/<iframe class="preview" sandbox="allow-scripts allow-forms"/g)?.length, 2);
+  assert.doesNotMatch(migrationHandler, /allow-same-origin|allow-top-navigation|allow-popups/);
 });
 
 test("parseSessionImport parses an object and treats whitespace as no import", () => {
@@ -237,4 +242,23 @@ test("formatApiError includes protocol detail paths and has a fallback", () => {
   }), "Invalid session\n/steps/0/title: is required\n/workbench: is invalid");
   assert.equal(formatApiError({ error: "Not found" }), "Not found");
   assert.equal(formatApiError(null), "Request failed");
+});
+
+test("safePreviewUrl permits only absolute HTTP previews and exact about:blank", () => {
+  const cases = [
+    ["http://example.test/source", "http://example.test/source"],
+    ["https://example.test/target?mode=preview", "https://example.test/target?mode=preview"],
+    ["about:blank", "about:blank"],
+    ["javascript:alert(1)", "about:blank"],
+    ["data:text/html,<script>alert(1)</script>", "about:blank"],
+    ["file:///etc/passwd", "about:blank"],
+    ["//example.test/preview", "about:blank"],
+    ["/relative/preview", "about:blank"],
+    ["not a URL", "about:blank"],
+    [undefined, "about:blank"],
+  ];
+
+  for (const [value, expected] of cases) {
+    assert.equal(safePreviewUrl(value), expected, String(value));
+  }
 });
