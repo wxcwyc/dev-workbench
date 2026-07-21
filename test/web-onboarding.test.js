@@ -33,8 +33,10 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.ok(fileHandler.indexOf("invalidateOnboardingPreview()") < fileHandler.indexOf("await file.text()"));
   const createHandler = app.slice(app.indexOf("async function createOnboardingSession"));
   assert.match(createHandler, /async function createOnboardingSession\(\)\{\n  if\(state\.onboarding\.creating\)return;/);
+  assert.match(createHandler, /state\.onboarding\.recentRequest\+=1;/);
+  assert.ok(createHandler.indexOf("state.onboarding.recentRequest+=1") < createHandler.indexOf('await api("/api/sessions"'));
   assert.match(createHandler, /finally\{\n    if\(request===state\.onboarding\.creationRequest\)state\.onboarding\.creating=false;\n    if\(generation!==state\.onboarding\.dialogGeneration&&request===state\.onboarding\.creationRequest\)setOnboardingCreating\(false\);\n  }/);
-  assert.equal(createHandler.match(/refreshRecentProjects\(false\)/g)?.length,2);
+  assert.equal(createHandler.match(/refreshRecentProjects\(false\)/g)?.length,3);
   assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{\n    if\(\$\("#project-onboarding"\)\.open\)setOnboardingStatus\(creationError\?`Session creation failed: \$\{creationError\.message}`:"Session created\. You can inspect another project\.",creationError\?"error":"success"\);/);
   assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{[\s\S]*?refreshRecentProjects\(false\)/);
   const recentHandler = app.slice(app.indexOf("async function refreshRecentProjects"), app.indexOf("function resetOnboarding"));
@@ -53,12 +55,17 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   const openHandler = app.slice(app.indexOf("async function openSession"), app.indexOf("async function seek"));
   assert.match(openHandler, /const request=\+\+state\.openSessionRequest;/);
   assert.match(openHandler, /catch\(error\)\{\n    if\(request!==state\.openSessionRequest\)return;/);
-  assert.match(openHandler, /}\n  if\(request!==state\.openSessionRequest\)return;\n  if\(state\.events\)state\.events\.close\(\);/);
+  assert.match(openHandler, /}\n  if\(request!==state\.openSessionRequest\)return;\n  if\(state\.events\)\{state\.events\.onmessage=null;state\.events\.close\(\);}/);
   const openFreshness = openHandler.lastIndexOf("if(request!==state.openSessionRequest)return");
   assert.ok(openHandler.indexOf("await api(") < openFreshness);
   assert.ok(openFreshness < openHandler.indexOf("state.events.close()"));
   assert.ok(openFreshness < openHandler.indexOf("renderSession(session)"));
   assert.ok(openFreshness < openHandler.indexOf("new EventSource("));
+  assert.match(openHandler, /const sessionEvents=new EventSource\(/);
+  assert.match(openHandler, /state\.events=sessionEvents;/);
+  const eventHandler = openHandler.slice(openHandler.indexOf("sessionEvents.onmessage"));
+  assert.match(eventHandler, /if\(state\.events!==sessionEvents\)return;/);
+  assert.ok(eventHandler.indexOf("if(state.events!==sessionEvents)return") < eventHandler.indexOf("renderSession("));
 });
 
 test("parseSessionImport parses an object and treats whitespace as no import", () => {

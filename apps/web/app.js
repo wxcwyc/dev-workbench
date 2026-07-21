@@ -189,6 +189,7 @@ async function createOnboardingSession(){
   if(!draft)return;
   const generation=state.onboarding.dialogGeneration;
   const request=++state.onboarding.creationRequest;
+  state.onboarding.recentRequest+=1;
   setOnboardingCreating(true);
   setOnboardingStatus("Creating session without executing commands…","loading");
   let session;
@@ -209,6 +210,7 @@ async function createOnboardingSession(){
   if(creationError){
     setOnboardingCreating(state.onboarding.creating);
     setOnboardingStatus(creationError.message,"error");
+    refreshRecentProjects(false);
     return;
   }
   await Promise.allSettled([refreshSessions(),refreshRecentProjects(false)]);
@@ -297,10 +299,11 @@ async function openSession(id){
     throw error;
   }
   if(request!==state.openSessionRequest)return;
-  if(state.events)state.events.close();
+  if(state.events){state.events.onmessage=null;state.events.close();}
   renderSession(session);
-  state.events=new EventSource(`/api/sessions/${id}/events`);
-  state.events.onmessage=(event)=>{const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
+  const sessionEvents=new EventSource(`/api/sessions/${id}/events`);
+  state.events=sessionEvents;
+  sessionEvents.onmessage=(event)=>{if(state.events!==sessionEvents)return;const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
 }
 async function seek(stepIndex){renderSession(await api(`/api/sessions/${state.active.id}/seek`,{method:"POST",body:JSON.stringify({stepIndex})}));}
 async function createExample(name){const session=await api(`/api/examples/${name}`,{method:"POST",body:"{}"});await refreshSessions();await openSession(session.id);}
