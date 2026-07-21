@@ -33,11 +33,36 @@ test("confirmed command runner uses argv without a shell and stays inside projec
   assert.equal(await resolveProjectRoot(root, os.tmpdir()), await fs.realpath(root));
 });
 
-test("command runner rejects shell syntax in the executable", async () => {
+test("command runner treats executable shell metacharacters as a literal filename", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-literal-executable-"));
+  const marker = path.join(root, "preserve.txt");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(marker, "safe");
+
   await assert.rejects(
-    runConfirmedCommand(os.tmpdir(), { command: ["node;rm", "anything"] }),
-    /shell syntax/
+    runConfirmedCommand(root, { command: ["node;rm", marker] }),
+    (error) => error.code === "ENOENT",
   );
+  assert.equal(await fs.readFile(marker, "utf8"), "safe");
+});
+
+test("command runner accepts an executable path containing spaces", { skip: process.platform === "win32" }, async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-spaced-executable-"));
+  const executable = path.join(root, "node executable");
+  const marker = path.join(root, "executed.txt");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.symlink(process.execPath, executable, "file");
+
+  await runConfirmedCommand(root, {
+    command: [executable, "-e", "require('node:fs').writeFileSync('executed.txt', 'safe')"],
+  });
+
+  assert.equal(await fs.readFile(marker, "utf8"), "safe");
+});
+
+test("resolveInsideProject accepts an in-root name that starts with dots", () => {
+  const root = path.join(os.tmpdir(), "dev-workbench-project-root");
+  assert.equal(resolveInsideProject(root, "..valid"), path.join(root, "..valid"));
 });
 
 test("command runner rejects a cwd symlink that escapes the project", async (context) => {

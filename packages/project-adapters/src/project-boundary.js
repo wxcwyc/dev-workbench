@@ -12,7 +12,7 @@ export async function resolveProjectRoot(candidate, allowedRoot) {
 export function resolveInsideProject(projectRoot, candidate = ".") {
   const resolved = path.resolve(projectRoot, candidate);
   const relative = path.relative(projectRoot, resolved);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Path escapes project root");
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Path escapes project root");
   return resolved;
 }
 
