@@ -4,6 +4,10 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function formatArgument(argument) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(argument) ? argument : JSON.stringify(argument);
+}
+
 export function parseSessionImport(text) {
   if (typeof text !== "string" || text.trim().length === 0) return null;
 
@@ -17,9 +21,9 @@ export function parseSessionImport(text) {
 
     const offset = Number(position[1]);
     const preceding = text.slice(0, offset);
-    const line = preceding.split("\n").length;
-    const lastNewline = preceding.lastIndexOf("\n");
-    const column = offset - lastNewline;
+    const lines = preceding.split(/\r\n|\r|\n/);
+    const line = lines.length;
+    const column = lines.at(-1).length + 1;
     throw new Error(`Invalid JSON at line ${line}, column ${column}`);
   }
 
@@ -68,7 +72,9 @@ export function summarizeOnboarding(input = {}) {
       const action = step?.action;
       return {
         title: isNonEmptyString(step?.title) ? step.title : `Step ${index + 1}`,
-        command: Array.isArray(action?.command) ? action.command.join(" ") : "",
+        command: Array.isArray(action?.command) && action.command.every((argument) => typeof argument === "string")
+          ? action.command.map(formatArgument).join(" ")
+          : "",
         cwd: isNonEmptyString(action?.cwd) ? action.cwd : ".",
         impact: action ? "project-changing" : "observation",
       };

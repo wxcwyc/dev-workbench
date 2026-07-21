@@ -20,6 +20,16 @@ test("parseSessionImport reports one-based line and column for invalid JSON", ()
   );
 });
 
+test("parseSessionImport counts CR-only and CRLF line endings correctly", () => {
+  for (const text of ["{\r  x: 1}", "{\r\n  x: 1}"]) {
+    assert.throws(
+      () => parseSessionImport(text),
+      /Invalid JSON at line 2, column 3/,
+      JSON.stringify(text),
+    );
+  }
+});
+
 test("parseSessionImport falls back when the JSON error has no character position", () => {
   assert.throws(
     () => parseSessionImport("[1,"),
@@ -124,6 +134,26 @@ test("summarizeOnboarding previews commands, cwd, impact, and safe defaults", ()
       { title: "Install", command: "npm install", cwd: "target", impact: "project-changing" },
     ],
   });
+});
+
+test("summarizeOnboarding preserves argv boundaries in a single display line", () => {
+  const summary = summarizeOnboarding({
+    steps: [{
+      title: "Run tool",
+      action: { command: ["tool", "two words", 'a"b', "line\nbreak", ""] },
+    }],
+  });
+
+  assert.equal(summary.steps[0].command, 'tool "two words" "a\\"b" "line\\nbreak" ""');
+  assert.equal(summary.steps[0].command.includes("\n"), false);
+});
+
+test("summarizeOnboarding gives malformed argv a stable fallback", () => {
+  const summary = summarizeOnboarding({
+    steps: [{ title: "Malformed", action: { command: ["tool", 42] } }],
+  });
+
+  assert.equal(summary.steps[0].command, "");
 });
 
 test("summarizeOnboarding previews execution trace items as observations", () => {
