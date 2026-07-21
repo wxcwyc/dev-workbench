@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +8,34 @@ import {
   parseSessionImport,
   summarizeOnboarding,
 } from "../apps/web/onboarding.js";
+
+test("onboarding dialog exposes labeled stages and actions", async () => {
+  const [html, styles, app] = await Promise.all([
+    fs.readFile(new URL("../apps/web/index.html", import.meta.url), "utf8"),
+    fs.readFile(new URL("../apps/web/styles.css", import.meta.url), "utf8"),
+    fs.readFile(new URL("../apps/web/app.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="open-project"/);
+  assert.match(html, /id="open-project-mobile"/);
+  assert.match(html, /<dialog[^>]+id="project-onboarding"/);
+  assert.match(html, /<form[^>]+id="project-inspect-form"/);
+  assert.match(html, /<label[^>]+for="project-path"/);
+  assert.match(html, /<input[^>]+id="project-path"/);
+  assert.match(html, /id="onboarding-create"/);
+  assert.match(html, /id="onboarding-preview"[^>]+aria-live="polite"/);
+  assert.match(html, /id="onboarding-status"[^>]+aria-live="polite"/);
+  assert.match(html, /id="onboarding-close"[^>]+aria-label="Close project onboarding"/);
+  assert.match(styles, /#project-onboarding \.onboarding-file input\{[^}]*display:block;[^}]*position:absolute/);
+  assert.match(styles, /#project-onboarding \.onboarding-file:focus-within\{/);
+  assert.match(styles, /#project-onboarding \.onboarding-status\{[^}]*max-height:[^;}]+;[^}]*overflow:auto/);
+  const fileHandler = app.slice(app.indexOf('$("#onboarding-file").onchange'));
+  assert.ok(fileHandler.indexOf("invalidateOnboardingPreview()") < fileHandler.indexOf("await file.text()"));
+  const createHandler = app.slice(app.indexOf("async function createOnboardingSession"));
+  assert.match(createHandler, /}\n  if\(generation!==state\.onboarding\.dialogGeneration\)\{\n    await Promise\.allSettled\(\[refreshSessions\(\)\]\);\n    return;\n  }\n  await Promise\.allSettled\(\[refreshSessions\(\),refreshRecentProjects\(\)\]\)/);
+  const recentHandler = app.slice(app.indexOf("async function refreshRecentProjects"), app.indexOf("function resetOnboarding"));
+  assert.ok(recentHandler.indexOf('await api("/api/projects/recent")') < recentHandler.indexOf("if(generation!==state.onboarding.dialogGeneration)return"));
+  assert.ok(recentHandler.indexOf("if(generation!==state.onboarding.dialogGeneration)return") < recentHandler.indexOf("state.onboarding.recent="));
+});
 
 test("parseSessionImport parses an object and treats whitespace as no import", () => {
   assert.deepEqual(parseSessionImport('{"steps":[]}'), { steps: [] });

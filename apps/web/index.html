@@ -10,12 +10,14 @@
 <body>
   <header>
     <div><span class="brand-mark">◆</span> DEV WORKBENCH <span class="muted">/ explainable execution</span></div>
+    <button id="open-project-mobile" class="mobile-project-button" type="button">Open project</button>
     <div id="health">connecting…</div>
   </header>
   <div class="layout">
     <aside>
       <section>
         <h2>Start</h2>
+        <button id="open-project" class="primary">Open local project</button>
         <button id="logic-demo">Open logic debugger</button>
         <button id="migration-demo">Open migration center</button>
         <label class="file-button">Import session JSON<input id="session-file" type="file" accept="application/json,.json"></label>
@@ -56,6 +58,79 @@
       </div>
     </main>
   </div>
+  <dialog id="project-onboarding" aria-labelledby="onboarding-title">
+    <div class="onboarding-shell">
+      <div class="onboarding-header">
+        <div>
+          <span class="onboarding-kicker">PROJECT INTAKE / SAFETY REVIEW</span>
+          <h1 id="onboarding-title">Open a local project</h1>
+          <p>Inspect the boundary, review the normalized plan, then create a session.</p>
+        </div>
+        <button id="onboarding-close" class="icon-button" type="button" aria-label="Close project onboarding">×</button>
+      </div>
+
+      <div class="onboarding-body">
+        <section class="onboarding-stage" aria-labelledby="project-path-title">
+          <div class="stage-heading"><span>01</span><h2 id="project-path-title">Project boundary</h2></div>
+          <form id="project-inspect-form">
+            <label for="project-path">Local project path</label>
+            <div class="path-inspect-row">
+              <input id="project-path" name="projectRoot" type="text" required autocomplete="off" spellcheck="false" placeholder="/path/inside/allowed/root">
+              <button id="onboarding-inspect" type="submit">Inspect</button>
+            </div>
+          </form>
+          <div class="recent-projects-region" aria-labelledby="recent-projects-title">
+            <h3 id="recent-projects-title">Recent projects</h3>
+            <div id="onboarding-recent" class="recent-projects" aria-live="polite"><span class="muted">Loading recent projects…</span></div>
+          </div>
+        </section>
+
+        <section id="onboarding-detection" class="onboarding-stage hidden" aria-labelledby="detection-title">
+          <div class="stage-heading"><span>02</span><h2 id="detection-title">Detected project</h2></div>
+          <div id="detection-facts" class="detection-facts"></div>
+          <div id="detection-evidence" class="detection-evidence"></div>
+          <div id="detection-warnings" class="detection-warnings"></div>
+        </section>
+
+        <section class="onboarding-stage" aria-labelledby="session-draft-title">
+          <div class="stage-heading"><span>03</span><h2 id="session-draft-title">Session draft</h2></div>
+          <fieldset id="onboarding-config" disabled>
+            <div class="onboarding-field-grid">
+              <fieldset class="workbench-fieldset">
+                <legend class="field-label">Workbench</legend>
+                <div class="workbench-options">
+                  <label><input type="radio" name="onboarding-workbench" value="execution" checked> Execution</label>
+                  <label><input type="radio" name="onboarding-workbench" value="migration"> Migration</label>
+                </div>
+              </fieldset>
+              <div>
+                <label for="onboarding-session-title">Session title</label>
+                <input id="onboarding-session-title" type="text" required autocomplete="off">
+              </div>
+            </div>
+            <label for="onboarding-import">Optional session or plan JSON</label>
+            <textarea id="onboarding-import" rows="5" spellcheck="false" placeholder="Paste a session object to review its steps or trace…"></textarea>
+            <label class="file-button onboarding-file">Load JSON file<input id="onboarding-file" type="file" accept="application/json,.json"></label>
+          </fieldset>
+        </section>
+
+        <section class="onboarding-stage safety-stage" aria-labelledby="safety-title">
+          <div class="stage-heading"><span>04</span><h2 id="safety-title">Plan &amp; safety gate</h2></div>
+          <div id="onboarding-preview" class="onboarding-preview" aria-live="polite">
+            <p class="muted">Inspect a project and preview the normalized session before creation.</p>
+          </div>
+        </section>
+      </div>
+
+      <div class="onboarding-footer">
+        <div id="onboarding-status" class="onboarding-status" role="status" aria-live="polite">Waiting for project inspection.</div>
+        <div class="onboarding-actions">
+          <button id="onboarding-preview-action" type="button" disabled>Preview safety gate</button>
+          <button id="onboarding-create" class="primary" type="button" disabled>Create session</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
