@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  buildOnboardingInput,
+  formatApiError,
+  parseSessionImport,
+  summarizeOnboarding,
+} from "../apps/web/onboarding.js";
+
+test("parseSessionImport parses an object and treats whitespace as no import", () => {
+  assert.deepEqual(parseSessionImport('{"steps":[]}'), { steps: [] });
+  assert.equal(parseSessionImport(" \n\t "), null);
+});
+
+test("parseSessionImport reports one-based line and column for invalid JSON", () => {
+  assert.throws(
+    () => parseSessionImport("{\n  x: 1}"),
+    /Invalid JSON at line 2, column 3/,
+  );
+});
+
+test("parseSessionImport rejects valid JSON that is not an object", () => {
+  assert.throws(() => parseSessionImport("[]"), /Imported session must be an object/);
+});
+
+test("buildOnboardingInput trusts the inspection and current form fields", () => {
+  const imported = {
+    schemaVersion: 1,
+    title: "Untrusted title",
+    workbench: "migration",
+    projectRoot: "/untrusted",
+    steps: [{ title: "Install", action: { command: ["npm", "install"] } }],
+    metadata: { sourceLabel: "Legacy" },
+  };
+
+  const input = buildOnboardingInput({
+    inspection: { projectRoot: "/allowed/site" },
+    workbench: "migration",
+    title: "Move site",
+    imported,
+  });
+
+  assert.deepEqual(input, {
+    schemaVersion: 1,
+    title: "Move site",
+    workbench: "migration",
+    projectRoot: "/allowed/site",
+    steps: [{ title: "Install", action: { command: ["npm", "install"] } }],
+    metadata: { sourceLabel: "Legacy" },
+  });
+  assert.notEqual(input, imported);
+  assert.notEqual(input.steps, imported.steps);
+  input.steps[0].title = "Changed clone";
+  assert.equal(imported.steps[0].title, "Install");
+  assert.equal(imported.title, "Untrusted title");
+  assert.equal(imported.projectRoot, "/untrusted");
+});
+
+test("buildOnboardingInput rejects an imported workbench mismatch", () => {
+  assert.throws(
+    () => buildOnboardingInput({
+      inspection: { projectRoot: "/allowed/site" },
+      workbench: "migration",
+      title: "Move site",
+      imported: { workbench: "execution", trace: [] },
+    }),
+    /Imported workbench execution does not match selected workbench migration/,
+  );
+});
+
+test("buildOnboardingInput creates an empty plan without an import", () => {
+  assert.deepEqual(buildOnboardingInput({
+    inspection: { projectRoot: "/allowed/site" },
+    workbench: "execution",
+    title: "Inspect site",
+  }), {
+    title: "Inspect site",
+    workbench: "execution",
+    projectRoot: "/allowed/site",
+    steps: [],
+  });
+});
+
+test("buildOnboardingInput validates basic inspection, workbench, and title input", () => {
+  assert.throws(
+    () => buildOnboardingInput({ inspection: {}, workbench: "migration", title: "Move" }),
+    /inspection\.projectRoot must be a non-empty string/,
+  );
+  assert.throws(
+    () => buildOnboardingInput({ inspection: { projectRoot: "/allowed/site" }, workbench: "other", title: "Move" }),
+    /workbench must be execution or migration/,
+  );
+  assert.throws(
+    () => buildOnboardingInput({ inspection: { projectRoot: "/allowed/site" }, workbench: "migration", title: " " }),
+    /title must be a non-empty string/,
+  );
+});
+
+test("summarizeOnboarding previews commands, cwd, impact, and safe defaults", () => {
+  const summary = summarizeOnboarding({
+    steps: [
+      {},
+      { title: "Install", action: { command: ["npm", "install"], cwd: "target" } },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    steps: [
+      { title: "Step 1", command: "", cwd: ".", impact: "observation" },
+      { title: "Install", command: "npm install", cwd: "target", impact: "project-changing" },
+    ],
+  });
+});
+
+test("summarizeOnboarding previews execution trace items as observations", () => {
+  assert.deepEqual(summarizeOnboarding({
+    trace: [{ title: "Resolve goal" }, { title: "Backtrack" }],
+  }), {
+    steps: [
+      { title: "Resolve goal", command: "", cwd: ".", impact: "observation" },
+      { title: "Backtrack", command: "", cwd: ".", impact: "observation" },
+    ],
+  });
+});
+
+test("formatApiError includes protocol detail paths and has a fallback", () => {
+  assert.equal(formatApiError({
+    error: "Invalid session",
+    details: [
+      { path: "/steps/0/title", message: "is required" },
+      { path: "/workbench", message: "is invalid" },
+    ],
+  }), "Invalid session\n/steps/0/title: is required\n/workbench: is invalid");
+  assert.equal(formatApiError({ error: "Not found" }), "Not found");
+  assert.equal(formatApiError(null), "Request failed");
+});
