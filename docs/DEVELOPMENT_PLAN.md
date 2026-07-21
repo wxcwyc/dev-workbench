@@ -7,14 +7,14 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成） |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1、Milestone 2 的 UI 项目接入首版已完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
 
 ## 当前开发进度（2026-07-20）
 
-Phase 1 的 Milestone 1 已完成首个可运行版本：
+Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版：
 
 - 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
 - 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
@@ -22,8 +22,10 @@ Phase 1 的 Milestone 1 已完成首个可运行版本：
 - 实现零依赖纯 Horn 子集 Prolog runtime adapter，覆盖解析、规则选择、合一、choice point、失败、回溯、源码位置和多解搜索；
 - Execution Explorer 已区分 evaluation、branch、failure、backtrack 和 solution，并展示合一与回溯证据；
 - 内置逻辑示例已从静态手写 trace 切换为 runtime 实际执行。
+- UI 可以输入允许目录内的真实路径，完成边界与符号链接校验，并只读探测 Git、package manager、语言和常见框架；
+- UI 可以从最近项目重新探测路径，选择 Execution 或 Migration，导入可选 trace/plan JSON，并在创建空会话或计划会话前检查规范化步骤与安全边界。
 
-当前自动化回归共 16 项，覆盖协议、SDK、NDJSON、SessionEngine、项目适配器和 Prolog runtime。下一步进入 Milestone 2，优先完成真实项目接入和迁移计划生命周期。
+当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，下一步是迁移计划编辑器和 `awaiting_review` 步骤生命周期；Preview Process Supervisor 与实时终端输出尚未完成。
 
 ## Phase 0：交互与架构验证
 
@@ -43,14 +45,18 @@ Phase 1 的目标是：开发者能够把真实解释器或真实迁移项目接
 
 ### 1. 项目接入与会话创建
 
+状态：首个版本已完成。
+
 功能：
 
-- 在 UI 中选择或输入本地项目路径；
-- 自动识别 Git、package manager、语言和常见框架；
+- 在 UI 中输入本地项目路径，或从最近项目重新打开并探测；
+- 只读识别 Git、package manager、语言和常见框架；
 - 创建 Execution 或 Migration 会话；
 - 导入、校验和预览 trace/plan JSON；
 - 保存项目最近使用记录；
 - 在执行前展示安全边界和待运行命令总览。
+
+首个版本不提供原生 folder picker。浏览器中的路径输入与最近项目快捷入口满足当前“选择或输入”需求；服务端会对输入路径执行真实路径解析、允许目录边界和符号链接逃逸检查。项目接入与创建会话不会运行命令，实际迁移步骤仍需逐步确认。
 
 验收条件：
 
@@ -195,9 +201,9 @@ Prolog adapter 至少产生：
 
 ### Milestone 2：真实 Migration Runtime
 
-状态：下一步。
+状态：进行中。UI 项目接入首版已完成；下一步是迁移计划编辑器和 `awaiting_review` 生命周期。
 
-1. UI 项目接入；
+1. UI 项目接入（首版已完成）；
 2. 迁移计划编辑器；
 3. awaiting_review 生命周期；
 4. Preview Process Supervisor；

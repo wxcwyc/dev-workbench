@@ -30,9 +30,20 @@ npm start
 DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 ```
 
-## 导入自己的会话
+## 打开本地项目
 
-界面可以导入 JSON。执行回放示例：
+点击 **Open local project**，输入 `DEV_WORKBENCH_ALLOWED_ROOT` 内的绝对路径或相对路径。工作台会在不运行项目命令的前提下，只读识别 Git、package manager、语言和常见框架，并显示探测证据与警告。随后可以：
+
+1. 选择 Execution 或 Migration 工作台并填写会话标题；
+2. 可选粘贴或上传 trace/plan JSON；
+3. 在创建前检查规范化后的步骤、argv 参数、工作目录、影响分类和允许目录边界；
+4. 确认安全预览后创建会话。
+
+最近成功创建的项目会出现在 **Recent projects** 中；重新打开时仍会再次探测路径和项目事实，不会复用旧计划。接入和创建会话本身不会运行任何命令。Migration 步骤中的实际命令仍需逐步在 UI 中明确确认后才会执行。
+
+## 高级入口：直接导入会话 JSON
+
+原始 JSON 导入仍作为高级快捷方式保留。执行回放示例：
 
 ```json
 {
@@ -108,6 +119,7 @@ node packages/prolog-adapter/src/cli.js \
 - 同一会话互斥运行；
 - SSE 实时更新；
 - 两个独立工作台和可导入协议；
+- 真实项目只读探测、安全预览和最近项目入口；
 - 内置 Prolog runtime trace 与框架迁移示例。
 
 ## 测试
