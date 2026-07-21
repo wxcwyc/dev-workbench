@@ -92,8 +92,16 @@ test("session creation lock survives dialog close and reopen until POST settles"
   controller.state.onboarding.inspection = { projectRoot: "/projects/demo" };
   controller.state.onboarding.draft = draft;
   const firstCreate = controller.createOnboardingSession();
+  const creationControlIds = [
+    "project-path",
+    "onboarding-inspect",
+    "onboarding-config",
+    "onboarding-preview-action",
+    "onboarding-create",
+  ];
   assert.equal(postCount, 1);
   assert.equal(controller.state.onboarding.creating, true);
+  creationControlIds.forEach((id) => assert.equal(browser.element(id).disabled, true, id));
 
   browser.element("project-onboarding").close();
   controller.openOnboarding();
@@ -102,10 +110,12 @@ test("session creation lock survives dialog close and reopen until POST settles"
   await controller.createOnboardingSession();
   assert.equal(postCount, 1);
   assert.equal(controller.state.onboarding.creating, true);
+  creationControlIds.forEach((id) => assert.equal(browser.element(id).disabled, true, id));
 
   creation.resolve(new FakeResponse({ id: "created" }));
   await firstCreate;
   assert.equal(controller.state.onboarding.creating, false);
+  creationControlIds.forEach((id) => assert.equal(browser.element(id).disabled, false, id));
 });
 
 test("bound draft field handler invalidates preview and disables creation", async (t) => {
