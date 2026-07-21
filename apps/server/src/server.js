@@ -77,11 +77,12 @@ function traceSteps(trace) {
 export async function createApp(options = {}) {
   const runtime = {
     allowedRoot: options.allowedRoot ?? allowedRoot,
-    stateRoot: options.stateRoot ?? stateRoot
+    stateRoot: options.stateRoot ?? stateRoot,
+    warn: options.warn ?? console.warn
   };
   const engine = new SessionEngine();
   const store = new SessionStore(runtime.stateRoot);
-  const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"));
+  const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
   const events = new EventEmitter();
   const runningSessions = new Set();
   await store.initialize();
@@ -112,7 +113,7 @@ export async function createApp(options = {}) {
     try {
       await recentProjects.record({ projectRoot: resolvedRoot, workbench: input.workbench });
     } catch (error) {
-      console.warn(`Could not record recent project ${resolvedRoot}: ${error.message}`);
+      runtime.warn(`Could not record recent project ${resolvedRoot}: ${error.message}`);
     }
     emit(session);
     return publicSession(session);
@@ -149,7 +150,14 @@ export async function createApp(options = {}) {
       const pathname = url.pathname;
       if (request.method === "GET" && pathname === "/api/health") return sendJson(response, 200, { ok: true, version: "0.1.0", allowedRoot: runtime.allowedRoot });
       if (request.method === "GET" && pathname === "/api/adapters") return sendJson(response, 200, [prologManifest]);
-      if (request.method === "GET" && pathname === "/api/projects/recent") return sendJson(response, 200, await recentProjects.list());
+      if (request.method === "GET" && pathname === "/api/projects/recent") {
+        try {
+          return sendJson(response, 200, await recentProjects.list());
+        } catch (error) {
+          runtime.warn(`Could not read recent projects ${recentProjects.filePath}: ${error.message}`);
+          return sendJson(response, 200, []);
+        }
+      }
       if (request.method === "POST" && pathname === "/api/projects/inspect") {
         const body = await readJson(request);
         if (typeof body.projectRoot !== "string" || !body.projectRoot.trim()) throw new Error("projectRoot must be a non-empty string");
