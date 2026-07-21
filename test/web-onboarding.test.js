@@ -28,6 +28,7 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.match(styles, /#project-onboarding \.onboarding-file input\{[^}]*display:block;[^}]*position:absolute/);
   assert.match(styles, /#project-onboarding \.onboarding-file:focus-within\{/);
   assert.match(styles, /#project-onboarding \.onboarding-status\{[^}]*max-height:[^;}]+;[^}]*overflow:auto/);
+  assert.match(styles, /#project-onboarding button,#project-onboarding input,#project-onboarding select,#project-onboarding textarea\{font:inherit}/);
   const fileHandler = app.slice(app.indexOf('$("#onboarding-file").onchange'));
   assert.ok(fileHandler.indexOf("invalidateOnboardingPreview()") < fileHandler.indexOf("await file.text()"));
   const createHandler = app.slice(app.indexOf("async function createOnboardingSession"));
