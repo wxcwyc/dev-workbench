@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,6 +47,28 @@ async function postJson(url, body) {
     body: JSON.stringify(body),
   });
   return { response, body: await response.json() };
+}
+
+async function requestRawJson(url, { headers = {} } = {}) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      headers,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode,
+        headers: response.headers,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+      }));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 async function makeSampleProject(allowedRoot) {
@@ -193,6 +216,72 @@ test("project file roots are rejected and never recorded as recent", async (t) =
   const response = await fetch(`${app.url}/api/projects/recent`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), []);
+});
+
+test("rejects non-loopback, DNS-rebinding, and wrong-port Host headers", async (t) => {
+  const app = await startTestApp(t);
+  const { port } = new URL(app.url);
+  const rejectedHosts = [
+    `attacker.example:${port}`,
+    `127.0.0.1.attacker.example:${port}`,
+    `localhost:${Number(port) + 1}`,
+  ];
+
+  for (const host of rejectedHosts) {
+    const response = await requestRawJson(`${app.url}/api/health`, { headers: { host } });
+    assert.equal(response.status, 403, host);
+    assert.match(response.headers["content-type"], /^application\/json\b/);
+    assert.match(response.body.error, /host/i);
+  }
+});
+
+test("requires an exact same-origin Origin header when Origin is present", async (t) => {
+  const app = await startTestApp(t);
+  const { port } = new URL(app.url);
+
+  const valid = await requestRawJson(`${app.url}/api/health`, {
+    headers: { origin: app.url },
+  });
+  assert.equal(valid.status, 200);
+
+  const localhostOrigin = `http://localhost:${port}`;
+  const validLocalhost = await requestRawJson(`${app.url}/api/health`, {
+    headers: { host: `localhost:${port}`, origin: localhostOrigin },
+  });
+  assert.equal(validLocalhost.status, 200);
+
+  const crossOrigin = await requestRawJson(`${app.url}/api/health`, {
+    headers: { origin: `http://attacker.example:${port}` },
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.match(crossOrigin.body.error, /origin/i);
+});
+
+test("JSON mutation endpoints reject missing or incorrect content types without side effects", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const input = {
+    title: "Mutation media type",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  };
+
+  for (const options of [
+    { body: Buffer.from(JSON.stringify(input)) },
+    { headers: { "content-type": "text/plain" }, body: JSON.stringify(input) },
+  ]) {
+    const response = await fetch(`${app.url}/api/sessions`, { method: "POST", ...options });
+    assert.equal(response.status, 415);
+    assert.match(response.headers.get("content-type"), /^application\/json\b/);
+    assert.match((await response.json()).error, /requires application\/json/i);
+  }
+
+  const sessionsBeforeValidRequest = await fetch(`${app.url}/api/sessions`);
+  assert.deepEqual(await sessionsBeforeValidRequest.json(), []);
+
+  const valid = await postJson(`${app.url}/api/sessions`, input);
+  assert.equal(valid.response.status, 201);
 });
 
 test("GET /api/health reports the injected allowed root", async (t) => {

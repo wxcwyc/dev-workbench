@@ -21,7 +21,42 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
+function rejectRequest(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  throw error;
+}
+
+function validateRequestOrigin(request) {
+  const host = request.headers.host;
+  let serviceOrigin;
+  try {
+    serviceOrigin = new URL(`http://${host}`);
+  } catch {
+    rejectRequest("Invalid Host header", 403);
+  }
+  const hostname = serviceOrigin.hostname.toLowerCase();
+  const loopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+  const authorityOnly = serviceOrigin.pathname === "/" && !serviceOrigin.search && !serviceOrigin.hash
+    && !serviceOrigin.username && !serviceOrigin.password;
+  const requestedPort = Number(serviceOrigin.port || 80);
+  if (!host || !loopback || !authorityOnly || requestedPort !== request.socket.localPort) {
+    rejectRequest("Host must match this loopback server and listening port", 403);
+  }
+  const origin = request.headers.origin;
+  if (origin !== undefined && origin !== serviceOrigin.origin) {
+    rejectRequest("Origin must exactly match this service origin", 403);
+  }
+  return serviceOrigin;
+}
+
+function requireJsonContentType(request) {
+  const contentType = request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") rejectRequest("Request requires application/json", 415);
+}
+
 async function readJson(request, limit = 1024 * 1024) {
+  requireJsonContentType(request);
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
@@ -146,7 +181,7 @@ export async function createApp(options = {}) {
 
   return http.createServer(async (request, response) => {
     try {
-      const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+      const url = new URL(request.url, validateRequestOrigin(request));
       const pathname = url.pathname;
       if (request.method === "GET" && pathname === "/api/health") return sendJson(response, 200, { ok: true, version: "0.1.0", allowedRoot: runtime.allowedRoot });
       if (request.method === "GET" && pathname === "/api/adapters") return sendJson(response, 200, [prologManifest]);
@@ -174,7 +209,10 @@ export async function createApp(options = {}) {
       if (request.method === "POST" && pathname === "/api/sessions") return sendJson(response, 201, await createSession(await readJson(request)));
 
       const exampleMatch = pathname.match(/^\/api\/examples\/(logic-trace|migration-demo)$/);
-      if (request.method === "POST" && exampleMatch) return sendJson(response, 201, await createExample(exampleMatch[1]));
+      if (request.method === "POST" && exampleMatch) {
+        requireJsonContentType(request);
+        return sendJson(response, 201, await createExample(exampleMatch[1]));
+      }
 
       const sessionMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)$/i);
       if (request.method === "GET" && sessionMatch) return sendJson(response, 200, publicSession(await requireSession(sessionMatch[1])));
