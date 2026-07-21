@@ -308,6 +308,16 @@ async function openSession(id){
 async function seek(stepIndex){renderSession(await api(`/api/sessions/${state.active.id}/seek`,{method:"POST",body:JSON.stringify({stepIndex})}));}
 async function createExample(name){const session=await api(`/api/examples/${name}`,{method:"POST",body:"{}"});await refreshSessions();await openSession(session.id);}
 
+// Narrow test seam for exercising this module's browser controller behavior.
+export const __testing=Object.freeze({
+  state,
+  openSession,
+  openOnboarding,
+  createOnboardingSession,
+  renderInspection,
+  renderOnboardingPreview,
+});
+
 $("#open-project").onclick=openOnboarding;
 $("#open-project-mobile").onclick=openOnboarding;
 $("#onboarding-close").onclick=()=>$("#project-onboarding").close();
