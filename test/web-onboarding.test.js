@@ -20,8 +20,21 @@ test("parseSessionImport reports one-based line and column for invalid JSON", ()
   );
 });
 
-test("parseSessionImport rejects valid JSON that is not an object", () => {
-  assert.throws(() => parseSessionImport("[]"), /Imported session must be an object/);
+test("parseSessionImport falls back when the JSON error has no character position", () => {
+  assert.throws(
+    () => parseSessionImport("[1,"),
+    /^Error: Invalid JSON: Unexpected end of JSON input$/,
+  );
+});
+
+test("parseSessionImport rejects valid JSON values that are not objects", () => {
+  for (const text of ["[]", "null", '"text"', "42", "true"]) {
+    assert.throws(
+      () => parseSessionImport(text),
+      /Imported session must be an object/,
+      text,
+    );
+  }
 });
 
 test("buildOnboardingInput trusts the inspection and current form fields", () => {
