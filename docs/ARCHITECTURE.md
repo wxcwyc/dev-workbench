@@ -51,13 +51,14 @@ The first runtime adapter is a zero-dependency interpreter for the pure Horn-cla
 
 - `DEV_WORKBENCH_ALLOWED_ROOT` 限制可操作项目范围；
 - 项目 cwd 同时经过词法路径和 `realpath` 检查，拒绝执行前已存在的 `..` 或符号链接边界逃逸；
+- 项目检查拒绝符号链接或非目录根路径，并在扫描开始和结束时比较根目录的 device/inode；`package.json` 通过 no-follow 文件句柄打开、以句柄重新检查类型和身份，并采用有上限的读取。这些措施可阻止静态符号链接、可观察到的常规替换和超大 manifest 造成的资源滥用；
 - command 必须是字符串数组，由 `execFile` 以 `shell=false` 直接执行；executable 和参数中的 shell 元字符只作为字面字符传递，不会被 shell 解析；
 - 有 action 的步骤必须提交 `confirmed=true`；
 - 一个 session 同时最多运行一个步骤；
 - HTTP JSON body 限制为 1 MB；
 - 文件树跳过 `.git`、`node_modules` 和 `.dev-workbench`。
 
-本地命令本身仍然具有当前用户权限，所以只应在可信本地环境中导入可信计划。`realpath` 检查与 `execFile` 启动并非原子操作；另一个具有相同权限的本地进程若恰好在两者之间替换目录，不属于 Phase 1 的威胁模型。需要抵抗此类主动对抗时，应迁移到容器或远程隔离 worker，或采用基于文件描述符的原生 launcher，并增加身份认证、授权、审计与密钥隔离。
+本地命令和项目检查仍然具有当前用户权限，所以只应在可信本地环境中导入可信计划。`realpath` 检查与 `execFile` 启动并非原子操作，项目检查的首尾身份比较与扫描过程也不是原子操作。另一个具有相同权限的本地进程可以在命令启动前替换目录；也可以在扫描期间以 ABA 方式替换项目根、让检查器读取替换内容，再恢复原目录，使首尾 device/inode 相同而无法被检测。这类主动对抗不属于 Phase 1 的可信本地威胁模型，因此当前实现不提供原子或强对抗保证。需要抵抗此类攻击时，应使用固定目录文件描述符的原生 walker/launcher，或迁移到隔离 worker、容器或远程沙箱，并增加身份认证、授权、审计与密钥隔离。
 
 ## Next adapters
 
