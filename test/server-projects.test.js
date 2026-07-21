@@ -284,6 +284,54 @@ test("JSON mutation endpoints reject missing or incorrect content types without 
   assert.equal(valid.response.status, 201);
 });
 
+test("trace rejects invalid content types before mutating the stored session", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Trace media type",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [],
+  });
+  assert.equal(created.response.status, 201);
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const before = await (await fetch(sessionUrl)).json();
+
+  for (const options of [
+    { body: Buffer.from("[]") },
+    { headers: { "content-type": "text/plain" }, body: "[]" },
+  ]) {
+    const response = await fetch(`${sessionUrl}/trace`, { method: "POST", ...options });
+    assert.equal(response.status, 415);
+    assert.match((await response.json()).error, /trace ingestion requires application\/json/i);
+    assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+  }
+});
+
+test("trace accepts every supported content type with parameters", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+
+  for (const contentType of [
+    "application/json; charset=utf-8",
+    "application/x-ndjson; charset=utf-8",
+    "application/ndjson; charset=utf-8",
+  ]) {
+    const created = await postJson(`${app.url}/api/sessions`, {
+      title: contentType,
+      workbench: "execution",
+      projectRoot: "sample",
+      steps: [],
+    });
+    const response = await fetch(`${app.url}/api/sessions/${created.body.id}/trace`, {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body: contentType.startsWith("application/json") ? "[]" : "",
+    });
+    assert.equal(response.status, 202, contentType);
+  }
+});
+
 test("GET /api/health reports the injected allowed root", async (t) => {
   const app = await startTestApp(t);
 

@@ -67,20 +67,20 @@ async function readJson(request, limit = 1024 * 1024) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
-async function* readTraceEvents(request) {
+function requireTraceContentType(request) {
   const contentType = request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType === "application/json" || contentType === "application/x-ndjson" || contentType === "application/ndjson") return contentType;
+  rejectRequest("Trace ingestion requires application/json, application/x-ndjson, or application/ndjson", 415);
+}
+
+async function* readTraceEvents(request) {
+  const contentType = requireTraceContentType(request);
   if (contentType === "application/x-ndjson" || contentType === "application/ndjson") {
     yield* decodeNdjson(request);
     return;
   }
-  if (contentType === "application/json") {
-    const body = await readJson(request);
-    for (const value of Array.isArray(body) ? body : [body]) yield assertTraceEvent(value);
-    return;
-  }
-  const error = new Error("Trace ingestion requires application/json or application/x-ndjson");
-  error.statusCode = 415;
-  throw error;
+  const body = await readJson(request);
+  for (const value of Array.isArray(body) ? body : [body]) yield assertTraceEvent(value);
 }
 
 async function serveStatic(response, pathname) {
@@ -232,6 +232,7 @@ export async function createApp(options = {}) {
 
       const traceMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/trace$/i);
       if (request.method === "POST" && traceMatch) {
+        requireTraceContentType(request);
         const id = traceMatch[1];
         if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
         const session = await requireSession(id);
