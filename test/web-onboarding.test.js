@@ -34,7 +34,7 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   const createHandler = app.slice(app.indexOf("async function createOnboardingSession"));
   assert.match(createHandler, /async function createOnboardingSession\(\)\{\n  if\(state\.onboarding\.creating\)return;/);
   assert.match(createHandler, /finally\{\n    if\(request===state\.onboarding\.creationRequest\)state\.onboarding\.creating=false;\n    if\(generation!==state\.onboarding\.dialogGeneration&&request===state\.onboarding\.creationRequest\)setOnboardingCreating\(false\);\n  }/);
-  assert.match(createHandler, /await Promise\.allSettled\(\[refreshSessions\(\),refreshRecentProjects\(\)\]\)/);
+  assert.equal(createHandler.match(/refreshRecentProjects\(false\)/g)?.length,2);
   assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{\n    if\(\$\("#project-onboarding"\)\.open\)setOnboardingStatus\(creationError\?`Session creation failed: \$\{creationError\.message}`:"Session created\. You can inspect another project\.",creationError\?"error":"success"\);/);
   assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{[\s\S]*?refreshRecentProjects\(false\)/);
   const recentHandler = app.slice(app.indexOf("async function refreshRecentProjects"), app.indexOf("function resetOnboarding"));
@@ -42,6 +42,7 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.match(recentHandler, /if\(generation!==state\.onboarding\.dialogGeneration\|\|request!==state\.onboarding\.recentRequest\)return;/);
   assert.ok(recentHandler.indexOf('await api("/api/projects/recent")') < recentHandler.indexOf("if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return"));
   assert.ok(recentHandler.indexOf("if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return") < recentHandler.indexOf("state.onboarding.recent="));
+  assert.match(recentHandler, /if\(reportError&&!state\.onboarding\.creating&&\$\("#project-onboarding"\)\.open\)setOnboardingStatus/);
   const resetHandler = app.slice(app.indexOf("function resetOnboarding"), app.indexOf("function openOnboarding"));
   assert.doesNotMatch(resetHandler, /state\.onboarding\.creating=false/);
   assert.doesNotMatch(app, /onclose=[^\n]*state\.onboarding\.creating=false/);
@@ -49,6 +50,15 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   const sessionsHandler = app.slice(app.indexOf("async function refreshSessions"), app.indexOf("async function openSession"));
   assert.match(sessionsHandler, /const request=\+\+state\.sessionsRequest;/);
   assert.match(sessionsHandler, /if\(request!==state\.sessionsRequest\)return;/);
+  const openHandler = app.slice(app.indexOf("async function openSession"), app.indexOf("async function seek"));
+  assert.match(openHandler, /const request=\+\+state\.openSessionRequest;/);
+  assert.match(openHandler, /catch\(error\)\{\n    if\(request!==state\.openSessionRequest\)return;/);
+  assert.match(openHandler, /}\n  if\(request!==state\.openSessionRequest\)return;\n  if\(state\.events\)state\.events\.close\(\);/);
+  const openFreshness = openHandler.lastIndexOf("if(request!==state.openSessionRequest)return");
+  assert.ok(openHandler.indexOf("await api(") < openFreshness);
+  assert.ok(openFreshness < openHandler.indexOf("state.events.close()"));
+  assert.ok(openFreshness < openHandler.indexOf("renderSession(session)"));
+  assert.ok(openFreshness < openHandler.indexOf("new EventSource("));
 });
 
 test("parseSessionImport parses an object and treats whitespace as no import", () => {

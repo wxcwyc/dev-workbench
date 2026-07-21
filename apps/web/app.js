@@ -1,6 +1,6 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, summarizeOnboarding } from "./onboarding.js";
 
-const state={sessions:[],sessionsRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false}};
+const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false}};
 const $=(selector)=>document.querySelector(selector);
 
 async function api(path,options={}){
@@ -62,7 +62,7 @@ async function refreshRecentProjects(reportError=true){
     if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return;
     state.onboarding.recent=[];
     container.innerHTML=`<span class="inline-error">${escapeHtml(error.message)}</span>`;
-    if(reportError&&$("#project-onboarding").open)setOnboardingStatus(`Could not load recent projects: ${error.message}`,"error");
+    if(reportError&&!state.onboarding.creating&&$("#project-onboarding").open)setOnboardingStatus(`Could not load recent projects: ${error.message}`,"error");
   }
 }
 
@@ -211,7 +211,7 @@ async function createOnboardingSession(){
     setOnboardingStatus(creationError.message,"error");
     return;
   }
-  await Promise.allSettled([refreshSessions(),refreshRecentProjects()]);
+  await Promise.allSettled([refreshSessions(),refreshRecentProjects(false)]);
   if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.creationRequest){
     if(request===state.onboarding.creationRequest)setOnboardingCreating(state.onboarding.creating);
     return;
@@ -288,8 +288,17 @@ async function refreshSessions(){
   renderSessions();
 }
 async function openSession(id){
+  const request=++state.openSessionRequest;
+  let session;
+  try{
+    session=await api(`/api/sessions/${id}`);
+  }catch(error){
+    if(request!==state.openSessionRequest)return;
+    throw error;
+  }
+  if(request!==state.openSessionRequest)return;
   if(state.events)state.events.close();
-  renderSession(await api(`/api/sessions/${id}`));
+  renderSession(session);
   state.events=new EventSource(`/api/sessions/${id}/events`);
   state.events.onmessage=(event)=>{const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
 }
