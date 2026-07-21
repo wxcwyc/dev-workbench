@@ -130,3 +130,155 @@ test("does not read a package.json larger than one MiB", async (context) => {
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /package\.json.*too large/i);
 });
+
+test("ignores a non-regular package.json", async (context) => {
+  const projectRoot = await createProject(context);
+  await fs.mkdir(path.join(projectRoot, "package.json"));
+
+  const result = await inspectProject(projectRoot);
+
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.ok(result.warnings.some((warning) => /package\.json.*regular file/i.test(warning)));
+});
+
+test("warns when package.json cannot be opened", async (context) => {
+  const projectRoot = await createProject(context);
+  const packagePath = path.join(projectRoot, "package.json");
+  await fs.writeFile(packagePath, "{}\n");
+  const originalOpen = fs.open.bind(fs);
+  context.mock.method(fs, "open", async (target, ...args) => {
+    if (path.resolve(target) === packagePath) throw new Error("open denied");
+    return originalOpen(target, ...args);
+  });
+
+  const result = await inspectProject(projectRoot);
+
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.ok(result.warnings.some((warning) => /package\.json.*open denied/i.test(warning)));
+});
+
+test("warns and closes the handle when package.json cannot be read", async (context) => {
+  const projectRoot = await createProject(context);
+  const packagePath = path.join(projectRoot, "package.json");
+  await fs.writeFile(packagePath, "{}\n");
+  const originalOpen = fs.open.bind(fs);
+  let closed = false;
+  context.mock.method(fs, "open", async (target, ...args) => {
+    if (path.resolve(target) !== packagePath) return originalOpen(target, ...args);
+    return {
+      stat: () => fs.stat(packagePath),
+      readFile: async () => { throw new Error("read denied"); },
+      close: async () => { closed = true; },
+    };
+  });
+
+  const result = await inspectProject(projectRoot);
+
+  assert.equal(closed, true);
+  assert.ok(!result.evidence.includes("package.json"));
+  assert.ok(result.warnings.some((warning) => /package\.json.*read denied/i.test(warning)));
+});
+
+test("reads package.json only through a bounded no-follow file handle", async () => {
+  const source = await fs.readFile(
+    new URL("../packages/project-adapters/src/project-inspector.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /fs\.open\([^\n]+O_NOFOLLOW/);
+  assert.match(source, /packageHandle\.stat\(/);
+  assert.match(source, /packageHandle\.readFile\(/);
+  assert.match(source, /packageHandle\.close\(/);
+  assert.doesNotMatch(source, /fs\.readFile\(path\.join\(projectRoot,\s*["']package\.json["']/);
+});
+
+test("inspectProject rejects a project root replaced by a symlink", async (context) => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-inspect-root-"));
+  const projectRoot = path.join(temporaryRoot, "project");
+  const movedRoot = path.join(temporaryRoot, "moved-project");
+  const outsideRoot = path.join(temporaryRoot, "outside");
+  context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
+  await fs.mkdir(projectRoot);
+  await fs.mkdir(outsideRoot);
+  await fs.rename(projectRoot, movedRoot);
+  await fs.symlink(outsideRoot, projectRoot, process.platform === "win32" ? "junction" : "dir");
+
+  await assert.rejects(
+    inspectProject(projectRoot),
+    /project root.*symbolic link/i,
+  );
+});
+
+test("inspectProject rejects a root changed during inspection", async (context) => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-inspect-root-race-"));
+  const projectRoot = path.join(temporaryRoot, "project");
+  const movedRoot = path.join(temporaryRoot, "moved-project");
+  const outsideRoot = path.join(temporaryRoot, "outside");
+  context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
+  await fs.mkdir(projectRoot);
+  await fs.mkdir(outsideRoot);
+  const originalReaddir = fs.readdir.bind(fs);
+  let replaced = false;
+  context.mock.method(fs, "readdir", async (target, options) => {
+    const children = await originalReaddir(target, options);
+    if (!replaced && path.resolve(target) === projectRoot) {
+      replaced = true;
+      await fs.rename(projectRoot, movedRoot);
+      await fs.symlink(outsideRoot, projectRoot, process.platform === "win32" ? "junction" : "dir");
+    }
+    return children;
+  });
+
+  await assert.rejects(
+    inspectProject(projectRoot),
+    /project root changed during inspection/i,
+  );
+});
+
+test("inspectProject verifies the root identity before returning", async () => {
+  const source = await fs.readFile(
+    new URL("../packages/project-adapters/src/project-inspector.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(source.match(/await readProjectRootIdentity\(projectRoot\)/g)?.length, 2);
+  assert.match(source, /Project root changed during inspection/);
+});
+
+test("inspectProject skips source hashing", async (context) => {
+  const projectRoot = await createProject(context);
+  const sourceFile = path.join(projectRoot, "index.js");
+  await fs.writeFile(sourceFile, "export default true;\n");
+  const originalReadFile = fs.readFile.bind(fs);
+  context.mock.method(fs, "readFile", async (target, ...args) => {
+    if (path.resolve(target) === sourceFile) throw new Error("source content must not be read");
+    return originalReadFile(target, ...args);
+  });
+
+  const result = await inspectProject(projectRoot);
+
+  assert.deepEqual(result.languages, ["JavaScript"]);
+  assert.ok(result.evidence.includes("index.js"));
+});
+
+test("inspectProject warns and continues after a nested scan failure", async (context) => {
+  const projectRoot = await createProject(context);
+  const nested = path.join(projectRoot, "nested");
+  await fs.mkdir(nested);
+  await fs.writeFile(path.join(projectRoot, "main.py"), "print('safe')\n");
+  const originalReaddir = fs.readdir.bind(fs);
+  context.mock.method(fs, "readdir", async (target, options) => {
+    if (path.resolve(target) === nested) {
+      const error = new Error("nested directory denied");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalReaddir(target, options);
+  });
+
+  const result = await inspectProject(projectRoot);
+
+  assert.deepEqual(result.languages, ["Python"]);
+  assert.ok(result.evidence.includes("main.py"));
+  assert.ok(result.warnings.some((warning) => /nested.*nested directory denied/i.test(warning)));
+});

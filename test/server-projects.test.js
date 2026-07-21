@@ -171,6 +171,30 @@ test("invalid imported steps report a JSON pointer and do not update recent proj
   assert.deepEqual(await response.json(), []);
 });
 
+test("project file roots are rejected and never recorded as recent", async (t) => {
+  const app = await startTestApp(t);
+  await fs.writeFile(path.join(app.allowedRoot, "project.txt"), "not a directory\n", "utf8");
+
+  const inspected = await postJson(`${app.url}/api/projects/inspect`, {
+    projectRoot: "project.txt",
+  });
+  assert.equal(inspected.response.status, 400);
+  assert.match(inspected.body.error, /project root must be a directory/i);
+
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "File-backed project",
+    workbench: "migration",
+    projectRoot: "project.txt",
+    steps: [],
+  });
+  assert.equal(created.response.status, 400);
+  assert.match(created.body.error, /project root must be a directory/i);
+
+  const response = await fetch(`${app.url}/api/projects/recent`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), []);
+});
+
 test("GET /api/health reports the injected allowed root", async (t) => {
   const app = await startTestApp(t);
 

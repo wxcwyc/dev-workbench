@@ -21,6 +21,108 @@ test("file snapshots expose added and modified files", async (context) => {
   ]);
 });
 
+test("captureFileTree can skip content hashes", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-no-hash-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, "index.js"), "export default true;\n");
+
+  const tree = await captureFileTree(root, 2000, { hashFiles: false });
+
+  assert.equal(tree.entries.length, 1);
+  assert.equal("hash" in tree.entries[0], false);
+});
+
+test("captureFileTree reports a nested scan error and continues", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-nested-error-"));
+  const nested = path.join(root, "nested");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(nested);
+  await fs.writeFile(path.join(root, "safe.txt"), "safe\n");
+  const originalReaddir = fs.readdir.bind(fs);
+  context.mock.method(fs, "readdir", async (target, options) => {
+    if (path.resolve(target) === nested) {
+      const error = new Error("nested directory denied");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalReaddir(target, options);
+  });
+  const scanErrors = [];
+
+  const tree = await captureFileTree(root, 2000, {
+    hashFiles: false,
+    onError: (relativePath, error) => scanErrors.push({ relativePath, error }),
+  });
+
+  assert.ok(tree.entries.some((entry) => entry.path === "safe.txt"));
+  assert.deepEqual(scanErrors.map(({ relativePath }) => relativePath), ["nested"]);
+  assert.match(scanErrors[0].error.message, /nested directory denied/);
+});
+
+test("captureFileTree keeps root directory read failures fatal", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-root-error-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const originalReaddir = fs.readdir.bind(fs);
+  context.mock.method(fs, "readdir", async (target, options) => {
+    if (path.resolve(target) === root) throw new Error("root directory denied");
+    return originalReaddir(target, options);
+  });
+  const scanErrors = [];
+
+  await assert.rejects(
+    captureFileTree(root, 2000, {
+      onError: (relativePath, error) => scanErrors.push({ relativePath, error }),
+    }),
+    /root directory denied/,
+  );
+  assert.deepEqual(scanErrors, []);
+});
+
+test("captureFileTree reports a file stat error and continues", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-stat-error-"));
+  const vanishedFile = path.join(root, "vanished.js");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, "safe.txt"), "safe\n");
+  await fs.writeFile(vanishedFile, "export default true;\n");
+  const originalStat = fs.stat.bind(fs);
+  context.mock.method(fs, "stat", async (target, ...args) => {
+    if (path.resolve(target) === vanishedFile) throw new Error("file vanished");
+    return originalStat(target, ...args);
+  });
+  const scanErrors = [];
+
+  const tree = await captureFileTree(root, 2000, {
+    hashFiles: false,
+    onError: (relativePath, error) => scanErrors.push({ relativePath, error }),
+  });
+
+  assert.deepEqual(tree.entries.map((entry) => entry.path), ["safe.txt"]);
+  assert.deepEqual(scanErrors.map(({ relativePath }) => relativePath), ["vanished.js"]);
+});
+
+test("captureFileTree keeps strict defaults but can degrade a hash read failure", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-hash-error-"));
+  const sourceFile = path.join(root, "source.js");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(sourceFile, "export default true;\n");
+  const originalReadFile = fs.readFile.bind(fs);
+  context.mock.method(fs, "readFile", async (target, ...args) => {
+    if (path.resolve(target) === sourceFile) throw new Error("hash read failed");
+    return originalReadFile(target, ...args);
+  });
+
+  await assert.rejects(captureFileTree(root), /hash read failed/);
+
+  const scanErrors = [];
+  const tree = await captureFileTree(root, 2000, {
+    onError: (relativePath, error) => scanErrors.push({ relativePath, error }),
+  });
+  assert.equal(tree.entries.length, 1);
+  assert.equal(tree.entries[0].path, "source.js");
+  assert.equal("hash" in tree.entries[0], false);
+  assert.deepEqual(scanErrors.map(({ relativePath }) => relativePath), ["source.js"]);
+});
+
 test("confirmed command runner uses argv without a shell and stays inside project", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -63,6 +165,18 @@ test("command runner accepts an executable path containing spaces", { skip: proc
 test("resolveInsideProject accepts an in-root name that starts with dots", () => {
   const root = path.join(os.tmpdir(), "dev-workbench-project-root");
   assert.equal(resolveInsideProject(root, "..valid"), path.join(root, "..valid"));
+});
+
+test("resolveProjectRoot rejects an in-boundary regular file", async (context) => {
+  const allowedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "project-boundary-file-"));
+  context.after(() => fs.rm(allowedRoot, { recursive: true, force: true }));
+  const projectFile = path.join(allowedRoot, "project.txt");
+  await fs.writeFile(projectFile, "not a directory\n", "utf8");
+
+  await assert.rejects(
+    resolveProjectRoot(projectFile, allowedRoot),
+    /project root must be a directory/i,
+  );
 });
 
 test("command runner rejects a cwd symlink that escapes the project", async (context) => {

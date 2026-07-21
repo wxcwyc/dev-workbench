@@ -6,6 +6,7 @@ export async function resolveProjectRoot(candidate, allowedRoot) {
   const resolvedProject = await fs.realpath(path.resolve(candidate));
   const relative = path.relative(resolvedAllowed, resolvedProject);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Project must be inside allowed root: ${resolvedAllowed}`);
+  if (!(await fs.stat(resolvedProject)).isDirectory()) throw new Error(`Project root must be a directory: ${resolvedProject}`);
   return resolvedProject;
 }
 

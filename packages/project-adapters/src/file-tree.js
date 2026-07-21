@@ -5,9 +5,21 @@ import { createHash } from "node:crypto";
 const ignored = new Set([".git", "node_modules", ".dev-workbench"]);
 const textExtensions = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".json", ".md", ".html", ".css", ".yml", ".yaml", ".toml", ".txt", ".pl"]);
 
-async function walk(root, current, entries, limit) {
+function reportOptionalError(onError, relativePath, error) {
+  if (!onError) throw error;
+  onError(relativePath, error);
+}
+
+async function walk(root, current, entries, limit, options, rootDirectory = false) {
   if (entries.length >= limit) return;
-  const children = await fs.readdir(current, { withFileTypes: true });
+  let children;
+  try {
+    children = await fs.readdir(current, { withFileTypes: true });
+  } catch (error) {
+    if (rootDirectory) throw error;
+    reportOptionalError(options.onError, path.relative(root, current), error);
+    return;
+  }
   children.sort((left, right) => left.name.localeCompare(right.name));
   for (const child of children) {
     if (entries.length >= limit || ignored.has(child.name)) continue;
@@ -15,22 +27,32 @@ async function walk(root, current, entries, limit) {
     const relativePath = path.relative(root, absolute);
     if (child.isDirectory()) {
       entries.push({ path: relativePath, type: "directory" });
-      await walk(root, absolute, entries, limit);
+      await walk(root, absolute, entries, limit, options);
       continue;
     }
     if (!child.isFile()) continue;
-    const stat = await fs.stat(absolute);
+    let stat;
+    try {
+      stat = await fs.stat(absolute);
+    } catch (error) {
+      reportOptionalError(options.onError, relativePath, error);
+      continue;
+    }
     const entry = { path: relativePath, type: "file", size: stat.size, modifiedAt: stat.mtime.toISOString() };
-    if (stat.size <= 128 * 1024 && textExtensions.has(path.extname(child.name).toLowerCase())) {
-      entry.hash = createHash("sha256").update(await fs.readFile(absolute)).digest("hex").slice(0, 16);
+    if (options.hashFiles && stat.size <= 128 * 1024 && textExtensions.has(path.extname(child.name).toLowerCase())) {
+      try {
+        entry.hash = createHash("sha256").update(await fs.readFile(absolute)).digest("hex").slice(0, 16);
+      } catch (error) {
+        reportOptionalError(options.onError, relativePath, error);
+      }
     }
     entries.push(entry);
   }
 }
 
-export async function captureFileTree(projectRoot, limit = 2000) {
+export async function captureFileTree(projectRoot, limit = 2000, { hashFiles = true, onError = null } = {}) {
   const entries = [];
-  await walk(projectRoot, projectRoot, entries, limit);
+  await walk(projectRoot, projectRoot, entries, limit, { hashFiles, onError }, true);
   return { entries, truncated: entries.length >= limit };
 }
 

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { captureFileTree } from "./file-tree.js";
 
@@ -55,11 +56,61 @@ async function inspectOptionalEntry(projectRoot, name, warnings) {
   }
 }
 
+async function readProjectRootIdentity(projectRoot) {
+  let entry;
+  try {
+    entry = await fs.lstat(projectRoot);
+  } catch (error) {
+    throw new Error(`Could not inspect project root ${projectRoot}: ${error.message}`, { cause: error });
+  }
+  if (entry.isSymbolicLink()) throw new Error(`Project root must not be a symbolic link: ${projectRoot}`);
+  if (!entry.isDirectory()) throw new Error(`Project root must be a directory: ${projectRoot}`);
+  return { device: entry.dev, inode: entry.ino };
+}
+
+async function readPackageJson(projectRoot, initialEntry, warnings) {
+  const packagePath = path.join(projectRoot, "package.json");
+  let packageHandle;
+  try {
+    packageHandle = await fs.open(packagePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const openedEntry = await packageHandle.stat();
+    if (!openedEntry.isFile()) {
+      warnings.push("Ignored package.json: expected a regular file.");
+      return null;
+    }
+    if (openedEntry.dev !== initialEntry.dev || openedEntry.ino !== initialEntry.ino) {
+      warnings.push("Ignored package.json: file changed while being inspected.");
+      return null;
+    }
+    if (openedEntry.size > maxPackageJsonSize) {
+      warnings.push(`Ignored package.json: too large (maximum ${maxPackageJsonSize} bytes).`);
+      return null;
+    }
+    return await packageHandle.readFile("utf8");
+  } catch (error) {
+    warnings.push(`Could not read package.json: ${error.message}`);
+    return null;
+  } finally {
+    if (packageHandle) {
+      try {
+        await packageHandle.close();
+      } catch (error) {
+        warnings.push(`Could not close package.json: ${error.message}`);
+      }
+    }
+  }
+}
+
 export async function inspectProject(projectRoot) {
-  const { entries, truncated } = await captureFileTree(projectRoot, 2000);
+  const rootIdentity = await readProjectRootIdentity(projectRoot);
+  const warnings = [];
+  const { entries, truncated } = await captureFileTree(projectRoot, 2000, {
+    hashFiles: false,
+    onError: (relativePath, error) => warnings.push(`Could not inspect ${relativePath}: ${error.message}`),
+  });
   const files = entries.filter((entry) => entry.type === "file");
   const evidence = new Set();
-  const warnings = truncated ? ["Language scan truncated after 2000 file-tree entries."] : [];
+  if (truncated) warnings.push("Language scan truncated after 2000 file-tree entries.");
 
   const gitEntry = await inspectOptionalEntry(projectRoot, ".git", warnings);
   const git = gitEntry?.isFile() || gitEntry?.isDirectory() || false;
@@ -83,11 +134,9 @@ export async function inspectProject(projectRoot) {
   const packageJsonEntry = await inspectOptionalEntry(projectRoot, "package.json", warnings);
   if (packageJsonEntry && !packageJsonEntry.isFile()) {
     warnings.push("Ignored package.json: expected a regular file.");
-  } else if (packageJsonEntry?.size > maxPackageJsonSize) {
-    warnings.push(`Ignored package.json: too large (maximum ${maxPackageJsonSize} bytes).`);
   } else if (packageJsonEntry) {
-    try {
-      const packageJson = await fs.readFile(path.join(projectRoot, "package.json"), "utf8");
+    const packageJson = await readPackageJson(projectRoot, packageJsonEntry, warnings);
+    if (packageJson !== null) {
       evidence.add("package.json");
       try {
         packageManifest = JSON.parse(packageJson);
@@ -95,8 +144,6 @@ export async function inspectProject(projectRoot) {
       } catch (error) {
         warnings.push(`Could not read package.json: ${error.message}`);
       }
-    } catch (error) {
-      warnings.push(`Could not read package.json: ${error.message}`);
     }
   }
 
@@ -120,6 +167,16 @@ export async function inspectProject(projectRoot) {
       .map((dependency) => frameworksByDependency.get(dependency))
       .filter(Boolean)
   )].sort((left, right) => left.localeCompare(right));
+
+  let finalRootIdentity;
+  try {
+    finalRootIdentity = await readProjectRootIdentity(projectRoot);
+  } catch (error) {
+    throw new Error(`Project root changed during inspection: ${error.message}`, { cause: error });
+  }
+  if (finalRootIdentity.device !== rootIdentity.device || finalRootIdentity.inode !== rootIdentity.inode) {
+    throw new Error("Project root changed during inspection");
+  }
 
   return {
     projectRoot,
