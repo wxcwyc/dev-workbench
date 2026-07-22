@@ -51,15 +51,10 @@ test("plan validation reports precise JSON pointer paths", () => {
     );
   }
   assert.throws(
-    () => assertPlanInput({ steps: [{ title: "   " }] }),
+    () => assertPlanInput({ steps: [{ title: "   ", action: { command: ["npm", 1] } }] }),
     (error) => error instanceof ProtocolValidationError
       && error.documentType === "plan"
       && error.issues.some((item) => item.path === "/steps/0/title")
-  );
-  assert.throws(
-    () => assertPlanInput({ steps: [{ title: "Install", action: { command: ["npm", 1] } }] }),
-    (error) => error instanceof ProtocolValidationError
-      && error.documentType === "plan"
       && error.issues.some((item) => item.path === "/steps/0/action/command/1")
   );
   assert.throws(
