@@ -27,6 +27,15 @@ test("v1 JSON Schemas are parseable and use draft 2020-12", async () => {
   }
 });
 
+test("step schema matches the editable plan field contract", async () => {
+  const schema = JSON.parse(await fs.readFile(path.resolve("packages/protocol/schemas/v1/step.schema.json"), "utf8"));
+
+  assert.equal(schema.properties.id.pattern, "\\S");
+  assert.equal(schema.properties.title.pattern, "\\S");
+  assert.equal(schema.properties.description.type, "string");
+  assert.equal(schema.additionalProperties, false);
+});
+
 test("plan validation accepts steps and exposes the plan update event", () => {
   const input = {
     steps: [{
@@ -51,10 +60,13 @@ test("plan validation reports precise JSON pointer paths", () => {
     );
   }
   assert.throws(
-    () => assertPlanInput({ steps: [{ title: "   ", action: { command: ["npm", 1] } }] }),
+    () => assertPlanInput({ steps: [{ id: "", title: "   ", description: 3, status: "pending", action: { command: ["npm", 1] } }] }),
     (error) => error instanceof ProtocolValidationError
       && error.documentType === "plan"
+      && error.issues.some((item) => item.path === "/steps/0/id")
       && error.issues.some((item) => item.path === "/steps/0/title")
+      && error.issues.some((item) => item.path === "/steps/0/description")
+      && error.issues.some((item) => item.path === "/steps/0/status")
       && error.issues.some((item) => item.path === "/steps/0/action/command/1")
   );
   assert.throws(
@@ -62,6 +74,16 @@ test("plan validation reports precise JSON pointer paths", () => {
     (error) => error instanceof ProtocolValidationError
       && error.documentType === "plan"
       && error.issues.some((item) => item.path === "/extra")
+  );
+});
+
+test("plan validation escapes additional property JSON pointer segments", () => {
+  assert.throws(
+    () => assertPlanInput({ steps: [], "a/b": true, "x~y": true }),
+    (error) => error instanceof ProtocolValidationError
+      && error.documentType === "plan"
+      && error.issues.some((item) => item.path === "/a~1b")
+      && error.issues.some((item) => item.path === "/x~0y")
   );
 });
 

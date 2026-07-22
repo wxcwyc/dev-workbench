@@ -20,10 +20,11 @@ export class ProtocolValidationError extends Error {
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const issue = (issues, path, message) => issues.push({ path, message });
+const escapePointerSegment = (value) => value.replaceAll("~", "~0").replaceAll("/", "~1");
 const allowedKeys = (value, keys, path, issues) => {
   if (!isObject(value)) return;
   for (const key of Object.keys(value)) {
-    if (!keys.includes(key)) issue(issues, `${path === "/" ? "" : path}/${key}`, "is not allowed");
+    if (!keys.includes(key)) issue(issues, `${path === "/" ? "" : path}/${escapePointerSegment(key)}`, "is not allowed");
   }
 };
 
@@ -65,7 +66,9 @@ function validateTraceItem(item, path, issues) {
 function validateStep(step, path, issues) {
   if (!requireObject(step, path, issues)) return;
   allowedKeys(step, ["id", "title", "description", "expected", "action", "traceState"], path, issues);
+  if (step.id !== undefined) requireString(step.id, `${path}/id`, issues);
   requireString(step.title, `${path}/title`, issues);
+  if (step.description !== undefined && typeof step.description !== "string") issue(issues, `${path}/description`, "must be a string");
   if (step.action !== undefined && step.action !== null) validateAction(step.action, `${path}/action`, issues);
   if (step.traceState !== undefined && step.traceState !== null) requireObject(step.traceState, `${path}/traceState`, issues);
 }
