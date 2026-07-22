@@ -44,11 +44,23 @@ export class SessionEngine {
       throw new Error("Plan replacement requires a pristine migration session");
     }
 
-    session.steps = steps.map(normalizeStep);
+    const nextSteps = steps.map(normalizeStep);
+    const updateEvent = event("plan.updated", { stepCount: nextSteps.length });
+    const updatedAt = timestamp();
+    const candidate = {
+      ...session,
+      steps: nextSteps,
+      status: "ready",
+      events: [...session.events, updateEvent],
+      updatedAt
+    };
+    const result = publicSession(candidate);
+
+    session.events.push(updateEvent);
+    session.steps = nextSteps;
     session.status = "ready";
-    session.events.push(event("plan.updated", { stepCount: session.steps.length }));
-    this.touch(session);
-    return publicSession(session);
+    session.updatedAt = updatedAt;
+    return result;
   }
 
   nextRunnable(session) {

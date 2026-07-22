@@ -148,6 +148,35 @@ test("plan replacement remains atomic when traceState cannot be cloned", () => {
   assert.deepEqual(session, before);
 });
 
+test("plan replacement remains atomic when the public session cannot be cloned", () => {
+  const metadata = { callback() {} };
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    metadata,
+    steps: [{ title: "Original step" }]
+  });
+  const steps = session.steps;
+  const events = session.events;
+  const before = {
+    steps: structuredClone(session.steps),
+    status: session.status,
+    events: structuredClone(session.events),
+    updatedAt: session.updatedAt
+  };
+
+  assert.throws(() => engine.replacePlan(session, [{ title: "Replacement" }]), /clone/i);
+  assert.strictEqual(session.steps, steps);
+  assert.deepEqual(session.steps, before.steps);
+  assert.equal(session.status, before.status);
+  assert.strictEqual(session.events, events);
+  assert.deepEqual(session.events, before.events);
+  assert.equal(session.updatedAt, before.updatedAt);
+  assert.strictEqual(session.metadata, metadata);
+});
+
 function assertPlanReplacementRejectedWithoutMutation(session, message) {
   const engine = new SessionEngine();
   const before = structuredClone(session);
