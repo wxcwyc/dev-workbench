@@ -58,6 +58,20 @@ async function putJson(url, body) {
   return { response, body: await response.json() };
 }
 
+async function withTimeout(promise, label, timeoutMs = 2000) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createSseReader(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -417,17 +431,19 @@ test("PUT /api/sessions/:id/plan broadcasts the persisted full session over SSE"
     steps: [{ title: "Old step" }],
   });
   const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
-  const streamResponse = await fetch(`${sessionUrl}/events`);
+  const streamAbort = new AbortController();
+  t.after(() => streamAbort.abort());
+  const streamResponse = await fetch(`${sessionUrl}/events`, { signal: streamAbort.signal });
   assert.equal(streamResponse.status, 200);
   const stream = createSseReader(streamResponse);
   t.after(() => stream.cancel());
-  await stream.next();
+  await withTimeout(stream.next(), "initial SSE session");
 
   const replacement = await putJson(`${sessionUrl}/plan`, {
     steps: [{ title: "New streamed step" }],
   });
   assert.equal(replacement.response.status, 200);
-  const eventSession = await stream.next();
+  const eventSession = await withTimeout(stream.next(), "updated SSE session");
 
   assert.deepEqual(eventSession, replacement.body);
   assert.equal(eventSession.steps[0].title, "New streamed step");
@@ -436,6 +452,7 @@ test("PUT /api/sessions/:id/plan broadcasts the persisted full session over SSE"
     { type: "plan.updated", stepCount: 1 },
   );
   await stream.cancel();
+  streamAbort.abort();
 });
 
 test("PUT /api/sessions/:id/plan rejects non-pristine sessions without changing stored state", async (t) => {
@@ -496,6 +513,8 @@ test("PUT /api/sessions/:id/plan returns 409 during an active operation and neve
   let signalCommandStarted;
   const commandStarted = new Promise((resolve) => { signalCommandStarted = resolve; });
   const blocked = new Promise((resolve) => { releaseCommand = resolve; });
+  const commandResult = { command: ["deferred-test-command"], stdout: "", stderr: "", exitCode: 0 };
+  t.after(() => releaseCommand(commandResult));
   let runCalls = 0;
   const app = await startTestApp(t, {
     runCommand: async () => {
@@ -512,20 +531,78 @@ test("PUT /api/sessions/:id/plan returns 409 during an active operation and neve
     steps: [{ title: "Run", action: { command: ["deferred-test-command"] } }],
   });
   const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
-  const runRequest = postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
-  await commandStarted;
-  const before = await (await fetch(sessionUrl)).json();
+  let runRequest;
+  let runResult;
+  try {
+    runRequest = postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+    await withTimeout(commandStarted, "deferred command start");
+    const before = await (await fetch(sessionUrl)).json();
 
-  const replacement = await putJson(`${sessionUrl}/plan`, {
-    steps: [{ title: "Must not replace" }],
+    const replacement = await putJson(`${sessionUrl}/plan`, {
+      steps: [{ title: "Must not replace" }],
+    });
+
+    assert.equal(replacement.response.status, 409);
+    assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+    assert.equal(runCalls, 1);
+  } finally {
+    releaseCommand(commandResult);
+    if (runRequest) runResult = await withTimeout(runRequest, "deferred run cleanup");
+  }
+  assert.equal(runResult.response.status, 200);
+  assert.equal(runCalls, 1);
+});
+
+test("session mutation lock rejects concurrent plan, run, and annotation requests and releases after errors", async (t) => {
+  let releasePlan;
+  let signalPlanClaimed;
+  const planClaimed = new Promise((resolve) => { signalPlanClaimed = resolve; });
+  const blockedPlan = new Promise((resolve) => { releasePlan = resolve; });
+  t.after(() => releasePlan());
+  let planClaims = 0;
+  const app = await startTestApp(t, {
+    afterSessionClaim: ({ operation }) => {
+      if (operation !== "plan" || planClaims++ > 0) return undefined;
+      signalPlanClaimed();
+      return blockedPlan;
+    },
   });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Locked migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Original" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  let firstPlanRequest;
+  let firstPlanResult;
 
-  assert.equal(replacement.response.status, 409);
-  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
-  assert.equal(runCalls, 1);
-  releaseCommand({ command: ["deferred-test-command"], stdout: "", stderr: "", exitCode: 0 });
-  assert.equal((await runRequest).response.status, 200);
-  assert.equal(runCalls, 1);
+  try {
+    firstPlanRequest = putJson(`${sessionUrl}/plan`, { steps: [{ title: "First replacement" }] });
+    await withTimeout(planClaimed, "first plan claim");
+
+    const secondPlan = await putJson(`${sessionUrl}/plan`, { steps: [{ title: "Second replacement" }] });
+    const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+    const annotation = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "Concurrent note" });
+    assert.equal(secondPlan.response.status, 409);
+    assert.equal(run.response.status, 409);
+    assert.equal(annotation.response.status, 409);
+
+    releasePlan();
+    firstPlanResult = await withTimeout(firstPlanRequest, "first plan completion");
+  } finally {
+    releasePlan();
+    if (firstPlanRequest && !firstPlanResult) {
+      await withTimeout(firstPlanRequest, "first plan cleanup").catch(() => {});
+    }
+  }
+
+  assert.equal(firstPlanResult.response.status, 200);
+  const invalid = await putJson(`${sessionUrl}/plan`, { steps: [{ title: "   " }] });
+  assert.equal(invalid.response.status, 400);
+  const afterInvalid = await putJson(`${sessionUrl}/plan`, { steps: [{ title: "After invalid" }] });
+  assert.equal(afterInvalid.response.status, 200);
 });
 
 test("PUT /api/sessions/:id/plan reports protocol pointers and preserves invalid plans", async (t) => {

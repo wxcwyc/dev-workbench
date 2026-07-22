@@ -124,6 +124,11 @@ export async function createApp(options = {}) {
   await store.initialize();
 
   const emit = (session) => events.emit(`session:${session.id}`, publicSession(session));
+  const claimSession = (id, message = "Session already has an active operation") => {
+    if (runningSessions.has(id)) { const error = new Error(message); error.statusCode = 409; throw error; }
+    runningSessions.add(id);
+    return () => runningSessions.delete(id);
+  };
   const requireSession = async (id) => {
     const session = await store.get(id);
     if (!session) { const error = new Error("Session not found"); error.statusCode = 404; throw error; }
@@ -219,13 +224,16 @@ export async function createApp(options = {}) {
       const planMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/plan$/i);
       if (request.method === "PUT" && planMatch) {
         const id = planMatch[1];
-        if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
-        const body = await readJson(request);
-        const session = await requireSession(id);
-        assertPlanInput(body);
-        engine.replacePlan(session, body.steps);
-        await store.save(session); emit(session);
-        return sendJson(response, 200, publicSession(session));
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "plan" });
+          const body = await readJson(request);
+          const session = await requireSession(id);
+          assertPlanInput(body);
+          engine.replacePlan(session, body.steps);
+          await store.save(session); emit(session);
+          return sendJson(response, 200, publicSession(session));
+        } finally { release(); }
       }
       if (request.method === "GET" && sessionMatch) return sendJson(response, 200, publicSession(await requireSession(sessionMatch[1])));
 
@@ -246,66 +254,80 @@ export async function createApp(options = {}) {
       if (request.method === "POST" && traceMatch) {
         requireTraceContentType(request);
         const id = traceMatch[1];
-        if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
-        const session = await requireSession(id);
-        let accepted = 0;
-        let started = false;
-        runningSessions.add(id);
+        const release = claimSession(id);
         try {
-          engine.startTraceStream(session); started = true; await store.save(session); emit(session);
-          for await (const traceEvent of readTraceEvents(request)) {
-            engine.appendTraceEvent(session, traceEvent);
-            await store.save(session); emit(session);
-            accepted += 1;
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "trace" });
+          const session = await requireSession(id);
+          let accepted = 0;
+          let started = false;
+          try {
+            engine.startTraceStream(session); started = true; await store.save(session); emit(session);
+            for await (const traceEvent of readTraceEvents(request)) {
+              engine.appendTraceEvent(session, traceEvent);
+              await store.save(session); emit(session);
+              accepted += 1;
+            }
+            engine.finishTraceStream(session); await store.save(session); emit(session);
+            return sendJson(response, 202, { accepted, nextSequence: session.steps.length, status: session.status });
+          } catch (error) {
+            if (started) { engine.finishTraceStream(session, error); await store.save(session); emit(session); }
+            error.accepted = accepted;
+            throw error;
           }
-          engine.finishTraceStream(session); await store.save(session); emit(session);
-          return sendJson(response, 202, { accepted, nextSequence: session.steps.length, status: session.status });
-        } catch (error) {
-          if (started) { engine.finishTraceStream(session, error); await store.save(session); emit(session); }
-          error.accepted = accepted;
-          throw error;
-        } finally { runningSessions.delete(id); }
+        } finally { release(); }
       }
 
       const seekMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/seek$/i);
       if (request.method === "POST" && seekMatch) {
-        const session = await requireSession(seekMatch[1]);
-        const body = await readJson(request);
-        engine.seek(session, body.stepIndex);
-        await store.save(session); emit(session);
-        return sendJson(response, 200, publicSession(session));
+        const id = seekMatch[1];
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "seek" });
+          const session = await requireSession(id);
+          const body = await readJson(request);
+          engine.seek(session, body.stepIndex);
+          await store.save(session); emit(session);
+          return sendJson(response, 200, publicSession(session));
+        } finally { release(); }
       }
 
       const noteMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/annotations$/i);
       if (request.method === "POST" && noteMatch) {
-        const session = await requireSession(noteMatch[1]);
-        engine.annotate(session, await readJson(request));
-        await store.save(session); emit(session);
-        return sendJson(response, 201, publicSession(session));
+        const id = noteMatch[1];
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "annotation" });
+          const session = await requireSession(id);
+          engine.annotate(session, await readJson(request));
+          await store.save(session); emit(session);
+          return sendJson(response, 201, publicSession(session));
+        } finally { release(); }
       }
 
       const runMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/run$/i);
       if (request.method === "POST" && runMatch) {
         const id = runMatch[1];
-        if (runningSessions.has(id)) { const error = new Error("Session already has a running step"); error.statusCode = 409; throw error; }
-        const body = await readJson(request);
-        const session = await requireSession(id);
-        const index = Number(runMatch[2]);
-        if (index !== engine.nextRunnable(session)) throw new Error("Steps must run in plan order");
-        const step = engine.requireStep(session, index);
-        if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
-        runningSessions.add(id);
+        const release = claimSession(id, "Session already has a running step");
         try {
-          engine.startStep(session, index); await store.save(session); emit(session);
-          const baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
-          const result = step.action ? await runCommand(session.projectRoot, step.action) : null;
-          const snapshot = step.traceState ? { trace: step.traceState } : await captureProjectSnapshot(session.projectRoot, baseline, result);
-          engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
-          return sendJson(response, 200, publicSession(session));
-        } catch (error) {
-          engine.failStep(session, index, error); await store.save(session); emit(session);
-          throw error;
-        } finally { runningSessions.delete(id); }
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "run" });
+          const body = await readJson(request);
+          const session = await requireSession(id);
+          const index = Number(runMatch[2]);
+          if (index !== engine.nextRunnable(session)) throw new Error("Steps must run in plan order");
+          const step = engine.requireStep(session, index);
+          if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
+          try {
+            engine.startStep(session, index); await store.save(session); emit(session);
+            const baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
+            const result = step.action ? await runCommand(session.projectRoot, step.action) : null;
+            const snapshot = step.traceState ? { trace: step.traceState } : await captureProjectSnapshot(session.projectRoot, baseline, result);
+            engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
+            return sendJson(response, 200, publicSession(session));
+          } catch (error) {
+            engine.failStep(session, index, error); await store.save(session); emit(session);
+            throw error;
+          }
+        } finally { release(); }
       }
 
       if (request.method === "GET" && await serveStatic(response, pathname)) return;
