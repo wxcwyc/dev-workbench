@@ -117,6 +117,7 @@ export async function createApp(options = {}) {
   };
   const engine = new SessionEngine();
   const store = new SessionStore(runtime.stateRoot);
+  const runCommand = options.runCommand ?? runConfirmedCommand;
   const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
   const events = new EventEmitter();
   const runningSessions = new Set();
@@ -215,6 +216,16 @@ export async function createApp(options = {}) {
       }
 
       const sessionMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)$/i);
+      const planMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/plan$/i);
+      if (request.method === "PUT" && planMatch) {
+        const id = planMatch[1];
+        if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
+        const body = await readJson(request);
+        const session = await requireSession(id);
+        engine.replacePlan(session, body.steps);
+        await store.save(session); emit(session);
+        return sendJson(response, 200, publicSession(session));
+      }
       if (request.method === "GET" && sessionMatch) return sendJson(response, 200, publicSession(await requireSession(sessionMatch[1])));
 
       const eventMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/events$/i);
@@ -286,7 +297,7 @@ export async function createApp(options = {}) {
         try {
           engine.startStep(session, index); await store.save(session); emit(session);
           const baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
-          const result = step.action ? await runConfirmedCommand(session.projectRoot, step.action) : null;
+          const result = step.action ? await runCommand(session.projectRoot, step.action) : null;
           const snapshot = step.traceState ? { trace: step.traceState } : await captureProjectSnapshot(session.projectRoot, baseline, result);
           engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
           return sendJson(response, 200, publicSession(session));

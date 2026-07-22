@@ -49,6 +49,44 @@ async function postJson(url, body) {
   return { response, body: await response.json() };
 }
 
+async function putJson(url, body) {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { response, body: await response.json() };
+}
+
+function createSseReader(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  return {
+    async next() {
+      while (true) {
+        const boundary = buffer.indexOf("\n\n");
+        if (boundary !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const data = frame.split("\n")
+            .filter((line) => line.startsWith("data: "))
+            .map((line) => line.slice(6))
+            .join("\n");
+          if (data) return JSON.parse(data);
+          continue;
+        }
+
+        const { value, done } = await reader.read();
+        if (done) throw new Error("SSE stream ended before the next data event");
+        buffer += decoder.decode(value, { stream: true });
+      }
+    },
+    cancel: () => reader.cancel(),
+  };
+}
+
 async function requestRawJson(url, { headers = {} } = {}) {
   const target = new URL(url);
   return new Promise((resolve, reject) => {
@@ -329,6 +367,206 @@ test("trace accepts every supported content type with parameters", async (t) => 
       body: contentType.startsWith("application/json") ? "[]" : "",
     });
     assert.equal(response.status, 202, contentType);
+  }
+});
+
+test("PUT /api/sessions/:id/plan normalizes and persists replacement plans, including an empty plan", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Editable migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Old step" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const replacement = await putJson(`${sessionUrl}/plan`, {
+    steps: [{
+      title: "  Install dependency  ",
+      description: "  Add the required package.  ",
+      action: { command: ["npm", "install", "example"], cwd: "packages/app" },
+      expected: { files: ["package.json"] },
+    }],
+  });
+
+  assert.equal(replacement.response.status, 200);
+  assert.equal(replacement.body.steps[0].title, "Install dependency");
+  assert.equal(replacement.body.steps[0].description, "Add the required package.");
+  assert.deepEqual(replacement.body.steps[0].action, {
+    command: ["npm", "install", "example"],
+    cwd: "packages/app",
+  });
+  assert.deepEqual(replacement.body.steps[0].expected, { files: ["package.json"] });
+  assert.equal(replacement.body.steps[0].status, "pending");
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), replacement.body);
+
+  const emptied = await putJson(`${sessionUrl}/plan`, { steps: [] });
+  assert.equal(emptied.response.status, 200);
+  assert.deepEqual(emptied.body.steps, []);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), emptied.body);
+});
+
+test("PUT /api/sessions/:id/plan broadcasts the persisted full session over SSE", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Streamed migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Old step" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const streamResponse = await fetch(`${sessionUrl}/events`);
+  assert.equal(streamResponse.status, 200);
+  const stream = createSseReader(streamResponse);
+  t.after(() => stream.cancel());
+  await stream.next();
+
+  const replacement = await putJson(`${sessionUrl}/plan`, {
+    steps: [{ title: "New streamed step" }],
+  });
+  assert.equal(replacement.response.status, 200);
+  const eventSession = await stream.next();
+
+  assert.deepEqual(eventSession, replacement.body);
+  assert.equal(eventSession.steps[0].title, "New streamed step");
+  assert.deepEqual(
+    { type: eventSession.events.at(-1).type, stepCount: eventSession.events.at(-1).stepCount },
+    { type: "plan.updated", stepCount: 1 },
+  );
+  await stream.cancel();
+});
+
+test("PUT /api/sessions/:id/plan rejects non-pristine sessions without changing stored state", async (t) => {
+  const app = await startTestApp(t, {
+    runCommand: async () => { throw new Error("intentional command failure"); },
+  });
+  await makeSampleProject(app.allowedRoot);
+
+  const cases = [];
+  const execution = await postJson(`${app.url}/api/sessions`, {
+    title: "Execution",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [],
+  });
+  cases.push({ name: "execution", url: `${app.url}/api/sessions/${execution.body.id}` });
+
+  const completed = await postJson(`${app.url}/api/sessions`, {
+    title: "Completed migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Finish" }],
+  });
+  const completedUrl = `${app.url}/api/sessions/${completed.body.id}`;
+  assert.equal((await postJson(`${completedUrl}/steps/0/run`, { confirmed: true })).response.status, 200);
+  cases.push({ name: "completed", url: completedUrl });
+
+  const failed = await postJson(`${app.url}/api/sessions`, {
+    title: "Failed migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Fail", action: { command: ["never-run-for-test"] } }],
+  });
+  const failedUrl = `${app.url}/api/sessions/${failed.body.id}`;
+  assert.equal((await postJson(`${failedUrl}/steps/0/run`, { confirmed: true })).response.status, 400);
+  cases.push({ name: "failed", url: failedUrl });
+
+  const annotated = await postJson(`${app.url}/api/sessions`, {
+    title: "Annotated migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Review" }],
+  });
+  const annotatedUrl = `${app.url}/api/sessions/${annotated.body.id}`;
+  assert.equal((await postJson(`${annotatedUrl}/annotations`, { stepIndex: 0, text: "Keep this" })).response.status, 201);
+  cases.push({ name: "annotated", url: annotatedUrl });
+
+  for (const { name, url } of cases) {
+    const before = await (await fetch(url)).json();
+    const replacement = await putJson(`${url}/plan`, { steps: [{ title: "Replacement" }] });
+    assert.equal(replacement.response.status, 400, name);
+    assert.deepEqual(await (await fetch(url)).json(), before, name);
+  }
+});
+
+test("PUT /api/sessions/:id/plan returns 409 during an active operation and never runs a command", async (t) => {
+  let releaseCommand;
+  let signalCommandStarted;
+  const commandStarted = new Promise((resolve) => { signalCommandStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseCommand = resolve; });
+  let runCalls = 0;
+  const app = await startTestApp(t, {
+    runCommand: async () => {
+      runCalls += 1;
+      signalCommandStarted();
+      return blocked;
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Running migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Run", action: { command: ["deferred-test-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const runRequest = postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  await commandStarted;
+  const before = await (await fetch(sessionUrl)).json();
+
+  const replacement = await putJson(`${sessionUrl}/plan`, {
+    steps: [{ title: "Must not replace" }],
+  });
+
+  assert.equal(replacement.response.status, 409);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+  assert.equal(runCalls, 1);
+  releaseCommand({ command: ["deferred-test-command"], stdout: "", stderr: "", exitCode: 0 });
+  assert.equal((await runRequest).response.status, 200);
+  assert.equal(runCalls, 1);
+});
+
+test("PUT /api/sessions/:id/plan reports protocol pointers and preserves invalid plans", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Validated migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Original" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const before = await (await fetch(sessionUrl)).json();
+
+  const invalid = await putJson(`${sessionUrl}/plan`, { steps: [{ title: "   " }] });
+
+  assert.equal(invalid.response.status, 400);
+  assert.ok(invalid.body.details.some((issue) => issue.path === "/steps/0/title"));
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+});
+
+test("PUT /api/sessions/:id/plan requires JSON content type without mutating the plan", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Media type migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Original" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const before = await (await fetch(sessionUrl)).json();
+
+  for (const options of [
+    { body: Buffer.from(JSON.stringify({ steps: [] })) },
+    { headers: { "content-type": "text/plain" }, body: JSON.stringify({ steps: [] }) },
+  ]) {
+    const response = await fetch(`${sessionUrl}/plan`, { method: "PUT", ...options });
+    assert.equal(response.status, 415);
+    assert.match((await response.json()).error, /requires application\/json/i);
+    assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
   }
 });
 
