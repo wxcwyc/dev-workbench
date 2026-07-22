@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { assertWorkbench, publicSession } from "../../protocol/src/index.js";
+import { assertPlanInput, assertWorkbench, publicSession } from "../../protocol/src/index.js";
 
 const timestamp = () => new Date().toISOString();
 const event = (type, payload = {}) => ({ id: randomUUID(), type, at: timestamp(), ...payload });
@@ -9,7 +9,8 @@ function normalizeStep(step, index) {
   return {
     id: step.id ?? `step-${String(index + 1).padStart(2, "0")}`,
     title: step.title.trim(), description: step.description?.trim() ?? "",
-    action: step.action ?? null, expected: step.expected ?? null,
+    action: step.action == null ? null : structuredClone(step.action),
+    expected: step.expected == null ? null : structuredClone(step.expected),
     traceState: step.traceState ?? null, traceKind: step.traceKind ?? null,
     artifacts: step.artifacts ?? [], adapterSequence: step.adapterSequence ?? null, status: "pending",
     startedAt: null, completedAt: null, error: null
@@ -29,6 +30,25 @@ export class SessionEngine {
     };
     session.events.push(event("session.created", { workbench, stepCount: session.steps.length }));
     return session;
+  }
+
+  replacePlan(session, steps) {
+    assertPlanInput({ steps });
+    if (session.workbench !== "migration") throw new Error("Plan replacement requires a migration session");
+    if (
+      session.cursor !== -1
+      || session.steps.some((step) => step.status !== "pending")
+      || session.snapshots.length !== 0
+      || session.annotations.length !== 0
+    ) {
+      throw new Error("Plan replacement requires a pristine migration session");
+    }
+
+    session.steps = steps.map(normalizeStep);
+    session.status = "ready";
+    session.events.push(event("plan.updated", { stepCount: session.steps.length }));
+    this.touch(session);
+    return publicSession(session);
   }
 
   nextRunnable(session) {

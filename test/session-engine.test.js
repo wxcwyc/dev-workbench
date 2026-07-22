@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SessionEngine } from "../packages/execution-core/src/session-engine.js";
 import { createTraceEvent } from "../packages/adapter-sdk/src/index.js";
+import { ProtocolValidationError } from "../packages/protocol/src/index.js";
 
 test("execution session records immutable checkpoints, seeks and annotations", () => {
   const engine = new SessionEngine();
@@ -64,4 +65,127 @@ test("streaming does not pull the cursor away from an older checkpoint", () => {
   engine.seek(session, 0);
   engine.appendTraceEvent(session, createTraceEvent({ sessionId: session.id, sequence: 2, title: "Event 2", state: { sequence: 2 } }));
   assert.equal(session.cursor, 0);
+});
+
+test("pristine migration sessions replace and normalize their plan", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Old step" }]
+  });
+  session.updatedAt = "2000-01-01T00:00:00.000Z";
+  const plan = [{
+    id: "custom-step",
+    title: "  Install dependency  ",
+    description: "  Add the required package.  ",
+    action: { command: ["npm", "install", "example"], cwd: "packages/app" },
+    expected: { files: ["package.json"] },
+    traceState: { phase: "planned" }
+  }];
+  const eventCount = session.events.length;
+
+  const result = engine.replacePlan(session, plan);
+
+  assert.equal(result.steps[0].title, "Install dependency");
+  assert.equal(result.steps[0].description, "Add the required package.");
+  assert.deepEqual(result.steps[0].action, plan[0].action);
+  assert.deepEqual(result.steps[0].expected, plan[0].expected);
+  assert.deepEqual(
+    {
+      status: result.steps[0].status,
+      startedAt: result.steps[0].startedAt,
+      completedAt: result.steps[0].completedAt,
+      error: result.steps[0].error
+    },
+    { status: "pending", startedAt: null, completedAt: null, error: null }
+  );
+  assert.equal(session.status, "ready");
+  assert.equal(session.events.length, eventCount + 1);
+  assert.deepEqual(
+    { type: session.events.at(-1).type, stepCount: session.events.at(-1).stepCount },
+    { type: "plan.updated", stepCount: 1 }
+  );
+  assert.ok(session.updatedAt > "2000-01-01T00:00:00.000Z");
+
+  plan[0].action.command.push("--save-dev");
+  plan[0].expected.files.push("package-lock.json");
+  assert.deepEqual(session.steps[0].action.command, ["npm", "install", "example"]);
+  assert.deepEqual(session.steps[0].expected.files, ["package.json"]);
+});
+
+test("pristine migration sessions may replace their plan with no steps", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Remove me" }]
+  });
+
+  const result = engine.replacePlan(session, []);
+
+  assert.deepEqual(result.steps, []);
+  assert.equal(session.events.at(-1).type, "plan.updated");
+  assert.equal(session.events.at(-1).stepCount, 0);
+});
+
+function assertPlanReplacementRejectedWithoutMutation(session, message) {
+  const engine = new SessionEngine();
+  const before = structuredClone(session);
+  assert.throws(() => engine.replacePlan(session, [{ title: "Replacement" }]), message);
+  assert.deepEqual(session, before);
+}
+
+test("execution sessions reject plan replacement without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({ title: "Trace", workbench: "execution", projectRoot: "/tmp/example" });
+  assertPlanReplacementRejectedWithoutMutation(session, /migration/i);
+});
+
+test("migration sessions with an advanced cursor reject plan replacement without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example" });
+  session.cursor = 0;
+  assertPlanReplacementRejectedWithoutMutation(session, /pristine/i);
+});
+
+test("migration sessions with a non-pending step reject plan replacement without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Started", status: "completed" }]
+  });
+  session.steps[0].status = "completed";
+  assertPlanReplacementRejectedWithoutMutation(session, /pristine/i);
+});
+
+test("migration sessions with snapshots reject plan replacement without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example" });
+  session.snapshots.push({ stepIndex: 0 });
+  assertPlanReplacementRejectedWithoutMutation(session, /pristine/i);
+});
+
+test("migration sessions with annotations reject plan replacement without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example" });
+  session.annotations.push({ stepIndex: 0, text: "Reviewed" });
+  assertPlanReplacementRejectedWithoutMutation(session, /pristine/i);
+});
+
+test("malformed replacement steps fail protocol validation at /steps without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example" });
+  const before = structuredClone(session);
+
+  assert.throws(
+    () => engine.replacePlan(session, [{ title: "   " }]),
+    (error) => error instanceof ProtocolValidationError
+      && error.issues.some(({ path }) => path.startsWith("/steps"))
+  );
+  assert.deepEqual(session, before);
 });
