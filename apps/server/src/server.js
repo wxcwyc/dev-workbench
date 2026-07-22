@@ -6,7 +6,7 @@ import { SessionEngine } from "../../../packages/execution-core/src/session-engi
 import { RecentProjectStore } from "../../../packages/execution-core/src/recent-project-store.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
 import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
-import { ProtocolValidationError, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
+import { ProtocolValidationError, assertPlanInput, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
 import { resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
 import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
@@ -222,6 +222,7 @@ export async function createApp(options = {}) {
         if (runningSessions.has(id)) { const error = new Error("Session already has an active operation"); error.statusCode = 409; throw error; }
         const body = await readJson(request);
         const session = await requireSession(id);
+        assertPlanInput(body);
         engine.replacePlan(session, body.steps);
         await store.save(session); emit(session);
         return sendJson(response, 200, publicSession(session));

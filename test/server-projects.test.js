@@ -547,6 +547,25 @@ test("PUT /api/sessions/:id/plan reports protocol pointers and preserves invalid
   assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
 });
 
+test("PUT /api/sessions/:id/plan rejects unknown top-level fields without changing stored state", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Strict plan input",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Original" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const before = await (await fetch(sessionUrl)).json();
+
+  const invalid = await putJson(`${sessionUrl}/plan`, { steps: [], extra: true });
+
+  assert.equal(invalid.response.status, 400);
+  assert.ok(invalid.body.details.some((issue) => issue.path === "/extra"));
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+});
+
 test("PUT /api/sessions/:id/plan requires JSON content type without mutating the plan", async (t) => {
   const app = await startTestApp(t);
   await makeSampleProject(app.allowedRoot);
