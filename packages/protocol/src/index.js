@@ -1,7 +1,7 @@
 export const WORKBENCH_TYPES = Object.freeze(["execution", "migration"]);
 export const STEP_STATUSES = Object.freeze(["pending", "running", "completed", "failed", "skipped"]);
 export const EVENT_TYPES = Object.freeze([
-  "session.created", "step.started", "step.completed", "step.failed", "cursor.moved", "annotation.added",
+  "session.created", "plan.updated", "step.started", "step.completed", "step.failed", "cursor.moved", "annotation.added",
   "trace.stream.started", "trace.event.appended", "trace.stream.completed", "trace.stream.failed"
 ]);
 export const PROTOCOL_VERSION = "1.0";
@@ -89,6 +89,19 @@ export function assertSessionInput(input) {
   input.trace?.forEach((item, index) => validateTraceItem(item, `/trace/${index}`, issues));
   if (input.steps !== undefined && input.trace !== undefined) issue(issues, "/", "must contain either steps or trace, not both");
   throwIssues("session", issues);
+  return input;
+}
+
+export function assertPlanInput(input) {
+  const issues = [];
+  if (!requireObject(input, "/", issues)) throwIssues("plan", issues);
+  allowedKeys(input, ["steps"], "/", issues);
+  if (!Array.isArray(input.steps)) {
+    issue(issues, "/steps", "must be an array");
+  } else {
+    input.steps.forEach((step, index) => validateStep(step, `/steps/${index}`, issues));
+  }
+  throwIssues("plan", issues);
   return input;
 }
 

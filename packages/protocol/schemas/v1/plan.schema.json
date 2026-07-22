@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-workbench.local/schemas/v1/plan.schema.json",
+  "title": "Dev Workbench Plan Input v1",
+  "type": "object",
+  "required": ["steps"],
+  "properties": {
+    "steps": { "type": "array", "items": { "$ref": "step.schema.json" } }
+  },
+  "additionalProperties": false
+}
