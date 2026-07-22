@@ -131,6 +131,23 @@ test("pristine migration sessions may replace their plan with no steps", () => {
   assert.equal(session.events.at(-1).stepCount, 0);
 });
 
+test("plan replacement remains atomic when traceState cannot be cloned", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Original step" }]
+  });
+  const before = structuredClone(session);
+
+  assert.throws(
+    () => engine.replacePlan(session, [{ title: "Replacement", traceState: { callback() {} } }]),
+    /clone/i
+  );
+  assert.deepEqual(session, before);
+});
+
 function assertPlanReplacementRejectedWithoutMutation(session, message) {
   const engine = new SessionEngine();
   const before = structuredClone(session);

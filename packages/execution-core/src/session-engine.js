@@ -11,7 +11,7 @@ function normalizeStep(step, index) {
     title: step.title.trim(), description: step.description?.trim() ?? "",
     action: step.action == null ? null : structuredClone(step.action),
     expected: step.expected == null ? null : structuredClone(step.expected),
-    traceState: step.traceState ?? null, traceKind: step.traceKind ?? null,
+    traceState: step.traceState == null ? null : structuredClone(step.traceState), traceKind: step.traceKind ?? null,
     artifacts: step.artifacts ?? [], adapterSequence: step.adapterSequence ?? null, status: "pending",
     startedAt: null, completedAt: null, error: null
   };
