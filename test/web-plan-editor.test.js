@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   createPlanDraft,
@@ -13,6 +14,9 @@ import {
   validatePlanDraft,
   toPlanInput,
 } from '../apps/web/plan-editor.js';
+
+const webHtml = readFileSync(new URL('../apps/web/index.html', import.meta.url), 'utf8');
+const webCss = readFileSync(new URL('../apps/web/styles.css', import.meta.url), 'utf8');
 
 function migrationSession() {
   return {
@@ -254,4 +258,41 @@ test('toPlanInput normalizes blank expected to null and rejects invalid drafts w
     () => toPlanInput({ steps: [{ ...blankExpected.steps[0], title: '' }] }),
     /Invalid plan at \/steps\/0\/title: must be a non-empty string/,
   );
+});
+
+test('plan editor shell exposes eligible controls and accessible dialog semantics', () => {
+  assert.match(webHtml, /<button\s+id="edit-plan"[^>]*\btype="button"[^>]*\bhidden\b[^>]*\bdisabled\b/i);
+  assert.match(webHtml, /<dialog\s+id="plan-editor"[^>]*\baria-labelledby="plan-editor-title"/i);
+  assert.match(webHtml, /<h1\s+id="plan-editor-title"/i);
+  assert.match(webHtml, /pristine[^<]*plan/i);
+  assert.match(webHtml, /保存[^<]*不会执行命令|saving[^<]*does not execute commands/i);
+  assert.match(webHtml, /<div\s+id="plan-editor-status"[^>]*\brole="status"[^>]*\baria-live="polite"/i);
+});
+
+test('plan editor shell provides an empty step mount and explicit typed actions', () => {
+  const steps = webHtml.match(/<div\s+id="plan-editor-steps"[^>]*>([\s\S]*?)<\/div>/i);
+  assert.ok(steps, 'plan editor steps mount exists');
+  assert.equal(steps[1].trim(), '');
+
+  assert.match(webHtml, /<button\s+id="plan-editor-add"[^>]*\btype="button"/i);
+  assert.match(webHtml, /<button\s+id="plan-editor-cancel"[^>]*\btype="button"/i);
+  assert.match(webHtml, /<button\s+id="plan-editor-save"[^>]*\btype="button"[^>]*\bdisabled\b/i);
+});
+
+test('plan editor styles define scoped responsive, focus, step, argument, and error states', () => {
+  assert.match(webCss, /#plan-editor::backdrop\s*\{/);
+  assert.match(webCss, /#plan-editor[^{}]*:focus-visible/);
+  assert.match(webCss, /#plan-editor[^{}]*:disabled/);
+  assert.match(webCss, /#plan-editor\s+\.plan-editor-body[^{}]*\{[^}]*overflow\s*:\s*auto/);
+  assert.match(webCss, /#plan-editor\s+\.plan-step/);
+  assert.match(webCss, /#plan-editor\s+\.plan-step[^{}]*summary/);
+  assert.match(webCss, /#plan-editor\s+\.plan-step-actions/);
+  assert.match(webCss, /#plan-editor\s+\.plan-field-grid/);
+  assert.match(webCss, /#plan-editor\s+\.plan-action-toggle/);
+  assert.match(webCss, /#plan-editor\s+\.plan-argv-list/);
+  assert.match(webCss, /#plan-editor\s+\.plan-argv-row/);
+  assert.match(webCss, /#plan-editor\s+\.plan-remove/);
+  assert.match(webCss, /#plan-editor\s+\.inline-error/);
+  assert.match(webCss, /@media\s*\(max-width\s*:\s*700px\)[^{]*\{[\s\S]*?#plan-editor\s+\.plan-field-grid[^{}]*\{[^}]*grid-template-columns\s*:\s*1fr/);
+  assert.match(webCss, /@media\s*\(prefers-reduced-motion\s*:\s*reduce\)[^{]*\{[\s\S]*?#plan-editor/);
 });

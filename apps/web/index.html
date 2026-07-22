@@ -41,7 +41,7 @@
       <div id="workbench" class="hidden">
         <div class="session-header">
           <div><span id="workbench-badge" class="badge"></span><h1 id="session-title"></h1><p id="session-path" class="muted"></p></div>
-          <div><span id="session-status"></span><button id="run-next" class="primary">Run next step</button></div>
+          <div><span id="session-status"></span><button id="edit-plan" type="button" hidden disabled>Edit plan</button><button id="run-next" class="primary">Run next step</button></div>
         </div>
         <div id="execution-view" class="hidden"></div>
         <div id="migration-view" class="hidden"></div>
@@ -127,6 +127,36 @@
         <div class="onboarding-actions">
           <button id="onboarding-preview-action" type="button" disabled>Preview safety gate</button>
           <button id="onboarding-create" class="primary" type="button" disabled>Create session</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="plan-editor" aria-labelledby="plan-editor-title" aria-describedby="plan-editor-description">
+    <div class="plan-editor-shell">
+      <div class="plan-editor-header">
+        <div>
+          <span class="plan-editor-kicker">MIGRATION FLIGHT PLAN / PRISTINE SESSION</span>
+          <h1 id="plan-editor-title">Edit pristine plan</h1>
+          <p id="plan-editor-description">Reorder and refine checkpoints before migration begins. Saving updates the plan only and does not execute commands.</p>
+        </div>
+      </div>
+
+      <div class="plan-editor-body">
+        <div class="plan-editor-toolbar">
+          <div>
+            <h2>Flight sequence</h2>
+            <p>Steps run from top to bottom after you leave the editor.</p>
+          </div>
+          <button id="plan-editor-add" type="button">+ Add step</button>
+        </div>
+        <div id="plan-editor-steps"></div>
+      </div>
+
+      <div class="plan-editor-footer">
+        <div id="plan-editor-status" role="status" aria-live="polite">Review the pristine plan before saving.</div>
+        <div class="plan-editor-actions">
+          <button id="plan-editor-cancel" type="button">Cancel</button>
+          <button id="plan-editor-save" class="primary" type="button" disabled>Save plan</button>
         </div>
       </div>
     </div>

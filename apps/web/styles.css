@@ -79,3 +79,52 @@
 @media(max-width:700px){#project-onboarding{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}#project-onboarding .onboarding-shell{max-height:calc(100dvh - 18px)}#project-onboarding .onboarding-header,#project-onboarding .onboarding-body,#project-onboarding .onboarding-footer{padding-left:12px;padding-right:12px}#project-onboarding .onboarding-field-grid,#project-onboarding .normalized-session,#project-onboarding .recent-projects{grid-template-columns:1fr}#project-onboarding .path-inspect-row{grid-template-columns:1fr}#project-onboarding .path-inspect-row button{width:100%;text-align:center}#project-onboarding .onboarding-footer{grid-template-columns:1fr}#project-onboarding .onboarding-actions{display:grid;grid-template-columns:1fr 1fr}#project-onboarding .onboarding-actions button{text-align:center}#project-onboarding .safety-gate{align-items:flex-start;flex-direction:column}#project-onboarding .safety-gate p{text-align:left}#project-onboarding .plan-row{grid-template-columns:25px minmax(0,1fr)}#project-onboarding .plan-row .impact{grid-column:2;justify-self:start}}
 @media(max-width:600px){header>div:first-child .muted,#health{display:none}header>div:first-child{font-size:12px;white-space:nowrap}.mobile-project-button{margin-right:0;padding:6px 8px}}
 @media(prefers-reduced-motion:reduce){#project-onboarding *{scroll-behavior:auto!important;transition:none!important}}
+
+#edit-plan{white-space:nowrap}
+#plan-editor{width:min(920px,calc(100vw - 24px));max-height:calc(100dvh - 24px);padding:0;border:1px solid var(--line2);background:var(--panel);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}
+#plan-editor::backdrop{background:rgba(0,4,3,.86)}
+#plan-editor button,#plan-editor input,#plan-editor textarea{font:inherit}
+#plan-editor button:focus-visible,#plan-editor input:focus-visible,#plan-editor textarea:focus-visible,#plan-editor summary:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+#plan-editor button:disabled,#plan-editor input:disabled,#plan-editor textarea:disabled{opacity:.35;cursor:not-allowed}
+#plan-editor .plan-editor-shell{display:grid;grid-template-rows:auto minmax(0,1fr) auto;max-height:calc(100dvh - 26px)}
+#plan-editor .plan-editor-header{padding:16px 18px 13px;border-bottom:1px solid var(--line2);background:#07100d}
+#plan-editor .plan-editor-header h1{font-size:20px;margin:3px 0;color:var(--text)}
+#plan-editor .plan-editor-header p{max-width:72ch;margin:0;color:var(--muted)}
+#plan-editor .plan-editor-kicker{font-size:10px;letter-spacing:.12em;color:var(--line2)}
+#plan-editor .plan-editor-body{min-width:0;padding:14px 18px 18px;overflow:auto}
+#plan-editor .plan-editor-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:11px}
+#plan-editor .plan-editor-toolbar h2{margin:0 0 2px}
+#plan-editor .plan-editor-toolbar p{margin:0;color:var(--muted);font-size:11px}
+#plan-editor #plan-editor-steps{display:grid;gap:8px;min-width:0}
+#plan-editor .plan-empty{border:1px dashed #28543b;padding:24px 16px;text-align:center;color:var(--muted)}
+#plan-editor details.plan-step{min-width:0;border:1px solid #28543b;background:#040a08}
+#plan-editor .plan-step[open]{border-color:var(--line)}
+#plan-editor .plan-step summary{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;list-style:none;background:#07140f}
+#plan-editor .plan-step summary::-webkit-details-marker{display:none}
+#plan-editor .plan-step summary::after{content:'▸';color:var(--muted);transition:transform .16s ease}
+#plan-editor .plan-step[open] summary::after{transform:rotate(90deg);color:var(--line)}
+#plan-editor .plan-step-index{display:grid;place-items:center;min-width:30px;height:24px;border:1px solid var(--line2);color:#ff9b4b;font-size:10px}
+#plan-editor .plan-step-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+#plan-editor .plan-step-content{display:grid;gap:12px;padding:12px;border-top:1px solid #173e2a}
+#plan-editor .plan-step-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+#plan-editor .plan-field-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 12px}
+#plan-editor .plan-field-grid .plan-field-wide{grid-column:1/-1}
+#plan-editor label,#plan-editor .field-label{display:block;margin-bottom:5px;color:var(--text);font-size:12px}
+#plan-editor input[type="text"],#plan-editor textarea{display:block;width:100%;min-width:0;background:#020704;color:var(--text);border:1px solid #27613e;padding:9px}
+#plan-editor textarea{min-height:72px}
+#plan-editor .plan-action-toggle{display:flex;align-items:center;gap:7px;margin:0;padding:8px 0;color:var(--line)}
+#plan-editor .plan-action-toggle input{accent-color:var(--line)}
+#plan-editor .plan-argv-list{display:grid;gap:6px;min-width:0}
+#plan-editor .plan-argv-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center}
+#plan-editor .plan-remove{border-color:#7d3636;color:var(--danger)}
+#plan-editor .plan-remove:hover{background:#321313}
+#plan-editor .inline-error{margin-top:4px;color:var(--danger);font-size:11px;overflow-wrap:anywhere}
+#plan-editor .plan-editor-footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 18px;border-top:1px solid var(--line2);background:#07100d}
+#plan-editor #plan-editor-status{min-width:0;max-height:5.5em;overflow:auto;color:var(--muted);font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
+#plan-editor #plan-editor-status.success{color:var(--line)}
+#plan-editor #plan-editor-status.error{color:var(--danger)}
+#plan-editor .plan-editor-actions{display:flex;gap:7px}
+#plan-editor #plan-editor-save{background:var(--line);color:#031108;font-weight:700}
+
+@media(max-width:700px){#plan-editor{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}#plan-editor .plan-editor-shell{max-height:calc(100dvh - 18px)}#plan-editor .plan-editor-header,#plan-editor .plan-editor-body,#plan-editor .plan-editor-footer{padding-left:12px;padding-right:12px}#plan-editor .plan-editor-toolbar{align-items:stretch;flex-direction:column}#plan-editor .plan-editor-toolbar button{width:100%;text-align:center}#plan-editor .plan-field-grid{grid-template-columns:1fr}#plan-editor .plan-field-grid .plan-field-wide{grid-column:auto}#plan-editor .plan-argv-row{grid-template-columns:1fr}#plan-editor .plan-argv-row button{width:100%;text-align:center}#plan-editor .plan-step summary{grid-template-columns:auto minmax(0,1fr) auto}#plan-editor .plan-step-actions{display:grid;grid-template-columns:1fr}#plan-editor .plan-step-actions button{text-align:center}#plan-editor .plan-editor-footer{grid-template-columns:1fr}#plan-editor .plan-editor-actions{display:grid;grid-template-columns:1fr}#plan-editor .plan-editor-actions button{text-align:center}}
+@media(prefers-reduced-motion:reduce){#plan-editor *{scroll-behavior:auto!important;transition:none!important}}
