@@ -218,6 +218,19 @@ test("plan editing is visible only for migration sessions and enabled only while
   }
 });
 
+test("disabled plan editing explains why it is unavailable", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  const edit = browser.element("edit-plan");
+
+  controller.renderSession(migrationSession("started", { cursor: 0 }));
+
+  assert.equal(edit.hidden, false);
+  assert.equal(edit.disabled, true);
+  assert.match(edit.getAttribute("title"), /only before the migration starts/i);
+});
+
 test("opening the plan editor deep-clones and safely renders untrusted plan values", async (t) => {
   const { browser, controller } = await loadController(t, () => {
     throw new Error("Unexpected fetch");
@@ -468,25 +481,35 @@ test("bound text input preserves rendered DOM while updating draft and validatio
   assert.equal(browser.element("plan-editor-save").disabled, false);
 });
 
-test("same-session updates close the editor once the migration is no longer pristine", async (t) => {
-  const { browser, controller } = await loadController(t, () => {
-    throw new Error("Unexpected fetch");
-  });
+test("same-session events preserve an open dirty plan draft and make saving stale", async (t) => {
   const active = migrationSession();
-  controller.renderSession(active);
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(active);
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
   browser.element("edit-plan").onclick();
   const generation = controller.state.planEditor.dialogGeneration;
+  const title = new FakeElement(browser.document);
+  title.dataset.field = "title";
+  title.dataset.stepIndex = "0";
+  title.value = "Local unsaved title";
+  browser.element("plan-editor-steps").oninput({ target: title });
+  const draft = controller.state.planEditor.draft;
 
-  controller.renderSession({
+  browser.eventSources[0].onmessage({ data: JSON.stringify({
     ...active,
     cursor: 0,
     steps: [{ ...active.steps[0], status: "completed" }],
-  });
+  }) });
 
-  assert.equal(browser.element("plan-editor").open, false);
-  assert.equal(controller.state.planEditor.draft, null);
-  assert.equal(controller.state.planEditor.sessionId, null);
-  assert.ok(controller.state.planEditor.dialogGeneration > generation);
+  assert.equal(browser.element("plan-editor").open, true);
+  assert.equal(controller.state.planEditor.draft, draft);
+  assert.equal(controller.state.planEditor.draft.steps[0].title, "Local unsaved title");
+  assert.equal(controller.state.planEditor.sessionId, "migration");
+  assert.equal(controller.state.planEditor.dialogGeneration, generation);
+  assert.equal(browser.element("plan-editor-save").disabled, true);
+  assert.match(browser.element("plan-editor-status").textContent, /server state changed/i);
 });
 
 test("a current plan save failure retains the dialog and reports the protocol pointer", async (t) => {

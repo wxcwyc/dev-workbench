@@ -1,7 +1,7 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, safePreviewUrl, summarizeOnboarding } from "./onboarding.js";
 import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeCommandArgument, removePlanStep, toPlanInput, updateCommandArgument, updatePlanStep, validatePlanDraft } from "./plan-editor.js";
 
-const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,issues:[]}};
+const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
 const $=(selector)=>document.querySelector(selector);
 
 async function api(path,options={}){
@@ -278,9 +278,10 @@ function syncPlanEditorValidation({preserveStatus=false}={}){
   const previousClass=status.className;
   state.planEditor.issues=validatePlanDraft(draft);
   $("#plan-editor-steps").querySelectorAll("[data-error-path]").forEach((element)=>{element.textContent=planIssue(element.dataset.errorPath);});
-  $("#plan-editor-save").disabled=state.planEditor.saving||state.planEditor.issues.length>0;
+  $("#plan-editor-save").disabled=state.planEditor.saving||state.planEditor.stale||state.planEditor.issues.length>0;
   if(preserveStatus){status.textContent=previousStatus;status.className=previousClass;}
   else if(state.planEditor.saving){status.textContent="Saving plan without executing commands…";status.className="loading";}
+  else if(state.planEditor.stale){status.textContent="Server state changed. This draft can no longer be saved.";status.className="error";}
   else if(state.planEditor.issues.length){status.textContent=`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
   else{status.textContent="Ready to save. No commands will be executed.";status.className="";}
 }
@@ -305,6 +306,7 @@ function invalidatePlanEditor(){
   state.planEditor.dialogGeneration+=1;
   state.planEditor.draft=null;
   state.planEditor.sessionId=null;
+  state.planEditor.stale=false;
   state.planEditor.issues=[];
 }
 
@@ -320,6 +322,7 @@ function openPlanEditor(){
   state.planEditor.dialogGeneration+=1;
   state.planEditor.sessionId=session.id;
   state.planEditor.draft=createPlanDraft(session);
+  state.planEditor.stale=false;
   state.planEditor.issues=[];
   renderPlanEditor();
   $("#plan-editor").showModal();
@@ -327,7 +330,7 @@ function openPlanEditor(){
 }
 
 async function savePlan(){
-  if(state.planEditor.saving||!state.planEditor.draft||!state.planEditor.sessionId)return;
+  if(state.planEditor.saving||state.planEditor.stale||!state.planEditor.draft||!state.planEditor.sessionId)return;
   state.planEditor.issues=validatePlanDraft(state.planEditor.draft);
   if(state.planEditor.issues.length){renderPlanEditor();return;}
   const generation=state.planEditor.dialogGeneration;
@@ -350,14 +353,21 @@ async function savePlan(){
 }
 
 function renderSession(session){
-  if(state.planEditor.sessionId&&(state.planEditor.sessionId!==session.id||!isPristineMigration(session)))closePlanEditor();
+  if(state.planEditor.sessionId&&state.planEditor.sessionId!==session.id)closePlanEditor();
   state.active=session;
+  if(state.planEditor.sessionId===session.id){
+    state.planEditor.stale=!isPristineMigration(session);
+    syncPlanEditorValidation();
+  }
   $("#empty").classList.add("hidden");$("#workbench").classList.remove("hidden");
   $("#session-title").textContent=session.title;$("#session-path").textContent=session.projectRoot;
   $("#workbench-badge").textContent=session.workbench==="execution"?"EXECUTION EXPLORER":"MIGRATION CENTER";
   $("#session-status").textContent=session.status;
-  $("#edit-plan").hidden=session.workbench!=="migration";
-  $("#edit-plan").disabled=!canEditPlan(session);
+  const editPlan=$("#edit-plan");
+  editPlan.hidden=session.workbench!=="migration";
+  editPlan.disabled=!canEditPlan(session);
+  if(!editPlan.hidden&&editPlan.disabled)editPlan.setAttribute("title","Plan editing is available only before the migration starts.");
+  else editPlan.removeAttribute("title");
   $("#execution-view").classList.toggle("hidden",session.workbench!=="execution");
   $("#migration-view").classList.toggle("hidden",session.workbench!=="migration");
   if(session.workbench==="execution")renderExecution(session);else renderMigration(session);
