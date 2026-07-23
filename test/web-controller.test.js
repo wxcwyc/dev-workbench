@@ -283,8 +283,15 @@ test("saving a plan sends one exact PUT and duplicate saves never run a command"
   });
   assert.equal(browser.requests.some(({ path }) => path.includes("/run")), false);
 
-  save.resolve(new FakeResponse(active));
+  const saved = migrationSession("migration", {
+    title: "Saved by server",
+    steps: [{ ...active.steps[0], title: "Normalized by server" }],
+  });
+  save.resolve(new FakeResponse(saved));
   await Promise.all([first, second]);
+  assert.equal(controller.state.active.title, "Saved by server");
+  assert.equal(browser.element("session-title").textContent, "Saved by server");
+  assert.match(browser.element("migration-view").innerHTML, /Normalized by server/);
   assert.equal(browser.element("plan-editor").open, false);
   assert.equal(controller.state.planEditor.saving, false);
 });
@@ -328,7 +335,8 @@ test("a stale plan response cannot close or overwrite an editor owned by another
   const pending = controller.savePlan();
 
   controller.renderSession(migrationSession("second"));
-  controller.openPlanEditor();
+  assert.equal(browser.element("edit-plan").disabled, false);
+  browser.element("edit-plan").onclick();
   assert.equal(controller.state.planEditor.sessionId, "second");
   save.resolve(new FakeResponse(migrationSession("first", { title: "stale" })));
   await pending;
@@ -347,11 +355,17 @@ test("bound plan controls update fields, steps, order, and argv through delegati
   const steps = browser.element("plan-editor-steps");
 
   const title = new FakeElement(browser.document);
+  const titleSummary = new FakeElement(browser.document);
+  const titleCard = new FakeElement(browser.document);
+  titleCard.classList.add("plan-step");
+  titleCard.setQuerySelectorAll(".plan-step-title", [titleSummary]);
+  title.parentElement = titleCard;
   title.dataset.field = "title";
   title.dataset.stepIndex = "0";
   title.value = "Renamed";
   steps.oninput({ target: title });
   assert.equal(controller.state.planEditor.draft.steps[0].title, "Renamed");
+  assert.equal(titleSummary.textContent, "Renamed");
 
   browser.element("plan-editor-add").onclick();
   assert.equal(controller.state.planEditor.draft.steps.length, 2);
@@ -365,10 +379,19 @@ test("bound plan controls update fields, steps, order, and argv through delegati
   assert.equal(controller.state.planEditor.draft.steps[1].title, "Renamed");
 
   const toggle = new FakeElement(browser.document);
+  const toggleCard = new FakeElement(browser.document);
+  const actionFields = new FakeElement(browser.document);
+  const actionControl = new FakeElement(browser.document);
+  toggleCard.classList.add("plan-step");
+  toggleCard.setQuerySelectorAll(".plan-action-fields", [actionFields]);
+  toggleCard.setQuerySelectorAll('[data-action="add-argument"], [data-action="remove-argument"], [data-field="argument"], [data-field="cwd"]', [actionControl]);
+  toggle.parentElement = toggleCard;
   toggle.dataset.field = "actionEnabled";
   toggle.dataset.stepIndex = "0";
   toggle.checked = true;
   steps.oninput({ target: toggle });
+  assert.equal(actionFields.getAttribute("aria-disabled"), null);
+  assert.equal(actionControl.disabled, false);
   const addArgument = new FakeElement(browser.document);
   addArgument.dataset.action = "add-argument";
   addArgument.dataset.stepIndex = "0";
@@ -395,6 +418,66 @@ test("bound plan controls update fields, steps, order, and argv through delegati
   steps.onclick({ target: { closest: () => removeStep } });
   assert.deepEqual(controller.state.planEditor.draft.steps, []);
   assert.match(steps.innerHTML, /class="plan-empty"/);
+});
+
+test("bound text input preserves rendered DOM while updating draft and validation in place", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession());
+  browser.element("edit-plan").onclick();
+  const steps = browser.element("plan-editor-steps");
+  const originalHtml = steps.innerHTML;
+  const card = new FakeElement(browser.document);
+  const summaryTitle = new FakeElement(browser.document);
+  card.classList.add("plan-step");
+  card.setQuerySelectorAll(".plan-step-title", [summaryTitle]);
+  const input = new FakeElement(browser.document);
+  input.parentElement = card;
+  input.dataset.field = "title";
+  input.dataset.stepIndex = "0";
+  input.value = "   ";
+
+  steps.oninput({ target: input });
+
+  assert.equal(steps.innerHTML, originalHtml);
+  assert.equal(controller.state.planEditor.draft.steps[0].title, "   ");
+  assert.deepEqual(controller.state.planEditor.issues[0], {
+    path: "/steps/0/title",
+    message: "must be a non-empty string",
+  });
+  assert.equal(summaryTitle.textContent, "Untitled step 1");
+  assert.equal(browser.element("plan-editor-save").disabled, true);
+  assert.match(browser.element("plan-editor-status").textContent, /\/steps\/0\/title/);
+  assert.equal(steps.querySelectorAll("[data-error-path]").find((node) => node.dataset.errorPath === "/steps/0/title").textContent, "must be a non-empty string");
+
+  input.value = "Restored";
+  steps.oninput({ target: input });
+  assert.equal(steps.innerHTML, originalHtml);
+  assert.equal(summaryTitle.textContent, "Restored");
+  assert.deepEqual(controller.state.planEditor.issues, []);
+  assert.equal(browser.element("plan-editor-save").disabled, false);
+});
+
+test("same-session updates close the editor once the migration is no longer pristine", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  const active = migrationSession();
+  controller.renderSession(active);
+  browser.element("edit-plan").onclick();
+  const generation = controller.state.planEditor.dialogGeneration;
+
+  controller.renderSession({
+    ...active,
+    cursor: 0,
+    steps: [{ ...active.steps[0], status: "completed" }],
+  });
+
+  assert.equal(browser.element("plan-editor").open, false);
+  assert.equal(controller.state.planEditor.draft, null);
+  assert.equal(controller.state.planEditor.sessionId, null);
+  assert.ok(controller.state.planEditor.dialogGeneration > generation);
 });
 
 test("a current plan save failure retains the dialog and reports the protocol pointer", async (t) => {

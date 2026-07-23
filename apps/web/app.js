@@ -266,16 +266,28 @@ function isPristineMigration(session){
   return session?.workbench==="migration"&&session.cursor===-1&&session.steps.every((step)=>step.status==="pending")&&session.snapshots.length===0&&session.annotations.length===0;
 }
 
-function canEditPlan(session){return isPristineMigration(session)&&!state.planEditor.saving;}
+function canEditPlan(session){return isPristineMigration(session);}
 function planIssue(path){return state.planEditor.issues.find((issue)=>issue.path===path)?.message??"";}
-function inlinePlanError(path){const message=planIssue(path);return message?`<span class="inline-error">${escapeHtml(message)}</span>`:"";}
+function inlinePlanError(path){return `<span class="inline-error" data-error-path="${path}">${escapeHtml(planIssue(path))}</span>`;}
 
-function renderPlanEditor({preserveStatus=false}={}){
+function syncPlanEditorValidation({preserveStatus=false}={}){
   const draft=state.planEditor.draft;
   if(!draft)return;
   const status=$("#plan-editor-status");
   const previousStatus=status.textContent;
   const previousClass=status.className;
+  state.planEditor.issues=validatePlanDraft(draft);
+  $("#plan-editor-steps").querySelectorAll("[data-error-path]").forEach((element)=>{element.textContent=planIssue(element.dataset.errorPath);});
+  $("#plan-editor-save").disabled=state.planEditor.saving||state.planEditor.issues.length>0;
+  if(preserveStatus){status.textContent=previousStatus;status.className=previousClass;}
+  else if(state.planEditor.saving){status.textContent="Saving plan without executing commands…";status.className="loading";}
+  else if(state.planEditor.issues.length){status.textContent=`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
+  else{status.textContent="Ready to save. No commands will be executed.";status.className="";}
+}
+
+function renderPlanEditor({preserveStatus=false}={}){
+  const draft=state.planEditor.draft;
+  if(!draft)return;
   state.planEditor.issues=validatePlanDraft(draft);
   const locked=state.planEditor.saving;
   const last=draft.steps.length-1;
@@ -286,11 +298,7 @@ function renderPlanEditor({preserveStatus=false}={}){
   }).join("")||`<div class="plan-empty">No plan steps. Add one or save an empty plan.</div>`;
   $("#plan-editor-add").disabled=locked;
   $("#plan-editor-cancel").disabled=false;
-  $("#plan-editor-save").disabled=locked||state.planEditor.issues.length>0;
-  if(preserveStatus){status.textContent=previousStatus;status.className=previousClass;}
-  else if(locked){status.textContent="Saving plan without executing commands…";status.className="loading";}
-  else if(state.planEditor.issues.length){status.textContent=`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
-  else{status.textContent="Ready to save. No commands will be executed.";status.className="";}
+  syncPlanEditorValidation({preserveStatus});
 }
 
 function invalidatePlanEditor(){
@@ -342,7 +350,7 @@ async function savePlan(){
 }
 
 function renderSession(session){
-  if(state.planEditor.sessionId&&state.planEditor.sessionId!==session.id)closePlanEditor();
+  if(state.planEditor.sessionId&&(state.planEditor.sessionId!==session.id||!isPristineMigration(session)))closePlanEditor();
   state.active=session;
   $("#empty").classList.add("hidden");$("#workbench").classList.remove("hidden");
   $("#session-title").textContent=session.title;$("#session-path").textContent=session.projectRoot;
@@ -467,7 +475,19 @@ $("#plan-editor-steps").oninput=(event)=>{
   const stepIndex=Number(target.dataset.stepIndex);
   if(target.dataset.field==="argument")state.planEditor.draft=updateCommandArgument(state.planEditor.draft,stepIndex,Number(target.dataset.argumentIndex),target.value);
   else state.planEditor.draft=updatePlanStep(state.planEditor.draft,stepIndex,{[target.dataset.field]:target.dataset.field==="actionEnabled"?target.checked:target.value});
-  renderPlanEditor();
+  const card=target.closest(".plan-step");
+  if(target.dataset.field==="title"){
+    const title=state.planEditor.draft.steps[stepIndex].title.trim()||`Untitled step ${stepIndex+1}`;
+    const summary=card?.querySelector(".plan-step-title");
+    if(summary)summary.textContent=title;
+  }
+  if(target.dataset.field==="actionEnabled"){
+    const enabled=target.checked;
+    const actionFields=card?.querySelector(".plan-action-fields");
+    if(enabled)actionFields?.removeAttribute("aria-disabled");else actionFields?.setAttribute("aria-disabled","true");
+    card?.querySelectorAll('[data-action="add-argument"], [data-action="remove-argument"], [data-field="argument"], [data-field="cwd"]').forEach((control)=>{control.disabled=!enabled;});
+  }
+  syncPlanEditorValidation();
 };
 $("#plan-editor-steps").onclick=(event)=>{
   const target=event.target.closest("[data-action]");

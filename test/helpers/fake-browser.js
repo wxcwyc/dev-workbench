@@ -70,7 +70,10 @@ export class FakeElement {
     this.disabled = false;
     this.checked = false;
     this.files = [];
-    this.innerHTML = "";
+    this._innerHTML = "";
+    this.renderedErrors = [];
+    this.queryResults = new Map();
+    this.attributes = new Map();
     this.hidden = false;
     this.open = false;
     this.textContent = "";
@@ -78,11 +81,41 @@ export class FakeElement {
     this.parentElement = null;
   }
 
+  get innerHTML() {
+    return this._innerHTML;
+  }
+
+  set innerHTML(value) {
+    this._innerHTML = value;
+    this.renderedErrors = [...String(value).matchAll(/data-error-path="([^"]+)"/g)].map((match) => {
+      const element = new FakeElement(this.ownerDocument);
+      element.dataset.errorPath = match[1];
+      return element;
+    });
+  }
+
   closest(selector) {
+    if (selector.startsWith(".") && this.classList.contains(selector.slice(1))) return this;
     const key = selector.match(/^\[data-([a-z-]+)\]$/)?.[1]
       ?.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
     if (key && Object.hasOwn(this.dataset, key)) return this;
     return this.parentElement?.closest(selector) ?? null;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  setQuerySelectorAll(selector, elements) {
+    this.queryResults.set(selector, elements);
   }
 
   focus() {
@@ -96,8 +129,13 @@ export class FakeElement {
     this.innerHTML = "";
   }
 
-  querySelectorAll() {
-    return [];
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector) {
+    if (selector === "[data-error-path]") return this.renderedErrors;
+    return this.queryResults.get(selector) ?? [];
   }
 
   showModal() {
