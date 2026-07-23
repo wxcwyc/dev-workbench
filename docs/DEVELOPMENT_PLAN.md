@@ -7,14 +7,14 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1、Milestone 2 的 UI 项目接入首版已完成） |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成；Milestone 2 的 UI 项目接入首版和迁移计划编辑器首版已完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
 
 ## 当前开发进度（2026-07-20）
 
-Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版：
+Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版和迁移计划编辑器首版：
 
 - 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
 - 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
@@ -25,7 +25,7 @@ Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 U
 - UI 可以输入允许目录内的真实路径，完成边界与符号链接校验，并只读探测 Git、package manager、语言和常见框架；
 - UI 可以从最近项目重新探测路径，选择 Execution 或 Migration，导入可选 trace/plan JSON，并在创建空会话或计划会话前检查规范化步骤与安全边界。
 
-当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，下一步是迁移计划编辑器和 `awaiting_review` 步骤生命周期；Preview Process Supervisor 与实时终端输出尚未完成。
+当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，下一步是 `awaiting_review` 以及依赖/风险语义；Preview Process Supervisor 与实时终端输出尚未完成。
 
 ## Phase 0：交互与架构验证
 
@@ -96,20 +96,17 @@ Prolog adapter 至少产生：
 
 功能：
 
-- UI 内创建、编辑和重排步骤；
-- 步骤依赖、预期结果和风险等级；
-- `pending → running → awaiting_review → accepted/failed` 生命周期；
-- 执行前确认、执行后人工验收；
-- 失败重试、跳过和带理由终止；
-- 每一步关联命令、文件、测试、预览和注释；
+- 迁移计划编辑器首版已完成，可在 pristine Migration session 中创建、编辑、删除和重排步骤；
+- 可编辑字段是 title、description、expected-result text、command argv 和 command cwd；
+- 保存时整体替换 plan，不执行命令；
+- 依赖、风险等级、`awaiting_review`、attempt、下游失效和并发修订控制仍待后续补齐；
 - Agent 可以提议计划修改，但需要用户接受。
 
 验收条件：
 
-- 未验收步骤不能自动进入下一步；
-- 修改已执行步骤会提示下游失效；
-- 每次重试保留独立 attempt 记录；
-- 用户能看出计划与实际执行是否发生偏离。
+- 未开始的 Migration 计划可以被整体替换并重新保存；
+- 已开始或非 pristine session 不能进入编辑保存；
+- 保存后的 session 只反映新的 plan，不触发执行。
 
 ### 4. Preview Process Supervisor
 
@@ -201,15 +198,15 @@ Prolog adapter 至少产生：
 
 ### Milestone 2：真实 Migration Runtime
 
-状态：进行中。UI 项目接入首版已完成；下一步是迁移计划编辑器和 `awaiting_review` 生命周期。
+状态：进行中。UI 项目接入首版和迁移计划编辑器首版已完成；下一步是 `awaiting_review` 以及依赖/风险语义。
 
 1. UI 项目接入（首版已完成）；
-2. 迁移计划编辑器；
+2. 迁移计划编辑器（首版已完成）；
 3. awaiting_review 生命周期；
 4. Preview Process Supervisor；
 5. 实时终端输出。
 
-交付结果：Migration Center 可以操控真实的新旧 Web 项目。
+交付结果：Migration Center 可以编辑并保存真实迁移计划，后续配套能力补齐后再形成完整的新旧 Web 项目操控闭环。
 
 ### Milestone 3：可恢复审查闭环
 

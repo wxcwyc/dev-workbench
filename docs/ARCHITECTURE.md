@@ -15,6 +15,22 @@ Session
 
 `SessionEngine` 只管理状态变化，不运行外部命令。项目观察和命令执行通过 adapters 注入，因此后续可以增加 Prolog、数据库迁移、测试运行器、浏览器自动化或远程沙箱适配器。
 
+## Migration plan editing v1
+
+Migration Center 的首版计划编辑器只作用于 pristine Migration session：
+
+- `workbench` 是 `migration`；
+- `cursor` 是 `-1`；
+- 每一步都是 `pending`；
+- snapshots 和 annotations 为空；
+- 会话当前没有任何运行中的操作。
+
+可编辑字段来自 v1 协议：title、description、expected-result text、command argv 和 command cwd。
+
+客户端先编辑深拷贝后的 draft，再通过 `PUT /api/sessions/:id/plan { steps }` 一次性提交整个 plan。服务端先校验 step 合同，再由 `SessionEngine.replacePlan()` 重新检查是否仍然满足 pristine 条件，随后替换全部步骤、更新时间戳、记录一个 `plan.updated` 事件，并通过现有 SSE 通道重新发布会话。保存 plan 不会执行项目命令。
+
+dependencies、risk levels、attempts、`awaiting_review`、下游失效和并发修订控制都留给后续工作。
+
 ## Package boundaries
 
 ```text
