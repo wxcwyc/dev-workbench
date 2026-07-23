@@ -228,6 +228,7 @@ test("disabled plan editing explains why it is unavailable", async (t) => {
 
   assert.equal(edit.hidden, false);
   assert.equal(edit.disabled, true);
+  assert.equal(edit.getAttribute("aria-describedby"), "edit-plan-reason");
   assert.match(edit.getAttribute("title"), /only before the migration starts/i);
 });
 
@@ -508,6 +509,42 @@ test("same-session events preserve an open dirty plan draft and make saving stal
   assert.equal(controller.state.planEditor.draft.steps[0].title, "Local unsaved title");
   assert.equal(controller.state.planEditor.sessionId, "migration");
   assert.equal(controller.state.planEditor.dialogGeneration, generation);
+  assert.equal(browser.element("plan-editor-save").disabled, true);
+  assert.match(browser.element("plan-editor-status").textContent, /server state changed/i);
+});
+
+test("a late plan save response cannot replace newer same-session server state", async (t) => {
+  const active = migrationSession();
+  const save = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(active);
+    if (path === "/api/sessions/migration/plan" && options.method === "PUT") return save.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  browser.element("edit-plan").onclick();
+  const title = new FakeElement(browser.document);
+  title.dataset.field = "title";
+  title.dataset.stepIndex = "0";
+  title.value = "Exact local draft";
+  browser.element("plan-editor-steps").oninput({ target: title });
+  const draft = controller.state.planEditor.draft;
+  const pending = controller.savePlan();
+  const newer = {
+    ...active,
+    cursor: 0,
+    steps: [{ ...active.steps[0], status: "completed" }],
+  };
+
+  browser.eventSources[0].onmessage({ data: JSON.stringify(newer) });
+  save.resolve(new FakeResponse(migrationSession("migration", { title: "Late save" })));
+  await pending;
+
+  assert.deepEqual(controller.state.active, newer);
+  assert.equal(browser.element("plan-editor").open, true);
+  assert.equal(controller.state.planEditor.draft, draft);
+  assert.equal(controller.state.planEditor.draft.steps[0].title, "Exact local draft");
+  assert.equal(controller.state.planEditor.stale, true);
   assert.equal(browser.element("plan-editor-save").disabled, true);
   assert.match(browser.element("plan-editor-status").textContent, /server state changed/i);
 });

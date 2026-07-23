@@ -344,8 +344,8 @@ async function savePlan(){
   try{session=await api(`/api/sessions/${sessionId}/plan`,{method:"PUT",body:JSON.stringify(input)});}
   catch(error){saveError=error;}
   if(request===state.planEditor.saveRequest)state.planEditor.saving=false;
-  const owns=$("#plan-editor").open&&generation===state.planEditor.dialogGeneration&&sessionId===state.planEditor.sessionId&&state.active?.id===sessionId;
-  if(!owns){if(request===state.planEditor.saveRequest&&state.planEditor.draft&&$("#plan-editor").open)renderPlanEditor({preserveStatus:true});return;}
+  const owns=!state.planEditor.stale&&$("#plan-editor").open&&generation===state.planEditor.dialogGeneration&&sessionId===state.planEditor.sessionId&&state.active?.id===sessionId;
+  if(!owns){if(request===state.planEditor.saveRequest&&state.planEditor.draft&&$("#plan-editor").open)renderPlanEditor({preserveStatus:!state.planEditor.stale});return;}
   if(saveError){renderPlanEditor();$("#plan-editor-status").textContent=saveError.message;$("#plan-editor-status").className="error";return;}
   renderSession(session);
   closePlanEditor();
@@ -366,8 +366,13 @@ function renderSession(session){
   const editPlan=$("#edit-plan");
   editPlan.hidden=session.workbench!=="migration";
   editPlan.disabled=!canEditPlan(session);
-  if(!editPlan.hidden&&editPlan.disabled)editPlan.setAttribute("title","Plan editing is available only before the migration starts.");
-  else editPlan.removeAttribute("title");
+  if(!editPlan.hidden&&editPlan.disabled){
+    editPlan.setAttribute("aria-describedby","edit-plan-reason");
+    editPlan.setAttribute("title","Plan editing is available only before the migration starts.");
+  }else{
+    editPlan.removeAttribute("aria-describedby");
+    editPlan.removeAttribute("title");
+  }
   $("#execution-view").classList.toggle("hidden",session.workbench!=="execution");
   $("#migration-view").classList.toggle("hidden",session.workbench!=="migration");
   if(session.workbench==="execution")renderExecution(session);else renderMigration(session);

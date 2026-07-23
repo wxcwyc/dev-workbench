@@ -261,7 +261,8 @@ test('toPlanInput normalizes blank expected to null and rejects invalid drafts w
 });
 
 test('plan editor shell exposes eligible controls and accessible dialog semantics', () => {
-  assert.match(webHtml, /<button\s+id="edit-plan"[^>]*\btype="button"[^>]*\bhidden\b[^>]*\bdisabled\b/i);
+  assert.match(webHtml, /<button\s+id="edit-plan"[^>]*\btype="button"[^>]*\bhidden\b[^>]*\bdisabled\b[^>]*\baria-describedby="edit-plan-reason"/i);
+  assert.match(webHtml, /<span\s+id="edit-plan-reason"[^>]*>[^<]*only before the migration starts[^<]*<\/span>/i);
   assert.match(webHtml, /<dialog\s+id="plan-editor"[^>]*\baria-labelledby="plan-editor-title"/i);
   assert.match(webHtml, /<h1\s+id="plan-editor-title"/i);
   assert.match(webHtml, /pristine[^<]*plan/i);

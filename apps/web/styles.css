@@ -81,6 +81,8 @@
 @media(prefers-reduced-motion:reduce){#project-onboarding *{scroll-behavior:auto!important;transition:none!important}}
 
 #edit-plan{white-space:nowrap}
+#edit-plan-reason{display:none;max-width:36ch;font-size:11px}
+#edit-plan:disabled:not([hidden])+#edit-plan-reason{display:inline}
 #plan-editor{width:min(920px,calc(100vw - 24px));max-height:calc(100dvh - 24px);padding:0;border:1px solid var(--line2);background:var(--panel);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}
 #plan-editor::backdrop{background:rgba(0,4,3,.86)}
 #plan-editor button,#plan-editor input,#plan-editor textarea{font:inherit}
