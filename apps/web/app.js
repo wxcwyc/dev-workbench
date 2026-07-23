@@ -345,7 +345,7 @@ async function savePlan(){
   catch(error){saveError=error;}
   if(request===state.planEditor.saveRequest)state.planEditor.saving=false;
   const owns=!state.planEditor.stale&&$("#plan-editor").open&&generation===state.planEditor.dialogGeneration&&sessionId===state.planEditor.sessionId&&state.active?.id===sessionId;
-  if(!owns){if(request===state.planEditor.saveRequest&&state.planEditor.draft&&$("#plan-editor").open)renderPlanEditor({preserveStatus:!state.planEditor.stale});return;}
+  if(!owns){if(request===state.planEditor.saveRequest&&state.planEditor.draft&&$("#plan-editor").open)renderPlanEditor();return;}
   if(saveError){renderPlanEditor();$("#plan-editor-status").textContent=saveError.message;$("#plan-editor-status").className="error";return;}
   renderSession(session);
   closePlanEditor();

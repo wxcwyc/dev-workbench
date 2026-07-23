@@ -336,6 +336,8 @@ test("plan save lock survives close and reopen until the original PUT settles", 
   await first;
   assert.equal(browser.element("plan-editor").open, true);
   assert.equal(controller.state.planEditor.sessionId, "migration");
+  assert.equal(browser.element("plan-editor-status").textContent, "Ready to save. No commands will be executed.");
+  assert.equal(browser.element("plan-editor-status").className, "");
 });
 
 test("a stale plan response cannot close or overwrite an editor owned by another session", async (t) => {
