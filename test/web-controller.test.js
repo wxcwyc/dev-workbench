@@ -428,6 +428,7 @@ test("bound text input preserves rendered DOM while updating draft and validatio
   browser.element("edit-plan").onclick();
   const steps = browser.element("plan-editor-steps");
   const originalHtml = steps.innerHTML;
+  const originalWrites = steps.innerHTMLWriteCount;
   const card = new FakeElement(browser.document);
   const summaryTitle = new FakeElement(browser.document);
   card.classList.add("plan-step");
@@ -436,11 +437,18 @@ test("bound text input preserves rendered DOM while updating draft and validatio
   input.parentElement = card;
   input.dataset.field = "title";
   input.dataset.stepIndex = "0";
+  input.value = "Inspect";
+
+  steps.oninput({ target: input });
+  assert.equal(steps.innerHTML, originalHtml);
+  assert.equal(steps.innerHTMLWriteCount, originalWrites);
+
   input.value = "   ";
 
   steps.oninput({ target: input });
 
   assert.equal(steps.innerHTML, originalHtml);
+  assert.equal(steps.innerHTMLWriteCount, originalWrites);
   assert.equal(controller.state.planEditor.draft.steps[0].title, "   ");
   assert.deepEqual(controller.state.planEditor.issues[0], {
     path: "/steps/0/title",
@@ -454,6 +462,7 @@ test("bound text input preserves rendered DOM while updating draft and validatio
   input.value = "Restored";
   steps.oninput({ target: input });
   assert.equal(steps.innerHTML, originalHtml);
+  assert.equal(steps.innerHTMLWriteCount, originalWrites);
   assert.equal(summaryTitle.textContent, "Restored");
   assert.deepEqual(controller.state.planEditor.issues, []);
   assert.equal(browser.element("plan-editor-save").disabled, false);

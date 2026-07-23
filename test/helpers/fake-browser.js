@@ -71,6 +71,7 @@ export class FakeElement {
     this.checked = false;
     this.files = [];
     this._innerHTML = "";
+    this.innerHTMLWriteCount = 0;
     this.renderedErrors = [];
     this.queryResults = new Map();
     this.attributes = new Map();
@@ -86,6 +87,7 @@ export class FakeElement {
   }
 
   set innerHTML(value) {
+    this.innerHTMLWriteCount += 1;
     this._innerHTML = value;
     this.renderedErrors = [...String(value).matchAll(/data-error-path="([^"]+)"/g)].map((match) => {
       const element = new FakeElement(this.ownerDocument);
