@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deferred, FakeResponse, installFakeBrowser } from "./helpers/fake-browser.js";
+import { deferred, FakeElement, FakeResponse, installFakeBrowser } from "./helpers/fake-browser.js";
 
 let importSequence = 0;
 
@@ -11,11 +11,34 @@ function session(id, title = id) {
     title,
     projectRoot: `/projects/${id}`,
     workbench: "execution",
-    status: "idle",
+    status: "ready",
     cursor: -1,
     steps: [],
     snapshots: [],
     annotations: [],
+  };
+}
+
+function migrationSession(id = "migration", overrides = {}) {
+  return {
+    id,
+    title: id,
+    projectRoot: `/projects/${id}`,
+    workbench: "migration",
+    status: "ready",
+    cursor: -1,
+    steps: [{
+      id: "step-1",
+      title: "Inspect",
+      description: "Read files",
+      expected: "Understood",
+      status: "pending",
+      action: { command: ["node", "inspect.js"], cwd: "." },
+    }],
+    snapshots: [],
+    annotations: [],
+    metadata: {},
+    ...overrides,
   };
 }
 
@@ -163,4 +186,236 @@ test("inspection and preview render untrusted values only as escaped HTML", asyn
   ].join("\n");
   assert.doesNotMatch(html, /<img\b/i);
   assert.match(html, /&lt;img src=x onerror=&quot;globalThis\.pwned=true&quot;&gt;/);
+});
+
+test("plan editing is visible only for migration sessions and enabled only while pristine", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  const edit = browser.element("edit-plan");
+
+  controller.renderSession(session("execution"));
+  assert.equal(edit.hidden, true);
+
+  const pristine = migrationSession();
+  controller.renderSession(pristine);
+  assert.equal(edit.hidden, false);
+  assert.equal(edit.disabled, false);
+  assert.equal(controller.canEditPlan(pristine), true);
+
+  for (const changed of [
+    { cursor: 0 },
+    { steps: [{ ...pristine.steps[0], status: "complete" }] },
+    { snapshots: [{}] },
+    { annotations: [{ stepIndex: 0, text: "note" }] },
+    { status: "running", steps: [{ ...pristine.steps[0], status: "running" }] },
+  ]) {
+    const ineligible = { ...pristine, ...changed };
+    controller.renderSession(ineligible);
+    assert.equal(edit.hidden, false);
+    assert.equal(edit.disabled, true);
+    assert.equal(controller.canEditPlan(ineligible), false);
+  }
+});
+
+test("opening the plan editor deep-clones and safely renders untrusted plan values", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  const attack = '<img src=x onerror="globalThis.pwned=true">';
+  const active = migrationSession("safe", {
+    steps: [{
+      id: "step-x",
+      title: attack,
+      description: attack,
+      expected: attack,
+      status: "pending",
+      action: { command: [attack], cwd: attack },
+    }],
+  });
+  controller.renderSession(active);
+
+  browser.element("edit-plan").onclick();
+
+  assert.equal(browser.element("plan-editor").open, true);
+  assert.notEqual(controller.state.planEditor.draft.steps, active.steps);
+  const html = browser.element("plan-editor-steps").innerHTML;
+  assert.doesNotMatch(html, /<img\b/i);
+  assert.match(html, /&lt;img src=x onerror=&quot;globalThis\.pwned=true&quot;&gt;/);
+  assert.match(html, /class="plan-step"/);
+  assert.match(html, /class="plan-step-index"/);
+  assert.match(html, /class="plan-step-title"/);
+  assert.match(html, /class="plan-step-content"/);
+  const summary = html.match(/<summary>([\s\S]*?)<\/summary>/)?.[1] ?? "";
+  assert.doesNotMatch(summary, /<button\b/);
+  assert.equal(browser.document.activeElement, browser.element("plan-editor-add"));
+  assert.match(html, /data-action="move-up"[^>]*disabled/);
+  assert.match(html, /data-action="move-down"[^>]*disabled/);
+});
+
+test("saving a plan sends one exact PUT and duplicate saves never run a command", async (t) => {
+  const save = deferred();
+  let putCount = 0;
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration/plan" && options.method === "PUT") {
+      putCount += 1;
+      return save.promise;
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  const active = migrationSession();
+  controller.renderSession(active);
+  controller.openPlanEditor();
+
+  const first = controller.savePlan();
+  const second = controller.savePlan();
+  assert.equal(putCount, 1);
+  assert.equal(controller.state.planEditor.saving, true);
+  assert.equal(browser.element("plan-editor-save").disabled, true);
+  const request = browser.requests.find(({ path }) => path.endsWith("/plan"));
+  assert.deepEqual(JSON.parse(request.options.body), {
+    steps: [{
+      title: "Inspect",
+      description: "Read files",
+      expected: "Understood",
+      action: { command: ["node", "inspect.js"], cwd: "." },
+    }],
+  });
+  assert.equal(browser.requests.some(({ path }) => path.includes("/run")), false);
+
+  save.resolve(new FakeResponse(active));
+  await Promise.all([first, second]);
+  assert.equal(browser.element("plan-editor").open, false);
+  assert.equal(controller.state.planEditor.saving, false);
+});
+
+test("plan save lock survives close and reopen until the original PUT settles", async (t) => {
+  const save = deferred();
+  let putCount = 0;
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration/plan" && options.method === "PUT") {
+      putCount += 1;
+      return save.promise;
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  const active = migrationSession();
+  controller.renderSession(active);
+  controller.openPlanEditor();
+  const first = controller.savePlan();
+
+  controller.closePlanEditor();
+  controller.openPlanEditor();
+  assert.equal(browser.document.activeElement, browser.element("plan-editor-cancel"));
+  await controller.savePlan();
+  assert.equal(putCount, 1);
+  assert.equal(browser.element("plan-editor").open, true);
+
+  save.resolve(new FakeResponse(active));
+  await first;
+  assert.equal(browser.element("plan-editor").open, true);
+  assert.equal(controller.state.planEditor.sessionId, "migration");
+});
+
+test("a stale plan response cannot close or overwrite an editor owned by another session", async (t) => {
+  const save = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/first/plan" && options.method === "PUT") return save.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(migrationSession("first"));
+  controller.openPlanEditor();
+  const pending = controller.savePlan();
+
+  controller.renderSession(migrationSession("second"));
+  controller.openPlanEditor();
+  assert.equal(controller.state.planEditor.sessionId, "second");
+  save.resolve(new FakeResponse(migrationSession("first", { title: "stale" })));
+  await pending;
+
+  assert.equal(controller.state.active.id, "second");
+  assert.equal(controller.state.planEditor.sessionId, "second");
+  assert.equal(browser.element("plan-editor").open, true);
+});
+
+test("bound plan controls update fields, steps, order, and argv through delegation", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession());
+  browser.element("edit-plan").onclick();
+  const steps = browser.element("plan-editor-steps");
+
+  const title = new FakeElement(browser.document);
+  title.dataset.field = "title";
+  title.dataset.stepIndex = "0";
+  title.value = "Renamed";
+  steps.oninput({ target: title });
+  assert.equal(controller.state.planEditor.draft.steps[0].title, "Renamed");
+
+  browser.element("plan-editor-add").onclick();
+  assert.equal(controller.state.planEditor.draft.steps.length, 2);
+  assert.match(steps.innerHTML, /data-action="move-up" data-step-index="0"[^>]*disabled/);
+  assert.match(steps.innerHTML, /data-action="move-down" data-step-index="1"[^>]*disabled/);
+
+  const move = new FakeElement(browser.document);
+  move.dataset.action = "move-up";
+  move.dataset.stepIndex = "1";
+  steps.onclick({ target: move });
+  assert.equal(controller.state.planEditor.draft.steps[1].title, "Renamed");
+
+  const toggle = new FakeElement(browser.document);
+  toggle.dataset.field = "actionEnabled";
+  toggle.dataset.stepIndex = "0";
+  toggle.checked = true;
+  steps.oninput({ target: toggle });
+  const addArgument = new FakeElement(browser.document);
+  addArgument.dataset.action = "add-argument";
+  addArgument.dataset.stepIndex = "0";
+  steps.onclick({ target: addArgument });
+  const argument = new FakeElement(browser.document);
+  argument.dataset.field = "argument";
+  argument.dataset.stepIndex = "0";
+  argument.dataset.argumentIndex = "0";
+  argument.value = "npm";
+  steps.oninput({ target: argument });
+  assert.deepEqual(controller.state.planEditor.draft.steps[0].command, ["npm"]);
+
+  const removeArgument = new FakeElement(browser.document);
+  removeArgument.dataset.action = "remove-argument";
+  removeArgument.dataset.stepIndex = "0";
+  removeArgument.dataset.argumentIndex = "0";
+  steps.onclick({ target: removeArgument });
+  assert.deepEqual(controller.state.planEditor.draft.steps[0].command, []);
+
+  const removeStep = new FakeElement(browser.document);
+  removeStep.dataset.action = "remove-step";
+  removeStep.dataset.stepIndex = "0";
+  steps.onclick({ target: removeStep });
+  steps.onclick({ target: { closest: () => removeStep } });
+  assert.deepEqual(controller.state.planEditor.draft.steps, []);
+  assert.match(steps.innerHTML, /class="plan-empty"/);
+});
+
+test("a current plan save failure retains the dialog and reports the protocol pointer", async (t) => {
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration/plan" && options.method === "PUT") {
+      return new FakeResponse({
+        error: "Invalid plan",
+        details: [{ path: "/steps/0/title", message: "is required" }],
+      }, { ok: false });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(migrationSession());
+  browser.element("edit-plan").onclick();
+  const draft = controller.state.planEditor.draft;
+
+  await browser.element("plan-editor-save").onclick();
+
+  assert.equal(browser.element("plan-editor").open, true);
+  assert.equal(controller.state.planEditor.draft, draft);
+  assert.match(browser.element("plan-editor-status").textContent, /\/steps\/0\/title: is required/);
+  assert.equal(controller.state.planEditor.saving, false);
+  assert.equal(browser.element("plan-editor-save").disabled, false);
 });

@@ -8,6 +8,8 @@ const elementIds = [
   "onboarding-file", "onboarding-import", "onboarding-inspect", "onboarding-preview",
   "onboarding-preview-action", "onboarding-recent", "onboarding-session-title",
   "onboarding-status", "open-project", "open-project-mobile", "previous",
+  "plan-editor", "plan-editor-add", "plan-editor-cancel", "plan-editor-save",
+  "plan-editor-status", "plan-editor-steps", "edit-plan",
   "project-inspect-form", "project-onboarding", "project-path", "run-next",
   "session-file", "session-path", "session-status", "session-title", "sessions",
   "step-counter", "timeline", "workbench", "workbench-badge",
@@ -69,9 +71,18 @@ export class FakeElement {
     this.checked = false;
     this.files = [];
     this.innerHTML = "";
+    this.hidden = false;
     this.open = false;
     this.textContent = "";
     this.value = "";
+    this.parentElement = null;
+  }
+
+  closest(selector) {
+    const key = selector.match(/^\[data-([a-z-]+)\]$/)?.[1]
+      ?.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    if (key && Object.hasOwn(this.dataset, key)) return this;
+    return this.parentElement?.closest(selector) ?? null;
   }
 
   focus() {

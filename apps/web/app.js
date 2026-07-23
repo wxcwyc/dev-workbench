@@ -1,6 +1,7 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, safePreviewUrl, summarizeOnboarding } from "./onboarding.js";
+import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeCommandArgument, removePlanStep, toPlanInput, updateCommandArgument, updatePlanStep, validatePlanDraft } from "./plan-editor.js";
 
-const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false}};
+const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,issues:[]}};
 const $=(selector)=>document.querySelector(selector);
 
 async function api(path,options={}){
@@ -261,12 +262,94 @@ function renderMigration(session){
   $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>`<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small></div>`).join("")}</div></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.sourceLabel??"Source")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.sourceUrl))}"></iframe></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.targetLabel??"Target")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.targetUrl))}"></iframe></section><section class="panel"><div class="panel-title">Files & changes</div><div class="panel-body tree">${renderTree(snapshot)}</div></section><section class="panel"><div class="panel-title">Git diff</div><div class="panel-body"><pre>${escapeHtml(snapshot?.git?.diff||snapshot?.git?.status||"No Git diff at this checkpoint.")}</pre></div></section><section class="panel" style="grid-column:2/4"><div class="panel-title">Command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout)}${escapeHtml(command.stderr)}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
 }
 
+function isPristineMigration(session){
+  return session?.workbench==="migration"&&session.cursor===-1&&session.steps.every((step)=>step.status==="pending")&&session.snapshots.length===0&&session.annotations.length===0;
+}
+
+function canEditPlan(session){return isPristineMigration(session)&&!state.planEditor.saving;}
+function planIssue(path){return state.planEditor.issues.find((issue)=>issue.path===path)?.message??"";}
+function inlinePlanError(path){const message=planIssue(path);return message?`<span class="inline-error">${escapeHtml(message)}</span>`:"";}
+
+function renderPlanEditor({preserveStatus=false}={}){
+  const draft=state.planEditor.draft;
+  if(!draft)return;
+  const status=$("#plan-editor-status");
+  const previousStatus=status.textContent;
+  const previousClass=status.className;
+  state.planEditor.issues=validatePlanDraft(draft);
+  const locked=state.planEditor.saving;
+  const last=draft.steps.length-1;
+  $("#plan-editor-steps").innerHTML=draft.steps.map((step,index)=>{
+    const title=step.title.trim()||`Untitled step ${index+1}`;
+    const argv=step.command.map((argument,argumentIndex)=>`<div class="plan-argv-row"><input type="text" data-field="argument" data-step-index="${index}" data-argument-index="${argumentIndex}" value="${escapeHtml(argument)}" aria-label="Argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}><button type="button" class="plan-remove" data-action="remove-argument" data-step-index="${index}" data-argument-index="${argumentIndex}" aria-label="Remove argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}>Remove</button>${inlinePlanError(`/steps/${index}/action/command/${argumentIndex}`)}</div>`).join("");
+    return `<details class="plan-step" open><summary><span class="plan-step-index">${String(index+1).padStart(2,"0")}</span><span class="plan-step-title">${escapeHtml(title)}</span></summary><div class="plan-step-content"><div class="plan-step-actions"><button type="button" data-action="move-up" data-step-index="${index}" aria-label="Move step ${index+1} up" ${locked||index===0?"disabled":""}>↑</button><button type="button" data-action="move-down" data-step-index="${index}" aria-label="Move step ${index+1} down" ${locked||index===last?"disabled":""}>↓</button><button type="button" class="plan-remove" data-action="remove-step" data-step-index="${index}" ${locked?"disabled":""}>Delete</button></div><div class="plan-field-grid"><label>Title<input type="text" data-field="title" data-step-index="${index}" value="${escapeHtml(step.title)}" ${locked?"disabled":""}>${inlinePlanError(`/steps/${index}/title`)}</label><label>Description<textarea data-field="description" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.description)}</textarea>${inlinePlanError(`/steps/${index}/description`)}</label><label>Expected result<textarea data-field="expected" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.expected)}</textarea>${inlinePlanError(`/steps/${index}/expected`)}</label></div><label class="plan-action-toggle"><input type="checkbox" data-field="actionEnabled" data-step-index="${index}" ${step.actionEnabled?"checked":""} ${locked?"disabled":""}> Run a command for this step</label><div class="plan-action-fields" ${step.actionEnabled?"":`aria-disabled="true"`}><div class="plan-argv-list">${argv||`<span class="muted">No arguments yet.</span>`}</div>${inlinePlanError(`/steps/${index}/action/command`)}<button type="button" data-action="add-argument" data-step-index="${index}" ${locked||!step.actionEnabled?"disabled":""}>+ Add argument</button><label>Working directory<input type="text" data-field="cwd" data-step-index="${index}" value="${escapeHtml(step.cwd)}" ${locked||!step.actionEnabled?"disabled":""}>${inlinePlanError(`/steps/${index}/action/cwd`)}</label></div></div></details>`;
+  }).join("")||`<div class="plan-empty">No plan steps. Add one or save an empty plan.</div>`;
+  $("#plan-editor-add").disabled=locked;
+  $("#plan-editor-cancel").disabled=false;
+  $("#plan-editor-save").disabled=locked||state.planEditor.issues.length>0;
+  if(preserveStatus){status.textContent=previousStatus;status.className=previousClass;}
+  else if(locked){status.textContent="Saving plan without executing commands…";status.className="loading";}
+  else if(state.planEditor.issues.length){status.textContent=`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
+  else{status.textContent="Ready to save. No commands will be executed.";status.className="";}
+}
+
+function invalidatePlanEditor(){
+  state.planEditor.dialogGeneration+=1;
+  state.planEditor.draft=null;
+  state.planEditor.sessionId=null;
+  state.planEditor.issues=[];
+}
+
+function closePlanEditor(){
+  const dialog=$("#plan-editor");
+  invalidatePlanEditor();
+  if(dialog.open)dialog.close();
+}
+
+function openPlanEditor(){
+  const session=state.active;
+  if(!isPristineMigration(session))return;
+  state.planEditor.dialogGeneration+=1;
+  state.planEditor.sessionId=session.id;
+  state.planEditor.draft=createPlanDraft(session);
+  state.planEditor.issues=[];
+  renderPlanEditor();
+  $("#plan-editor").showModal();
+  $(state.planEditor.saving?"#plan-editor-cancel":"#plan-editor-add").focus();
+}
+
+async function savePlan(){
+  if(state.planEditor.saving||!state.planEditor.draft||!state.planEditor.sessionId)return;
+  state.planEditor.issues=validatePlanDraft(state.planEditor.draft);
+  if(state.planEditor.issues.length){renderPlanEditor();return;}
+  const generation=state.planEditor.dialogGeneration;
+  const sessionId=state.planEditor.sessionId;
+  const request=++state.planEditor.saveRequest;
+  const input=toPlanInput(state.planEditor.draft);
+  state.planEditor.saving=true;
+  renderPlanEditor();
+  let session;
+  let saveError;
+  try{session=await api(`/api/sessions/${sessionId}/plan`,{method:"PUT",body:JSON.stringify(input)});}
+  catch(error){saveError=error;}
+  if(request===state.planEditor.saveRequest)state.planEditor.saving=false;
+  const owns=$("#plan-editor").open&&generation===state.planEditor.dialogGeneration&&sessionId===state.planEditor.sessionId&&state.active?.id===sessionId;
+  if(!owns){if(request===state.planEditor.saveRequest&&state.planEditor.draft&&$("#plan-editor").open)renderPlanEditor({preserveStatus:true});return;}
+  if(saveError){renderPlanEditor();$("#plan-editor-status").textContent=saveError.message;$("#plan-editor-status").className="error";return;}
+  renderSession(session);
+  closePlanEditor();
+  refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+}
+
 function renderSession(session){
+  if(state.planEditor.sessionId&&state.planEditor.sessionId!==session.id)closePlanEditor();
   state.active=session;
   $("#empty").classList.add("hidden");$("#workbench").classList.remove("hidden");
   $("#session-title").textContent=session.title;$("#session-path").textContent=session.projectRoot;
   $("#workbench-badge").textContent=session.workbench==="execution"?"EXECUTION EXPLORER":"MIGRATION CENTER";
   $("#session-status").textContent=session.status;
+  $("#edit-plan").hidden=session.workbench!=="migration";
+  $("#edit-plan").disabled=!canEditPlan(session);
   $("#execution-view").classList.toggle("hidden",session.workbench!=="execution");
   $("#migration-view").classList.toggle("hidden",session.workbench!=="migration");
   if(session.workbench==="execution")renderExecution(session);else renderMigration(session);
@@ -311,6 +394,12 @@ async function createExample(name){const session=await api(`/api/examples/${name
 // Narrow test seam for exercising this module's browser controller behavior.
 export const __testing=Object.freeze({
   state,
+  canEditPlan,
+  renderSession,
+  renderPlanEditor,
+  openPlanEditor,
+  closePlanEditor,
+  savePlan,
   openSession,
   openOnboarding,
   createOnboardingSession,
@@ -366,6 +455,31 @@ $("#onboarding-file").onchange=async(event)=>{
 };
 $("#onboarding-preview-action").onclick=previewOnboarding;
 $("#onboarding-create").onclick=createOnboardingSession;
+
+$("#edit-plan").onclick=openPlanEditor;
+$("#plan-editor").onclose=()=>{if(!$("#plan-editor").open&&state.planEditor.sessionId!==null)invalidatePlanEditor();};
+$("#plan-editor-cancel").onclick=closePlanEditor;
+$("#plan-editor-save").onclick=savePlan;
+$("#plan-editor-add").onclick=()=>{if(state.planEditor.saving||!state.planEditor.draft)return;state.planEditor.draft=addPlanStep(state.planEditor.draft);renderPlanEditor();};
+$("#plan-editor-steps").oninput=(event)=>{
+  const target=event.target.closest("[data-field]");
+  if(!target||state.planEditor.saving||!state.planEditor.draft)return;
+  const stepIndex=Number(target.dataset.stepIndex);
+  if(target.dataset.field==="argument")state.planEditor.draft=updateCommandArgument(state.planEditor.draft,stepIndex,Number(target.dataset.argumentIndex),target.value);
+  else state.planEditor.draft=updatePlanStep(state.planEditor.draft,stepIndex,{[target.dataset.field]:target.dataset.field==="actionEnabled"?target.checked:target.value});
+  renderPlanEditor();
+};
+$("#plan-editor-steps").onclick=(event)=>{
+  const target=event.target.closest("[data-action]");
+  if(!target||state.planEditor.saving||!state.planEditor.draft)return;
+  const stepIndex=Number(target.dataset.stepIndex);
+  if(target.dataset.action==="move-up")state.planEditor.draft=movePlanStep(state.planEditor.draft,stepIndex,-1);
+  else if(target.dataset.action==="move-down")state.planEditor.draft=movePlanStep(state.planEditor.draft,stepIndex,1);
+  else if(target.dataset.action==="remove-step")state.planEditor.draft=removePlanStep(state.planEditor.draft,stepIndex);
+  else if(target.dataset.action==="add-argument")state.planEditor.draft=addCommandArgument(state.planEditor.draft,stepIndex);
+  else if(target.dataset.action==="remove-argument")state.planEditor.draft=removeCommandArgument(state.planEditor.draft,stepIndex,Number(target.dataset.argumentIndex));
+  renderPlanEditor();
+};
 
 $("#logic-demo").onclick=()=>createExample("logic-trace").catch((error)=>alert(error.message));
 $("#migration-demo").onclick=()=>createExample("migration-demo").catch((error)=>alert(error.message));
