@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import {
+  ProtocolValidationError,
+  assertPlanInput,
+} from '../packages/protocol/src/index.js';
 
 import {
   createPlanDraft,
@@ -30,7 +34,11 @@ function migrationSession() {
         title: 'Inspect project',
         description: 'Read the manifest',
         expected: { scripts: ['test'] },
+        risk: 'medium',
+        dependsOn: [],
+        attempt: 2,
         status: 'pending',
+        review: { decision: 'reject' },
         action: {
           type: 'command',
           command: ['node', '-e', 'console.log("hello world")'],
@@ -42,10 +50,47 @@ function migrationSession() {
         title: 'Record findings',
         description: '',
         expected: '  findings saved  ',
+        risk: 'high',
+        dependsOn: ['step-1'],
+        attempt: 1,
         status: 'pending',
+        error: 'previous failure',
       },
     ],
   };
+}
+
+function draftStep(overrides = {}) {
+  return {
+    id: 'step',
+    title: 'Step',
+    description: '',
+    expected: '',
+    risk: 'low',
+    dependsOn: [],
+    actionEnabled: false,
+    command: [],
+    cwd: '',
+    ...overrides,
+  };
+}
+
+function protocolRelationshipIssues(steps) {
+  const input = {
+    steps: steps.map(({ id, title, risk, dependsOn }) => ({
+      id,
+      title,
+      risk,
+      dependsOn,
+    })),
+  };
+  try {
+    assertPlanInput(input);
+    return [];
+  } catch (error) {
+    assert.ok(error instanceof ProtocolValidationError);
+    return error.issues;
+  }
 }
 
 test('createPlanDraft deep-clones editable plan data without mutating the session', () => {
@@ -57,17 +102,23 @@ test('createPlanDraft deep-clones editable plan data without mutating the sessio
   assert.deepEqual(draft, {
     steps: [
       {
+        id: 'step-1',
         title: 'Inspect project',
         description: 'Read the manifest',
         expected: '{\n  "scripts": [\n    "test"\n  ]\n}',
+        risk: 'medium',
+        dependsOn: [],
         actionEnabled: true,
         command: ['node', '-e', 'console.log("hello world")'],
         cwd: 'packages/app',
       },
       {
+        id: 'step-2',
         title: 'Record findings',
         description: '',
         expected: '  findings saved  ',
+        risk: 'high',
+        dependsOn: ['step-1'],
         actionEnabled: false,
         command: [],
         cwd: '',
@@ -75,6 +126,7 @@ test('createPlanDraft deep-clones editable plan data without mutating the sessio
     ],
   });
   draft.steps[0].command[0] = 'changed';
+  draft.steps[1].dependsOn.push('changed');
   assert.deepEqual(session, original);
 });
 
@@ -82,42 +134,163 @@ test('createPlanDraft supports an empty plan', () => {
   assert.deepEqual(createPlanDraft({ steps: [] }), { steps: [] });
 });
 
-test('step operations add, allowlisted-update, reorder, and remove immutably', () => {
+test('addPlanStep uses an injectable ID factory and keeps generated IDs stable', () => {
   const initial = createPlanDraft(migrationSession());
-  const added = addPlanStep(initial);
+  const added = addPlanStep(initial, () => 'generated-step');
+
+  assert.deepEqual(added.steps[2], {
+    id: 'generated-step',
+    title: '',
+    description: '',
+    expected: '',
+    risk: 'low',
+    dependsOn: [],
+    actionEnabled: false,
+    command: [],
+    cwd: '',
+  });
+  const edited = updatePlanStep(added, 2, { title: 'Generated step' });
+  assert.equal(edited.steps[2].id, 'generated-step');
+  assert.equal(toPlanInput(edited).steps[2].id, 'generated-step');
+
+  const defaultAdded = addPlanStep(initial);
+  assert.match(defaultAdded.steps[2].id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+});
+
+test('step operations allowlist metadata updates, reorder, and remove immutably', () => {
+  const initial = createPlanDraft(migrationSession());
+  const added = addPlanStep(initial, () => 'generated-step');
+  const dependencies = ['step-1'];
   const updated = updatePlanStep(added, 2, {
     title: ' New step ',
     description: 'Description',
     expected: 'Expected',
+    risk: 'high',
+    dependsOn: dependencies,
     actionEnabled: true,
     command: ['npm', 'test'],
     cwd: ' app ',
     id: 'injected',
+    attempt: 99,
     status: 'complete',
+    review: { decision: 'accept' },
+    error: 'injected',
     history: ['injected'],
   });
   const moved = movePlanStep(updated, 2, -1);
   const removed = removePlanStep(moved, 0);
 
-  assert.deepEqual(added.steps[2], {
-    title: '',
-    description: '',
-    expected: '',
-    actionEnabled: false,
-    command: [],
-    cwd: '',
-  });
+  dependencies.push('step-2');
   assert.equal(updated.steps[2].title, ' New step ');
+  assert.equal(updated.steps[2].risk, 'high');
+  assert.deepEqual(updated.steps[2].dependsOn, ['step-1']);
   assert.equal(updated.steps[2].actionEnabled, true);
   assert.deepEqual(updated.steps[2].command, ['npm', 'test']);
-  assert.equal('id' in updated.steps[2], false);
+  assert.equal(updated.steps[2].id, 'generated-step');
+  assert.equal('attempt' in updated.steps[2], false);
   assert.equal('status' in updated.steps[2], false);
+  assert.equal('review' in updated.steps[2], false);
+  assert.equal('error' in updated.steps[2], false);
   assert.equal('history' in updated.steps[2], false);
   assert.equal(moved.steps[1].title, ' New step ');
   assert.equal(removed.steps.length, 2);
   assert.equal(initial.steps.length, 2);
   assert.equal(added.steps[2].title, '');
   assert.equal(updated.steps[2].title, ' New step ');
+});
+
+test('reordering reports the dependency that now targets a later step', () => {
+  const draft = createPlanDraft(migrationSession());
+  const reordered = movePlanStep(draft, 0, 1);
+
+  assert.deepEqual(validatePlanDraft(reordered).filter(({ path }) => path.includes('/dependsOn/')), [
+    { path: '/steps/0/dependsOn/0', message: 'must reference an earlier step' },
+  ]);
+});
+
+test('relationship diagnostics match protocol paths, ambiguity, and invalid-ID rules', () => {
+  const cases = [
+    {
+      name: 'duplicate step IDs',
+      steps: [draftStep({ id: 'a' }), draftStep({ id: 'a' })],
+      expectedIssues: [{ path: '/steps/1/id', message: 'must be unique' }],
+    },
+    {
+      name: 'duplicate dependency',
+      steps: [
+        draftStep({ id: 'a' }),
+        draftStep({ id: 'b', dependsOn: ['a', 'a'] }),
+      ],
+      expectedIssues: [{ path: '/steps/1/dependsOn/1', message: 'must be unique' }],
+    },
+    {
+      name: 'missing target',
+      steps: [draftStep({ id: 'a', dependsOn: ['missing'] })],
+      expectedIssues: [
+        { path: '/steps/0/dependsOn/0', message: 'must reference an existing step' },
+      ],
+    },
+    {
+      name: 'self target',
+      steps: [draftStep({ id: 'a', dependsOn: ['a'] })],
+      expectedIssues: [
+        { path: '/steps/0/dependsOn/0', message: 'must not reference the same step' },
+      ],
+    },
+    {
+      name: 'later target',
+      steps: [
+        draftStep({ id: 'a', dependsOn: ['b'] }),
+        draftStep({ id: 'b' }),
+      ],
+      expectedIssues: [
+        { path: '/steps/0/dependsOn/0', message: 'must reference an earlier step' },
+      ],
+    },
+    {
+      name: 'ambiguous self target reports only duplicate ID',
+      steps: [
+        draftStep({ id: 'a' }),
+        draftStep({ id: 'a', dependsOn: ['a'] }),
+      ],
+      expectedIssues: [{ path: '/steps/1/id', message: 'must be unique' }],
+    },
+    {
+      name: 'all ambiguous targets later still reports later',
+      steps: [
+        draftStep({ id: 'source', dependsOn: ['a'] }),
+        draftStep({ id: 'a' }),
+        draftStep({ id: 'a' }),
+      ],
+      expectedIssues: [
+        { path: '/steps/2/id', message: 'must be unique' },
+        { path: '/steps/0/dependsOn/0', message: 'must reference an earlier step' },
+      ],
+    },
+    {
+      name: 'invalid source ID does not participate in self checks',
+      steps: [draftStep({ id: '   ', dependsOn: ['   '] })],
+      expectedIssues: [
+        { path: '/steps/0/id', message: 'must be a non-empty string' },
+        { path: '/steps/0/dependsOn/0', message: 'must reference an existing step' },
+      ],
+    },
+  ];
+
+  for (const { name, steps, expectedIssues } of cases) {
+    assert.deepEqual(protocolRelationshipIssues(steps), expectedIssues, `protocol: ${name}`);
+    assert.deepEqual(validatePlanDraft({ steps }), expectedIssues, `editor: ${name}`);
+  }
+});
+
+test('removing a referenced step preserves the dependency and reports it missing', () => {
+  const draft = createPlanDraft(migrationSession());
+  const removed = removePlanStep(draft, 0);
+
+  assert.deepEqual(removed.steps[0].dependsOn, ['step-1']);
+  assert.deepEqual(validatePlanDraft(removed).filter(({ path }) => path.includes('/dependsOn/')), [
+    { path: '/steps/0/dependsOn/0', message: 'must reference an existing step' },
+  ]);
 });
 
 test('step operations safely no-op for invalid indices and boundary moves', () => {
@@ -209,6 +382,23 @@ test('validatePlanDraft reports invalid root shapes and action flags', () => {
   ]);
 });
 
+test('validatePlanDraft reports precise metadata field paths', () => {
+  assert.deepEqual(validatePlanDraft({
+    steps: [draftStep({
+      risk: 'critical',
+      dependsOn: [1],
+    })],
+  }), [
+    { path: '/steps/0/risk', message: 'must be one of low, medium, high' },
+    { path: '/steps/0/dependsOn/0', message: 'must be a string' },
+  ]);
+  assert.deepEqual(validatePlanDraft({
+    steps: [draftStep({ dependsOn: 'step-1' })],
+  }), [
+    { path: '/steps/0/dependsOn', message: 'must be an array' },
+  ]);
+});
+
 test('toPlanInput trims text, preserves argv boundaries, and emits only protocol fields', () => {
   const draft = createPlanDraft(migrationSession());
   const changed = updatePlanStep(draft, 0, {
@@ -222,21 +412,49 @@ test('toPlanInput trims text, preserves argv boundaries, and emits only protocol
   assert.deepEqual(toPlanInput(changed), {
     steps: [
       {
+        id: 'step-1',
         title: 'Inspect project',
         description: 'Read it',
         expected: 'done',
+        risk: 'medium',
+        dependsOn: [],
         action: {
           command: ['node', '  two words  ', '"quoted"'],
           cwd: 'packages/app',
         },
       },
       {
+        id: 'step-2',
         title: 'Record findings',
         description: '',
         expected: 'findings saved',
+        risk: 'high',
+        dependsOn: ['step-1'],
       },
     ],
   });
+});
+
+test('toPlanInput excludes every runtime-only field while preserving plan metadata', () => {
+  const draft = createPlanDraft(migrationSession());
+  Object.assign(draft.steps[0], {
+    attempt: 8,
+    status: 'awaiting_review',
+    review: { decision: 'accept' },
+    error: 'runtime error',
+    history: [{ type: 'step.started' }],
+    traceState: { internal: true },
+  });
+
+  assert.deepEqual(Object.keys(toPlanInput(draft).steps[0]).sort(), [
+    'action',
+    'dependsOn',
+    'description',
+    'expected',
+    'id',
+    'risk',
+    'title',
+  ]);
 });
 
 test('toPlanInput normalizes blank expected to null and rejects invalid drafts with first path', () => {

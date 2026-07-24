@@ -2,16 +2,23 @@ const STEP_PATCH_FIELDS = [
   'title',
   'description',
   'expected',
+  'risk',
+  'dependsOn',
   'actionEnabled',
   'command',
   'cwd',
 ];
 
-function emptyStep() {
+const STEP_RISKS = ['low', 'medium', 'high'];
+
+function emptyStep(id) {
   return {
+    id,
     title: '',
     description: '',
     expected: '',
+    risk: 'low',
+    dependsOn: [],
     actionEnabled: false,
     command: [],
     cwd: '',
@@ -26,6 +33,10 @@ function cloneDraft(draft) {
   return structuredClone(draft);
 }
 
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function expectedText(expected) {
   if (expected == null) return '';
   if (typeof expected === 'string') return expected;
@@ -36,9 +47,12 @@ export function createPlanDraft(session) {
   const plan = structuredClone(Array.isArray(session?.steps) ? session.steps : []);
   return {
     steps: plan.map((step) => ({
+      id: step.id,
       title: step.title,
       description: step.description ?? '',
       expected: expectedText(step.expected),
+      risk: step.risk ?? 'low',
+      dependsOn: step.dependsOn ?? [],
       actionEnabled: step.action != null,
       command: Array.isArray(step.action?.command) ? step.action.command : [],
       cwd: step.action?.cwd ?? '',
@@ -46,9 +60,9 @@ export function createPlanDraft(session) {
   };
 }
 
-export function addPlanStep(draft) {
+export function addPlanStep(draft, idFactory = () => globalThis.crypto.randomUUID()) {
   const next = cloneDraft(draft);
-  next.steps.push(emptyStep());
+  next.steps.push(emptyStep(idFactory()));
   return next;
 }
 
@@ -129,9 +143,12 @@ export function validatePlanDraft(draft) {
 
   draft.steps.forEach((step, stepIndex) => {
     const path = `/steps/${stepIndex}`;
-    if (!step || typeof step !== 'object') {
+    if (!isObject(step)) {
       issues.push({ path, message: 'must be an object' });
       return;
+    }
+    if (step.id !== undefined && (typeof step.id !== 'string' || step.id.trim() === '')) {
+      issues.push({ path: `${path}/id`, message: 'must be a non-empty string' });
     }
     if (typeof step.title !== 'string' || step.title.trim() === '') {
       issues.push({ path: `${path}/title`, message: 'must be a non-empty string' });
@@ -141,6 +158,24 @@ export function validatePlanDraft(draft) {
     }
     if (typeof step.expected !== 'string') {
       issues.push({ path: `${path}/expected`, message: 'must be a string' });
+    }
+    if (step.risk !== undefined && !STEP_RISKS.includes(step.risk)) {
+      issues.push({
+        path: `${path}/risk`,
+        message: `must be one of ${STEP_RISKS.join(', ')}`,
+      });
+    }
+    if (step.dependsOn !== undefined && !Array.isArray(step.dependsOn)) {
+      issues.push({ path: `${path}/dependsOn`, message: 'must be an array' });
+    } else {
+      step.dependsOn?.forEach((dependency, dependencyIndex) => {
+        if (typeof dependency !== 'string') {
+          issues.push({
+            path: `${path}/dependsOn/${dependencyIndex}`,
+            message: 'must be a string',
+          });
+        }
+      });
     }
     if (typeof step.actionEnabled !== 'boolean') {
       issues.push({ path: `${path}/actionEnabled`, message: 'must be a boolean' });
@@ -163,6 +198,48 @@ export function validatePlanDraft(draft) {
       issues.push({ path: `${path}/action/cwd`, message: 'must be a string' });
     }
   });
+
+  const stepIndexesById = new Map();
+  draft.steps.forEach((step, stepIndex) => {
+    if (!isObject(step) || typeof step.id !== 'string' || !step.id.trim()) return;
+    const indexes = stepIndexesById.get(step.id);
+    if (indexes) {
+      indexes.push(stepIndex);
+      issues.push({ path: `/steps/${stepIndex}/id`, message: 'must be unique' });
+    } else {
+      stepIndexesById.set(step.id, [stepIndex]);
+    }
+  });
+
+  draft.steps.forEach((step, stepIndex) => {
+    if (!isObject(step) || !Array.isArray(step.dependsOn)) return;
+    const seen = new Set();
+    step.dependsOn.forEach((dependency, dependencyIndex) => {
+      if (typeof dependency !== 'string') return;
+      const path = `/steps/${stepIndex}/dependsOn/${dependencyIndex}`;
+      if (seen.has(dependency)) {
+        issues.push({ path, message: 'must be unique' });
+        return;
+      }
+      seen.add(dependency);
+      const targetIndexes = stepIndexesById.get(dependency);
+      if (
+        typeof step.id === 'string'
+        && step.id.trim()
+        && dependency === step.id
+        && targetIndexes?.length === 1
+      ) {
+        issues.push({ path, message: 'must not reference the same step' });
+        return;
+      }
+      if (targetIndexes === undefined) {
+        issues.push({ path, message: 'must reference an existing step' });
+      } else if (targetIndexes.every((targetIndex) => targetIndex > stepIndex)) {
+        issues.push({ path, message: 'must reference an earlier step' });
+      }
+    });
+  });
+
   return issues;
 }
 
@@ -179,6 +256,9 @@ export function toPlanInput(draft) {
         description: step.description.trim(),
         expected: step.expected.trim() || null,
       };
+      if (step.id !== undefined) input.id = step.id;
+      if (step.risk !== undefined) input.risk = step.risk;
+      if (step.dependsOn !== undefined) input.dependsOn = structuredClone(step.dependsOn);
       if (step.actionEnabled) {
         input.action = {
           command: [...step.command],
