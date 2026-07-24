@@ -18,6 +18,15 @@ function stepDependencies(step){return Array.isArray(step?.dependsOn)?step.depen
 function stepAttempt(step){return Number.isInteger(step?.attempt)?step.attempt:0;}
 function dependenciesSatisfied(session,step){return stepDependencies(step).every((dependencyId)=>session.steps.some((candidate)=>candidate.id===dependencyId&&candidate.status==="completed"));}
 function awaitingReviewIndex(session){return session?.workbench==="migration"?session.steps.findIndex((step)=>step.status==="awaiting_review"):-1;}
+function isCandidateSessionNewer(current,candidate){
+  const currentTime=Date.parse(current?.updatedAt??"");
+  const candidateTime=Date.parse(candidate?.updatedAt??"");
+  if(Number.isFinite(currentTime)&&Number.isFinite(candidateTime)&&candidateTime!==currentTime)return candidateTime>currentTime;
+  const currentEvents=Array.isArray(current?.events)?current.events.length:null;
+  const candidateEvents=Array.isArray(candidate?.events)?candidate.events.length:null;
+  if(Number.isInteger(currentEvents)&&Number.isInteger(candidateEvents)&&candidateEvents!==currentEvents)return candidateEvents>currentEvents;
+  return false;
+}
 function nextRunnableIndex(session){
   if(!session)return-1;
   if(session.workbench==="migration"){
@@ -470,7 +479,19 @@ async function mutateActiveSession(path,body){
   if(request===state.sessionAction.request)state.sessionAction.pending=false;
   if(state.active?.id!==sessionId){if(state.active)renderSession(state.active);return;}
   if(mutationError){alert(mutationError.message);await openSession(sessionId);return;}
-  if(state.activeGeneration!==renderGeneration){renderSession(state.active);await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});return;}
+  if(state.activeGeneration!==renderGeneration){
+    try{await openSession(sessionId);}
+    catch(error){
+      const candidateNewer=state.active?.id===sessionId&&isCandidateSessionNewer(state.active,session);
+      const currentNewer=state.active?.id===sessionId&&isCandidateSessionNewer(session,state.active);
+      if(candidateNewer)renderSession(session);
+      else if(state.active)renderSession(state.active);
+      if(candidateNewer||currentNewer)$("#health").textContent=`session refresh failed: ${error.message}`;
+      else alert(error.message);
+    }
+    await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+    return;
+  }
   renderSession(session);
   await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
 }

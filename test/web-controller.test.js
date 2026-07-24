@@ -844,6 +844,7 @@ test("global pending action disables newly opened session controls and suppresse
 test("stale same-session review success does not overwrite newer SSE state", async (t) => {
   const review = deferred();
   const active = migrationSession("same", {
+    updatedAt: "2026-07-24T18:00:00.000Z",
     status: "awaiting_review",
     cursor: 0,
     steps: [{
@@ -858,8 +859,13 @@ test("stale same-session review success does not overwrite newer SSE state", asy
       action: { command: ["node", "prepare.js"], cwd: "." },
     }],
   });
+  let latestSession = active;
+  let failRefetch = false;
   const { browser, controller } = await loadController(t, (path, options) => {
-    if (path === "/api/sessions/same") return new FakeResponse(active);
+    if (path === "/api/sessions/same") {
+      if (failRefetch) throw new Error("refetch unavailable");
+      return new FakeResponse(latestSession);
+    }
     if (path === "/api/sessions/same/steps/0/review" && options.method === "POST") return review.promise;
     throw new Error(`Unexpected fetch ${path}`);
   });
@@ -868,12 +874,16 @@ test("stale same-session review success does not overwrite newer SSE state", asy
   const pending = browser.element("review-accept").onclick();
   const newer = {
     ...active,
+    updatedAt: "2026-07-24T18:00:02.000Z",
     cursor: 0,
     annotations: [{ id: "note-1", stepIndex: 0, text: "newer note", createdAt: "2026-07-24T00:00:00.000Z" }],
   };
+  latestSession = newer;
   browser.eventSources[0].onmessage({ data: JSON.stringify(newer) });
+  failRefetch = true;
 
   review.resolve(new FakeResponse(migrationSession("same", {
+    updatedAt: "2026-07-24T18:00:01.000Z",
     status: "completed",
     cursor: -1,
     annotations: [],
@@ -896,6 +906,69 @@ test("stale same-session review success does not overwrite newer SSE state", asy
   assert.equal(controller.state.active.cursor, 0);
   assert.match(browser.element("notes").innerHTML, /newer note/);
   assert.equal(browser.element("review-accept").disabled, false);
+  assert.deepEqual(browser.alerts, []);
+  assert.equal(browser.element("health").textContent, "session refresh failed: refetch unavailable");
+});
+
+test("same-session intermediate SSE still converges to final action state without a final SSE", async (t) => {
+  const run = deferred();
+  const initial = migrationSession("same-run", {
+    updatedAt: "2026-07-24T18:10:00.000Z",
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 0,
+      status: "pending",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  });
+  const intermediate = {
+    ...initial,
+    updatedAt: "2026-07-24T18:10:01.000Z",
+    status: "running",
+    cursor: 0,
+    steps: [{ ...initial.steps[0], attempt: 1, status: "running" }],
+  };
+  const finalSession = {
+    ...initial,
+    updatedAt: "2026-07-24T18:10:02.000Z",
+    status: "awaiting_review",
+    cursor: 0,
+    steps: [{ ...initial.steps[0], attempt: 1, status: "awaiting_review" }],
+  };
+  let latestSession = initial;
+  let failRefetch = false;
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/same-run") {
+      if (failRefetch) throw new Error("refetch unavailable");
+      return new FakeResponse(latestSession);
+    }
+    if (path === "/api/sessions/same-run/steps/0/run" && options.method === "POST") return run.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("same-run");
+
+  const pending = browser.element("run-next").onclick();
+  latestSession = intermediate;
+  browser.eventSources[0].onmessage({ data: JSON.stringify(intermediate) });
+  assert.equal(controller.state.active.status, "running");
+  assert.equal(controller.state.active.steps[0].status, "running");
+
+  latestSession = finalSession;
+  failRefetch = true;
+  run.resolve(new FakeResponse(finalSession));
+  await pending;
+
+  assert.equal(controller.state.active.status, "awaiting_review");
+  assert.equal(controller.state.active.steps[0].status, "awaiting_review");
+  assert.equal(browser.element("run-next").hidden, true);
+  assert.equal(browser.element("review-accept").hidden, false);
+  assert.deepEqual(browser.alerts, []);
+  assert.equal(browser.element("health").textContent, "session refresh failed: refetch unavailable");
 });
 
 test("high-risk execution confirmation is precise, cancellation is inert, and retry labels are visible", async (t) => {

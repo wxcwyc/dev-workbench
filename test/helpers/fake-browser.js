@@ -190,9 +190,10 @@ export function installFakeBrowser(route = () => {
   const document = new FakeDocument();
   const requests = [];
   const eventSources = [];
+  const alerts = [];
 
   globalThis.document = document;
-  globalThis.alert = () => {};
+  globalThis.alert = (message) => { alerts.push(message); };
   globalThis.confirm = () => true;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
@@ -215,6 +216,7 @@ export function installFakeBrowser(route = () => {
     document,
     eventSources,
     requests,
+    alerts,
     restore() {
       eventSources.forEach((source) => {
         source.onmessage = null;
