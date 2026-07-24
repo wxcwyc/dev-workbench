@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { createApp } from "../apps/server/src/server.js";
@@ -133,6 +134,41 @@ async function makeSampleProject(allowedRoot) {
   }));
   await fs.writeFile(path.join(sampleRoot, "src", "index.ts"), "export const ready = true;\n");
   return fs.realpath(sampleRoot);
+}
+
+function trackSessionMutations(t, sessionId) {
+  const originalRename = fs.rename;
+  const originalEmit = EventEmitter.prototype.emit;
+  let saves = 0;
+  let emits = 0;
+  const operations = [];
+
+  const trackedRename = async (...args) => {
+    const result = await originalRename(...args);
+    if (path.basename(args[1]) === `${sessionId}.json`) {
+      saves += 1;
+      operations.push("save");
+    }
+    return result;
+  };
+  const trackedEmit = function (eventName, ...args) {
+    if (eventName === `session:${sessionId}`) {
+      emits += 1;
+      operations.push("emit");
+    }
+    return originalEmit.call(this, eventName, ...args);
+  };
+  fs.rename = trackedRename;
+  EventEmitter.prototype.emit = trackedEmit;
+  t.after(() => {
+    if (fs.rename === trackedRename) fs.rename = originalRename;
+    if (EventEmitter.prototype.emit === trackedEmit) EventEmitter.prototype.emit = originalEmit;
+  });
+
+  return {
+    counts: () => ({ saves, emits }),
+    operations: () => operations.slice(),
+  };
 }
 
 test("POST /api/projects/inspect resolves a relative project and returns detected facts", async (t) => {
@@ -673,4 +709,377 @@ test("GET /api/health reports the injected allowed root", async (t) => {
 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).allowedRoot, app.allowedRoot);
+});
+
+test("successful Migration runs await review and persist their snapshot", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Reviewable migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ id: "observe", title: "Observe", traceState: { phase: "ready" } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, {});
+
+  assert.equal(run.response.status, 200);
+  assert.equal(run.body.status, "awaiting_review");
+  assert.equal(run.body.steps[0].status, "awaiting_review");
+  assert.equal(run.body.steps[0].attempt, 1);
+  assert.deepEqual(run.body.currentSnapshot.trace, { phase: "ready" });
+  const stored = JSON.parse(await fs.readFile(path.join(app.stateRoot, `${created.body.id}.json`), "utf8"));
+  assert.deepEqual(stored.snapshots[0].trace, { phase: "ready" });
+  assert.equal(stored.steps[0].status, "awaiting_review");
+});
+
+test("accept review saves and emits once, returns the full session, and completes the final step", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Accepted migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ id: "final", title: "Final", traceState: { result: "ok" } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  assert.equal((await postJson(`${sessionUrl}/steps/0/run`, {})).response.status, 200);
+  const streamAbort = new AbortController();
+  t.after(() => streamAbort.abort());
+  const streamResponse = await fetch(`${sessionUrl}/events`, { signal: streamAbort.signal });
+  assert.equal(streamResponse.status, 200);
+  const stream = createSseReader(streamResponse);
+  t.after(() => stream.cancel());
+  await withTimeout(stream.next(), "initial accepted-review SSE session");
+  const mutations = trackSessionMutations(t, created.body.id);
+  const before = mutations.counts();
+  const operationBaseline = mutations.operations().length;
+
+  const reviewed = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  const eventSession = await withTimeout(stream.next(), "accepted-review SSE session");
+
+  assert.equal(reviewed.response.status, 200);
+  assert.deepEqual(mutations.counts(), { saves: before.saves + 1, emits: before.emits + 1 });
+  assert.deepEqual(mutations.operations().slice(operationBaseline), ["save", "emit"]);
+  assert.deepEqual(eventSession, reviewed.body);
+  assert.equal(reviewed.body.status, "completed");
+  assert.equal(reviewed.body.steps[0].status, "completed");
+  assert.equal(reviewed.body.steps[0].review.decision, "accept");
+  assert.deepEqual(reviewed.body.currentSnapshot.trace, { result: "ok" });
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), reviewed.body);
+  await stream.cancel();
+  streamAbort.abort();
+});
+
+test("reject review saves and emits once, returns the full session, and retry increments attempt", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Rejected migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ id: "retry", title: "Retry", traceState: { result: "check" } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  assert.equal((await postJson(`${sessionUrl}/steps/0/run`, {})).response.status, 200);
+  const streamAbort = new AbortController();
+  t.after(() => streamAbort.abort());
+  const streamResponse = await fetch(`${sessionUrl}/events`, { signal: streamAbort.signal });
+  assert.equal(streamResponse.status, 200);
+  const stream = createSseReader(streamResponse);
+  t.after(() => stream.cancel());
+  await withTimeout(stream.next(), "initial rejected-review SSE session");
+  const mutations = trackSessionMutations(t, created.body.id);
+  const before = mutations.counts();
+  const operationBaseline = mutations.operations().length;
+
+  const reviewed = await postJson(`${sessionUrl}/steps/0/review`, { decision: "reject" });
+  const eventSession = await withTimeout(stream.next(), "rejected-review SSE session");
+
+  assert.equal(reviewed.response.status, 200);
+  assert.deepEqual(mutations.counts(), { saves: before.saves + 1, emits: before.emits + 1 });
+  assert.deepEqual(mutations.operations().slice(operationBaseline), ["save", "emit"]);
+  assert.deepEqual(eventSession, reviewed.body);
+  assert.equal(reviewed.body.status, "failed");
+  assert.equal(reviewed.body.steps[0].status, "failed");
+  assert.equal(reviewed.body.steps[0].review.decision, "reject");
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), reviewed.body);
+
+  const retried = await postJson(`${sessionUrl}/steps/0/run`, {});
+  assert.equal(retried.response.status, 200);
+  assert.equal(retried.body.status, "awaiting_review");
+  assert.equal(retried.body.steps[0].attempt, 2);
+  assert.equal(retried.body.steps[0].review, null);
+  await stream.cancel();
+  streamAbort.abort();
+});
+
+test("review route accepts only the exact decision object and exact path", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Strict review",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Review", traceState: { ready: true } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  assert.equal((await postJson(`${sessionUrl}/steps/0/run`, {})).response.status, 200);
+  const before = await (await fetch(sessionUrl)).json();
+
+  for (const body of [
+    null,
+    [],
+    {},
+    { decision: "approve" },
+    { decision: "accept", extra: true },
+  ]) {
+    const invalid = await postJson(`${sessionUrl}/steps/0/review`, body);
+    assert.equal(invalid.response.status, 400, JSON.stringify(body));
+    assert.deepEqual(await (await fetch(sessionUrl)).json(), before, JSON.stringify(body));
+  }
+  const inexact = await postJson(`${sessionUrl}/steps/0/review/extra`, { decision: "accept" });
+  assert.equal(inexact.response.status, 404);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+
+  const accepted = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(accepted.response.status, 200);
+});
+
+test("dependency-blocked and out-of-order Migration runs do not mutate storage", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+
+  for (const { title, steps } of [
+    {
+      title: "Dependency blocked",
+      steps: [
+        { id: "first", title: "First" },
+        { id: "dependent", title: "Dependent", dependsOn: ["first"] },
+      ],
+    },
+    {
+      title: "Out of order",
+      steps: [
+        { id: "first", title: "First" },
+        { id: "second", title: "Second" },
+      ],
+    },
+  ]) {
+    const created = await postJson(`${app.url}/api/sessions`, {
+      title,
+      workbench: "migration",
+      projectRoot: "sample",
+      steps,
+    });
+    const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+    const filePath = path.join(app.stateRoot, `${created.body.id}.json`);
+    const before = await fs.readFile(filePath, "utf8");
+
+    const run = await postJson(`${sessionUrl}/steps/1/run`, {});
+
+    assert.equal(run.response.status, 400, title);
+    assert.equal(await fs.readFile(filePath, "utf8"), before, title);
+  }
+});
+
+test("high risk always requires confirmedRisk and commands additionally require confirmed before start", async (t) => {
+  let commandCalls = 0;
+  const app = await startTestApp(t, {
+    runCommand: async () => {
+      commandCalls += 1;
+      return { command: ["true"], stdout: "", stderr: "", exitCode: 0 };
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+
+  const observation = await postJson(`${app.url}/api/sessions`, {
+    title: "High-risk observation",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Observe", risk: "high", traceState: { observed: true } }],
+  });
+  const observationUrl = `${app.url}/api/sessions/${observation.body.id}`;
+  const observationBefore = await (await fetch(observationUrl)).json();
+  const unconfirmedObservation = await postJson(`${observationUrl}/steps/0/run`, {});
+  assert.equal(unconfirmedObservation.response.status, 400);
+  assert.match(unconfirmedObservation.body.error, /confirmedRisk=true/);
+  assert.deepEqual(await (await fetch(observationUrl)).json(), observationBefore);
+
+  const command = await postJson(`${app.url}/api/sessions`, {
+    title: "High-risk command",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Command", risk: "high", action: { command: ["true"] } }],
+  });
+  const commandUrl = `${app.url}/api/sessions/${command.body.id}`;
+  const commandBefore = await (await fetch(commandUrl)).json();
+  const missingRisk = await postJson(`${commandUrl}/steps/0/run`, { confirmed: true });
+  assert.equal(missingRisk.response.status, 400);
+  assert.match(missingRisk.body.error, /confirmedRisk=true/);
+  assert.deepEqual(await (await fetch(commandUrl)).json(), commandBefore);
+  const missingCommand = await postJson(`${commandUrl}/steps/0/run`, { confirmedRisk: true });
+  assert.equal(missingCommand.response.status, 400);
+  assert.match(missingCommand.body.error, /confirmed=true/);
+  assert.deepEqual(await (await fetch(commandUrl)).json(), commandBefore);
+  assert.equal(commandCalls, 0);
+
+  const confirmed = await postJson(`${commandUrl}/steps/0/run`, {
+    confirmed: true,
+    confirmedRisk: true,
+  });
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(commandCalls, 1);
+});
+
+test("invalid review targets, state, media type, and workbench neither mutate nor publish", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const migration = await postJson(`${app.url}/api/sessions`, {
+    title: "Review validation",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Pending", traceState: { ready: true } }],
+  });
+  const migrationUrl = `${app.url}/api/sessions/${migration.body.id}`;
+  const pendingBefore = await (await fetch(migrationUrl)).json();
+  const mutations = trackSessionMutations(t, migration.body.id);
+  const countsBefore = mutations.counts();
+
+  const unknownIndex = await postJson(`${migrationUrl}/steps/9/review`, { decision: "accept" });
+  assert.equal(unknownIndex.response.status, 400);
+  const wrongState = await postJson(`${migrationUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(wrongState.response.status, 400);
+  const wrongContentType = await fetch(`${migrationUrl}/steps/0/review`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: JSON.stringify({ decision: "accept" }),
+  });
+  assert.equal(wrongContentType.status, 415);
+  assert.deepEqual(mutations.counts(), countsBefore);
+  assert.deepEqual(await (await fetch(migrationUrl)).json(), pendingBefore);
+
+  const runnable = await postJson(`${migrationUrl}/steps/0/run`, {});
+  assert.equal(runnable.response.status, 200);
+
+  const execution = await postJson(`${app.url}/api/sessions`, {
+    title: "Execution cannot review",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [{ title: "Execute", traceState: { done: true } }],
+  });
+  const executionUrl = `${app.url}/api/sessions/${execution.body.id}`;
+  assert.equal((await postJson(`${executionUrl}/steps/0/run`, {})).response.status, 200);
+  const executionBefore = await (await fetch(executionUrl)).json();
+  const wrongWorkbench = await postJson(`${executionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(wrongWorkbench.response.status, 400);
+  assert.deepEqual(await (await fetch(executionUrl)).json(), executionBefore);
+  assert.equal((await postJson(`${executionUrl}/annotations`, { stepIndex: 0, text: "Lock released" })).response.status, 201);
+
+  const missingId = "00000000-0000-4000-8000-000000000000";
+  const unknownSession = await postJson(`${app.url}/api/sessions/${missingId}/steps/0/review`, { decision: "accept" });
+  assert.equal(unknownSession.response.status, 404);
+  const repeatedUnknown = await postJson(`${app.url}/api/sessions/${missingId}/steps/0/review`, { decision: "accept" });
+  assert.equal(repeatedUnknown.response.status, 404);
+});
+
+test("run and review share one lock, concurrent reviews return 409, and failures release it", async (t) => {
+  let releaseOperation;
+  let signalOperationClaimed;
+  let blockedOperation;
+  let blockedName = "run";
+  let blockPending = false;
+  const resetBlock = (name) => {
+    blockedName = name;
+    blockPending = true;
+    blockedOperation = new Promise((resolve) => { releaseOperation = resolve; });
+    return new Promise((resolve) => { signalOperationClaimed = resolve; });
+  };
+  let operationClaimed = resetBlock("run");
+  t.after(() => releaseOperation());
+  const app = await startTestApp(t, {
+    afterSessionClaim: ({ operation }) => {
+      if (operation !== blockedName || !blockPending) return undefined;
+      blockPending = false;
+      signalOperationClaimed();
+      return blockedOperation;
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Locked review",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Review", traceState: { ready: true } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const runRequest = postJson(`${sessionUrl}/steps/0/run`, {});
+  await withTimeout(operationClaimed, "run claim");
+  const reviewDuringRun = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(reviewDuringRun.response.status, 409);
+  releaseOperation();
+  assert.equal((await withTimeout(runRequest, "run completion")).response.status, 200);
+
+  operationClaimed = resetBlock("review");
+  const firstReviewRequest = postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  await withTimeout(operationClaimed, "review claim");
+  const duplicateReview = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  const runDuringReview = await postJson(`${sessionUrl}/steps/0/run`, {});
+  assert.equal(duplicateReview.response.status, 409);
+  assert.equal(runDuringReview.response.status, 409);
+  releaseOperation();
+  assert.equal((await withTimeout(firstReviewRequest, "review completion")).response.status, 200);
+
+  const repeatedReview = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(repeatedReview.response.status, 400);
+  const annotation = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "Released" });
+  assert.equal(annotation.response.status, 201);
+});
+
+test("run preserves the real post-completion persistence error and releases the lock", async (t) => {
+  let app;
+  let sessionId;
+  let failingRename;
+  const sentinelMessage = "sentinel post-completion persistence failure";
+  const appOptions = {
+    runCommand: async () => {
+      const originalRename = fs.rename;
+      const destination = path.join(app.stateRoot, `${sessionId}.json`);
+      failingRename = async (...args) => {
+        if (args[1] === destination) {
+          fs.rename = originalRename;
+          throw new Error(sentinelMessage);
+        }
+        return originalRename(...args);
+      };
+      fs.rename = failingRename;
+      return { command: ["true"], stdout: "", stderr: "", exitCode: 0 };
+    },
+  };
+  app = await startTestApp(t, appOptions);
+  const originalRename = fs.rename;
+  t.after(() => {
+    if (fs.rename === failingRename) fs.rename = originalRename;
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Persistence failure",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Command", action: { command: ["true"] } }],
+  });
+  sessionId = created.body.id;
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+
+  assert.equal(run.response.status, 400);
+  assert.equal(run.body.error, sentinelMessage);
+  assert.doesNotMatch(run.body.error, /not running/i);
+  const stored = await (await fetch(sessionUrl)).json();
+  assert.equal(stored.steps[0].status, "running");
+  const annotation = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "Lock released" });
+  assert.equal(annotation.response.status, 201);
 });

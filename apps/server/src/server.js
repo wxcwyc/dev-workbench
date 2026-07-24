@@ -304,6 +304,30 @@ export async function createApp(options = {}) {
         } finally { release(); }
       }
 
+      const reviewMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/review$/i);
+      if (request.method === "POST" && reviewMatch) {
+        const id = reviewMatch[1];
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "review" });
+          const body = await readJson(request);
+          if (
+            body === null
+            || Array.isArray(body)
+            || typeof body !== "object"
+            || Object.keys(body).length !== 1
+            || !Object.hasOwn(body, "decision")
+            || !["accept", "reject"].includes(body.decision)
+          ) {
+            throw new Error('Review body must be exactly {"decision":"accept"} or {"decision":"reject"}');
+          }
+          const session = await requireSession(id);
+          engine.reviewStep(session, Number(reviewMatch[2]), body.decision);
+          await store.save(session); emit(session);
+          return sendJson(response, 200, publicSession(session));
+        } finally { release(); }
+      }
+
       const runMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/run$/i);
       if (request.method === "POST" && runMatch) {
         const id = runMatch[1];
@@ -315,6 +339,7 @@ export async function createApp(options = {}) {
           const index = Number(runMatch[2]);
           if (index !== engine.nextRunnable(session)) throw new Error("Steps must run in plan order");
           const step = engine.requireStep(session, index);
+          if (step.risk === "high" && body.confirmedRisk !== true) throw new Error("High-risk execution requires confirmedRisk=true");
           if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
           try {
             engine.startStep(session, index); await store.save(session); emit(session);
@@ -324,7 +349,9 @@ export async function createApp(options = {}) {
             engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
             return sendJson(response, 200, publicSession(session));
           } catch (error) {
-            engine.failStep(session, index, error); await store.save(session); emit(session);
+            if (session.steps[index]?.status === "running") {
+              engine.failStep(session, index, error); await store.save(session); emit(session);
+            }
             throw error;
           }
         } finally { release(); }
