@@ -5,7 +5,7 @@
 项目共享一个事件溯源执行内核，并提供两个工作台：
 
 - **Execution Explorer**：回放解释器、规则引擎、算法或 Agent 的结构化 trace，查看程序位置、目标、堆栈、绑定和每步注释。
-- **Migration Center**：逐步编辑并运行迁移计划，同时查看命令输出、文件树变化、Git diff 以及新旧系统预览；计划编辑首版只允许 pristine Migration session 整体替换步骤，保存时不会执行命令。
+- **Migration Center**：逐步编辑并运行迁移计划，成功执行的步骤先进入 review gate；高风险步骤每次 run 和 retry 都需要显式确认，再由 Accept/Reject 推进。计划编辑首版只允许 pristine Migration session 整体替换步骤，保存时不会执行命令。
 
 ## 项目文档
 
@@ -36,7 +36,7 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 
 1. 选择 Execution 或 Migration 工作台并填写会话标题；
 2. 可选粘贴或上传 trace/plan JSON；
-3. 在创建前检查规范化后的步骤、argv 参数、工作目录、影响分类和允许目录边界；Migration 计划编辑器首版只允许在 pristine Migration session 中编辑 title、description、expected text、argv 和 cwd，保存时只提交整个 plan，不会执行命令；
+3. 在创建前检查规范化后的步骤、argv 参数、工作目录、影响分类和允许目录边界；Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
 4. 确认安全预览后创建会话。
 
 最近成功创建的项目会出现在 **Recent projects** 中；重新打开时仍会再次探测路径和项目事实，不会复用旧计划。接入和创建会话本身不会运行任何命令。Migration 步骤中的实际命令仍需逐步在 UI 中明确确认后才会执行。
@@ -78,8 +78,11 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
   },
   "steps": [
     {
+      "id": "create-target-shell",
       "title": "Create target shell",
       "description": "Initialize the new framework.",
+      "risk": "medium",
+      "dependsOn": [],
       "action": { "command": ["node", "scripts/migrate.mjs", "shell"] }
     }
   ]
@@ -120,7 +123,7 @@ node packages/prolog-adapter/src/cli.js \
 - SSE 实时更新；
 - 两个独立工作台和可导入协议；
 - 真实项目只读探测、安全预览和最近项目入口；
-- Migration 计划编辑器首版，仅 pristine Migration session 可编辑，支持 title、description、expected text、argv 和 cwd，保存只做整 plan 替换；
+- Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
 - 内置 Prolog runtime trace 与框架迁移示例。
 
 ## 测试

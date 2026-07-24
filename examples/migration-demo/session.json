@@ -8,9 +8,9 @@
     "targetUrl": "about:blank"
   },
   "steps": [
-    { "title": "Reset target workspace", "description": "Create a clean target project while keeping the legacy source visible.", "action": { "command": ["node", "step-runner.js", "reset"] } },
-    { "title": "Create application shell", "description": "Add the target package and base HTML shell.", "action": { "command": ["node", "step-runner.js", "shell"] } },
-    { "title": "Migrate content", "description": "Transform legacy content into the target content collection.", "action": { "command": ["node", "step-runner.js", "content"] } },
-    { "title": "Migrate styles", "description": "Bring the visual language across as an explicit stylesheet.", "action": { "command": ["node", "step-runner.js", "styles"] } }
+    { "id": "reset-target-workspace", "title": "Reset target workspace", "description": "Create a clean target project while keeping the legacy source visible.", "risk": "high", "dependsOn": [], "action": { "command": ["node", "step-runner.js", "reset"] } },
+    { "id": "create-application-shell", "title": "Create application shell", "description": "Add the target package and base HTML shell.", "risk": "medium", "dependsOn": ["reset-target-workspace"], "action": { "command": ["node", "step-runner.js", "shell"] } },
+    { "id": "migrate-content", "title": "Migrate content", "description": "Transform legacy content into the target content collection.", "risk": "medium", "dependsOn": ["create-application-shell"], "action": { "command": ["node", "step-runner.js", "content"] } },
+    { "id": "migrate-styles", "title": "Migrate styles", "description": "Bring the visual language across as an explicit stylesheet.", "risk": "low", "dependsOn": ["migrate-content"], "action": { "command": ["node", "step-runner.js", "styles"] } }
   ]
 }

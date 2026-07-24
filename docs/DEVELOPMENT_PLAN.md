@@ -7,14 +7,14 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成；Milestone 2 的 UI 项目接入首版和迁移计划编辑器首版已完成） |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成；Milestone 2 的 UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice 已完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
 
-## 当前开发进度（2026-07-20）
+## 当前开发进度（2026-07-24）
 
-Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版和迁移计划编辑器首版：
+Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice：
 
 - 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
 - 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
@@ -23,9 +23,9 @@ Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 U
 - Execution Explorer 已区分 evaluation、branch、failure、backtrack 和 solution，并展示合一与回溯证据；
 - 内置逻辑示例已从静态手写 trace 切换为 runtime 实际执行。
 - UI 可以输入允许目录内的真实路径，完成边界与符号链接校验，并只读探测 Git、package manager、语言和常见框架；
-- UI 可以从最近项目重新探测路径，选择 Execution 或 Migration，导入可选 trace/plan JSON，并在创建空会话或计划会话前检查规范化步骤与安全边界。
+- UI 可以从最近项目重新探测路径，选择 Execution 或 Migration，导入可选 trace/plan JSON，并在创建空会话或计划会话前检查规范化步骤与安全边界；Migration 计划现在保留稳定 ID 只读、risk、dependsOn 和 review gate，成功执行的步骤会先进入 `awaiting_review`，高风险步骤在每次 run 和 retry 时都需要显式确认，再由用户接受或拒绝后继续。
 
-当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，下一步是 `awaiting_review` 以及依赖/风险语义；Preview Process Supervisor 与实时终端输出尚未完成。
+当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，review lifecycle 的 dependency / risk slice 已完成；Preview Process Supervisor 与实时终端输出尚未完成。
 
 ## Phase 0：交互与架构验证
 
@@ -97,9 +97,10 @@ Prolog adapter 至少产生：
 功能：
 
 - 迁移计划编辑器首版已完成，可在 pristine Migration session 中创建、编辑、删除和重排步骤；
-- 可编辑字段是 title、description、expected-result text、command argv 和 command cwd；
+- 可编辑字段是 title、description、expected-result text、command argv、command cwd，以及 risk 和 earlier-step dependsOn；稳定 ID 只读；
 - 保存时整体替换 plan，不执行命令；
-- 依赖、风险等级、`awaiting_review`、attempt、下游失效和并发修订控制仍待后续补齐；
+- 稳定 ID、risk、dependsOn、`awaiting_review`、attempt，以及成功步骤后的 review gate 已完成；reject 会把步骤标记为可重试的 failed，下一次 retry start 才会递增 attempt；
+- execution-time editing、downstream invalidation、revision conflict 和并发修订控制仍待后续补齐；
 - Agent 可以提议计划修改，但需要用户接受。
 
 验收条件：
@@ -198,15 +199,15 @@ Prolog adapter 至少产生：
 
 ### Milestone 2：真实 Migration Runtime
 
-状态：进行中。UI 项目接入首版和迁移计划编辑器首版已完成；下一步是 `awaiting_review` 以及依赖/风险语义。
+状态：进行中。UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice 已完成；下一步是 Preview Process Supervisor 与实时终端输出。
 
 1. UI 项目接入（首版已完成）；
 2. 迁移计划编辑器（首版已完成）；
-3. awaiting_review 生命周期；
+3. review lifecycle、dependency 和 risk 语义（已完成）；
 4. Preview Process Supervisor；
 5. 实时终端输出。
 
-交付结果：Migration Center 可以编辑并保存真实迁移计划，后续配套能力补齐后再形成完整的新旧 Web 项目操控闭环。
+交付结果：Migration Center 可以编辑并保存真实迁移计划，并在每个成功步骤后要求 review 决策；后续配套能力补齐后再形成完整的新旧 Web 项目操控闭环。
 
 ### Milestone 3：可恢复审查闭环
 
