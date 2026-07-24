@@ -1,7 +1,8 @@
 export const WORKBENCH_TYPES = Object.freeze(["execution", "migration"]);
-export const STEP_STATUSES = Object.freeze(["pending", "running", "completed", "failed", "skipped"]);
+export const STEP_STATUSES = Object.freeze(["pending", "running", "awaiting_review", "completed", "failed", "skipped"]);
 export const EVENT_TYPES = Object.freeze([
-  "session.created", "plan.updated", "step.started", "step.completed", "step.failed", "cursor.moved", "annotation.added",
+  "session.created", "plan.updated", "step.started", "step.completed", "step.failed", "step.awaiting_review",
+  "step.review.accepted", "step.review.rejected", "cursor.moved", "annotation.added",
   "trace.stream.started", "trace.event.appended", "trace.stream.completed", "trace.stream.failed"
 ]);
 export const PROTOCOL_VERSION = "1.0";

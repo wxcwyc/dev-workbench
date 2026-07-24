@@ -4,16 +4,27 @@ import { assertPlanInput, assertWorkbench, publicSession } from "../../protocol/
 const timestamp = () => new Date().toISOString();
 const event = (type, payload = {}) => ({ id: randomUUID(), type, at: timestamp(), ...payload });
 
+function runtimeStepFields(step) {
+  return {
+    risk: step.risk ?? "low",
+    dependsOn: step.dependsOn ?? [],
+    attempt: step.attempt ?? 0,
+    review: step.review ?? null
+  };
+}
+
 function normalizeStep(step, index) {
   if (!step?.title?.trim()) throw new Error(`Step ${index + 1} requires a title`);
+  const runtime = runtimeStepFields(step);
   return {
-    id: step.id ?? `step-${String(index + 1).padStart(2, "0")}`,
+    id: step.id ?? randomUUID(),
     title: step.title.trim(), description: step.description?.trim() ?? "",
+    risk: runtime.risk, dependsOn: structuredClone(runtime.dependsOn), attempt: 0,
     action: step.action == null ? null : structuredClone(step.action),
     expected: step.expected == null ? null : structuredClone(step.expected),
     traceState: step.traceState == null ? null : structuredClone(step.traceState), traceKind: step.traceKind ?? null,
     artifacts: step.artifacts ?? [], adapterSequence: step.adapterSequence ?? null, status: "pending",
-    startedAt: null, completedAt: null, error: null
+    startedAt: null, completedAt: null, error: null, review: runtime.review
   };
 }
 
@@ -64,7 +75,21 @@ export class SessionEngine {
   }
 
   nextRunnable(session) {
-    return session.steps.findIndex((step) => ["pending", "failed"].includes(step.status));
+    if (
+      session.workbench === "migration"
+      && session.steps.some((step) => ["running", "awaiting_review"].includes(step.status))
+    ) {
+      return -1;
+    }
+    return session.steps.findIndex((step) => (
+      ["pending", "failed"].includes(step.status)
+      && (
+        session.workbench !== "migration"
+        || runtimeStepFields(step).dependsOn.every((dependencyId) => (
+          session.steps.some((candidate) => candidate.id === dependencyId && candidate.status === "completed")
+        ))
+      )
+    ));
   }
 
   startTraceStream(session) {
@@ -115,10 +140,28 @@ export class SessionEngine {
 
   startStep(session, index) {
     const step = this.requireStep(session, index);
+    const runtime = runtimeStepFields(step);
     if (!["pending", "failed"].includes(step.status)) throw new Error(`Step ${index + 1} cannot run from ${step.status}`);
-    Object.assign(step, { status: "running", startedAt: timestamp(), completedAt: null, error: null });
+    if (
+      session.workbench === "migration"
+      && session.steps.some((candidate) => ["running", "awaiting_review"].includes(candidate.status))
+    ) {
+      throw new Error("Migration step is blocked while another step is running or awaiting review");
+    }
+    if (
+      session.workbench === "migration"
+      && !runtime.dependsOn.every((dependencyId) => (
+        session.steps.some((candidate) => candidate.id === dependencyId && candidate.status === "completed")
+      ))
+    ) {
+      throw new Error(`Step ${index + 1} has unmet dependencies`);
+    }
+    const attempt = runtime.attempt + 1;
+    Object.assign(step, {
+      ...runtime, status: "running", startedAt: timestamp(), completedAt: null, error: null, review: null, attempt
+    });
     session.status = "running";
-    session.events.push(event("step.started", { stepIndex: index, stepId: step.id }));
+    session.events.push(event("step.started", { stepIndex: index, stepId: step.id, attempt }));
     this.touch(session);
     return step;
   }
@@ -126,22 +169,121 @@ export class SessionEngine {
   completeStep(session, index, snapshot) {
     const step = this.requireStep(session, index);
     if (step.status !== "running") throw new Error(`Step ${index + 1} is not running`);
-    Object.assign(step, { status: "completed", completedAt: timestamp() });
-    session.snapshots[index] = { ...snapshot, stepIndex: index, capturedAt: timestamp() };
-    session.cursor = index;
-    session.status = session.steps.every((item) => ["completed", "skipped"].includes(item.status)) ? "completed" : "ready";
-    session.events.push(event("step.completed", { stepIndex: index, stepId: step.id }));
-    this.touch(session);
-    return publicSession(session);
+    const completedAt = timestamp();
+    const requiresReview = session.workbench === "migration";
+    const candidateStep = {
+      ...step,
+      status: requiresReview ? "awaiting_review" : "completed",
+      completedAt
+    };
+    const steps = session.steps.slice();
+    steps[index] = candidateStep;
+    const snapshots = session.snapshots.slice();
+    snapshots[index] = { ...snapshot, stepIndex: index, capturedAt: timestamp() };
+    const status = requiresReview
+      ? "awaiting_review"
+      : (steps.every((item) => ["completed", "skipped"].includes(item.status)) ? "completed" : "ready");
+    const candidate = {
+      ...session,
+      steps,
+      snapshots,
+      cursor: index,
+      status,
+      events: [
+        ...session.events,
+        event(
+          requiresReview ? "step.awaiting_review" : "step.completed",
+          { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+        )
+      ],
+      updatedAt: timestamp()
+    };
+    const result = publicSession(candidate);
+
+    session.steps = candidate.steps;
+    session.snapshots = candidate.snapshots;
+    session.cursor = candidate.cursor;
+    session.status = candidate.status;
+    session.events = candidate.events;
+    session.updatedAt = candidate.updatedAt;
+    return result;
   }
 
   failStep(session, index, error) {
     const step = this.requireStep(session, index);
-    Object.assign(step, { status: "failed", completedAt: timestamp(), error: { message: error.message, name: error.name } });
-    session.status = "failed";
-    session.events.push(event("step.failed", { stepIndex: index, stepId: step.id, error: step.error }));
-    this.touch(session);
-    return publicSession(session);
+    if (step.status !== "running") throw new Error(`Step ${index + 1} is not running`);
+    const candidateStep = {
+      ...step,
+      status: "failed",
+      completedAt: timestamp(),
+      error: { message: error.message, name: error.name }
+    };
+    const steps = session.steps.slice();
+    steps[index] = candidateStep;
+    const candidate = {
+      ...session,
+      steps,
+      status: "failed",
+      events: [
+        ...session.events,
+        event("step.failed", {
+          stepIndex: index,
+          stepId: candidateStep.id,
+          attempt: candidateStep.attempt,
+          error: candidateStep.error
+        })
+      ],
+      updatedAt: timestamp()
+    };
+    const result = publicSession(candidate);
+
+    session.steps = candidate.steps;
+    session.status = candidate.status;
+    session.events = candidate.events;
+    session.updatedAt = candidate.updatedAt;
+    return result;
+  }
+
+  reviewStep(session, index, decision) {
+    const step = this.requireStep(session, index);
+    if (session.workbench !== "migration") throw new Error("Step review requires a migration session");
+    if (!["accept", "reject"].includes(decision)) throw new Error(`Unsupported review decision: ${decision}`);
+    if (step.status !== "awaiting_review") throw new Error(`Step ${index + 1} is not awaiting review`);
+
+    const reviewedAt = timestamp();
+    const candidateStep = { ...step, review: { decision, reviewedAt } };
+    const steps = session.steps.slice();
+    steps[index] = candidateStep;
+    let status;
+    if (decision === "accept") {
+      candidateStep.status = "completed";
+      status = steps.every((item) => ["completed", "skipped"].includes(item.status))
+        ? "completed"
+        : "ready";
+    } else {
+      candidateStep.status = "failed";
+      status = "failed";
+    }
+    const candidate = {
+      ...session,
+      steps,
+      status,
+      events: [
+        ...session.events,
+        event(
+          decision === "accept" ? "step.review.accepted" : "step.review.rejected",
+          { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+        )
+      ],
+      updatedAt: timestamp()
+    };
+    const result = publicSession(candidate);
+
+    session.steps = candidate.steps;
+    session.status = candidate.status;
+    session.events = candidate.events;
+    session.updatedAt = candidate.updatedAt;
+    return result;
   }
 
   seek(session, index) {
