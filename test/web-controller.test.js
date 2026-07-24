@@ -32,6 +32,9 @@ function migrationSession(id = "migration", overrides = {}) {
       title: "Inspect",
       description: "Read files",
       expected: "Understood",
+      risk: "low",
+      dependsOn: [],
+      attempt: 0,
       status: "pending",
       action: { command: ["node", "inspect.js"], cwd: "." },
     }],
@@ -289,9 +292,12 @@ test("saving a plan sends one exact PUT and duplicate saves never run a command"
   const request = browser.requests.find(({ path }) => path.endsWith("/plan"));
   assert.deepEqual(JSON.parse(request.options.body), {
     steps: [{
+      id: "step-1",
       title: "Inspect",
       description: "Read files",
       expected: "Understood",
+      risk: "low",
+      dependsOn: [],
       action: { command: ["node", "inspect.js"], cwd: "." },
     }],
   });
@@ -308,6 +314,106 @@ test("saving a plan sends one exact PUT and duplicate saves never run a command"
   assert.match(browser.element("migration-view").innerHTML, /Normalized by server/);
   assert.equal(browser.element("plan-editor").open, false);
   assert.equal(controller.state.planEditor.saving, false);
+});
+
+test("plan editor renders stable ids, risk controls, and only earlier dependency checkboxes", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession("metadata", {
+    steps: [
+      {
+        id: "prepare-project",
+        title: "Prepare project",
+        description: "Read files",
+        expected: "Ready",
+        risk: "medium",
+        dependsOn: [],
+        attempt: 0,
+        status: "pending",
+        action: { command: ["node", "prepare.js"], cwd: "." },
+      },
+      {
+        id: "install-runtime",
+        title: "Install runtime",
+        description: "Apply changes",
+        expected: "Installed",
+        risk: "high",
+        dependsOn: ["prepare-project"],
+        attempt: 0,
+        status: "pending",
+        action: { command: ["node", "install.js"], cwd: "." },
+      },
+    ],
+  }));
+
+  browser.element("edit-plan").onclick();
+
+  const html = browser.element("plan-editor-steps").innerHTML;
+  assert.match(html, /Step ID/);
+  assert.match(html, /data-field="risk" data-step-index="0"/);
+  assert.match(html, /data-field="risk" data-step-index="1"/);
+  assert.match(html, /prepare-project/);
+  assert.match(html, /install-runtime/);
+  assert.match(html, /data-field="dependsOn" data-step-index="1" data-dependency-id="prepare-project"/);
+  assert.doesNotMatch(html, /data-field="dependsOn" data-step-index="0"/);
+});
+
+test("risk and dependency controls update the draft immutably", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession("metadata", {
+    steps: [
+      {
+        id: "prepare-project",
+        title: "Prepare project",
+        description: "Read files",
+        expected: "Ready",
+        risk: "medium",
+        dependsOn: [],
+        attempt: 0,
+        status: "pending",
+        action: { command: ["node", "prepare.js"], cwd: "." },
+      },
+      {
+        id: "install-runtime",
+        title: "Install runtime",
+        description: "Apply changes",
+        expected: "Installed",
+        risk: "high",
+        dependsOn: ["prepare-project"],
+        attempt: 0,
+        status: "pending",
+        action: { command: ["node", "install.js"], cwd: "." },
+      },
+    ],
+  }));
+  browser.element("edit-plan").onclick();
+  const steps = browser.element("plan-editor-steps");
+
+  const initialDraft = controller.state.planEditor.draft;
+  const risk = new FakeElement(browser.document);
+  risk.dataset.field = "risk";
+  risk.dataset.stepIndex = "1";
+  risk.value = "low";
+  steps.oninput({ target: risk });
+
+  assert.notEqual(controller.state.planEditor.draft, initialDraft);
+  assert.equal(initialDraft.steps[1].risk, "high");
+  assert.equal(controller.state.planEditor.draft.steps[1].risk, "low");
+
+  const riskDraft = controller.state.planEditor.draft;
+  const dependency = new FakeElement(browser.document);
+  dependency.dataset.field = "dependsOn";
+  dependency.dataset.stepIndex = "1";
+  dependency.dataset.dependencyId = "prepare-project";
+  dependency.checked = false;
+  steps.oninput({ target: dependency });
+
+  assert.notEqual(controller.state.planEditor.draft, riskDraft);
+  assert.deepEqual(riskDraft.steps[1].dependsOn, ["prepare-project"]);
+  assert.deepEqual(controller.state.planEditor.draft.steps[1].dependsOn, []);
 });
 
 test("plan save lock survives close and reopen until the original PUT settles", async (t) => {
@@ -572,4 +678,286 @@ test("a current plan save failure retains the dialog and reports the protocol po
   assert.match(browser.element("plan-editor-status").textContent, /\/steps\/0\/title: is required/);
   assert.equal(controller.state.planEditor.saving, false);
   assert.equal(browser.element("plan-editor-save").disabled, false);
+});
+
+test("migration runtime shows status, risk, dependencies, attempts, and awaiting review controls", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession("review", {
+    status: "awaiting_review",
+    cursor: 0,
+    steps: [
+      {
+        id: "prepare-project",
+        title: "Prepare project",
+        description: "Read files",
+        expected: "Ready",
+        risk: "high",
+        dependsOn: [],
+        attempt: 2,
+        status: "awaiting_review",
+        action: { command: ["node", "prepare.js"], cwd: "." },
+      },
+      {
+        id: "install-runtime",
+        title: "Install runtime",
+        description: "Apply changes",
+        expected: "Installed",
+        risk: "medium",
+        dependsOn: ["prepare-project"],
+        attempt: 0,
+        status: "pending",
+        action: { command: ["node", "install.js"], cwd: "." },
+      },
+    ],
+  }));
+
+  assert.match(browser.element("migration-view").innerHTML, /prepare-project/);
+  assert.match(browser.element("migration-view").innerHTML, /Risk/i);
+  assert.match(browser.element("migration-view").innerHTML, /Attempt/i);
+  assert.match(browser.element("migration-view").innerHTML, /Depends on/i);
+  assert.equal(browser.element("run-next").hidden, true);
+  assert.equal(browser.element("review-accept").hidden, false);
+  assert.equal(browser.element("review-reject").hidden, false);
+  assert.match(browser.element("review-accept").textContent, /Accept step 1/i);
+  assert.match(browser.element("review-reject").textContent, /Reject step 1/i);
+});
+
+test("accept review sends the exact decision body, locks controls, and ignores stale responses", async (t) => {
+  const review = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/first/steps/0/review" && options.method === "POST") return review.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(migrationSession("first", {
+    status: "awaiting_review",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "awaiting_review",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  }));
+
+  const pending = browser.element("review-accept").onclick();
+  assert.equal(browser.element("review-accept").disabled, true);
+  assert.equal(browser.element("review-reject").disabled, true);
+  const request = browser.requests.at(-1);
+  assert.equal(request.path, "/api/sessions/first/steps/0/review");
+  assert.deepEqual(JSON.parse(request.options.body), { decision: "accept" });
+
+  controller.renderSession(migrationSession("second"));
+  review.resolve(new FakeResponse(migrationSession("first", {
+    status: "completed",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "completed",
+      review: { decision: "accept", reviewedAt: "2026-07-24T00:00:00.000Z" },
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  })));
+  await pending;
+
+  assert.equal(controller.state.active.id, "second");
+  assert.equal(browser.element("review-accept").hidden, true);
+});
+
+test("global pending action disables newly opened session controls and suppresses a second request", async (t) => {
+  const firstReview = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/first/steps/0/review" && options.method === "POST") return firstReview.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(migrationSession("first", {
+    status: "awaiting_review",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "awaiting_review",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  }));
+
+  const pending = browser.element("review-accept").onclick();
+  const requestCount = browser.requests.length;
+
+  controller.renderSession(migrationSession("second", {
+    status: "failed",
+    cursor: 0,
+    steps: [{
+      id: "install-runtime",
+      title: "Install runtime",
+      description: "Apply changes",
+      expected: "Installed",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "failed",
+      action: { command: ["node", "install.js"], cwd: "." },
+    }],
+  }));
+
+  assert.equal(browser.element("run-next").hidden, false);
+  assert.equal(browser.element("run-next").disabled, true);
+  await browser.element("run-next").onclick();
+  assert.equal(browser.requests.length, requestCount);
+
+  firstReview.resolve(new FakeResponse(migrationSession("first", {
+    status: "completed",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "completed",
+      review: { decision: "accept", reviewedAt: "2026-07-24T00:00:00.000Z" },
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  })));
+  await pending;
+});
+
+test("stale same-session review success does not overwrite newer SSE state", async (t) => {
+  const review = deferred();
+  const active = migrationSession("same", {
+    status: "awaiting_review",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "awaiting_review",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  });
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/same") return new FakeResponse(active);
+    if (path === "/api/sessions/same/steps/0/review" && options.method === "POST") return review.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("same");
+
+  const pending = browser.element("review-accept").onclick();
+  const newer = {
+    ...active,
+    cursor: 0,
+    annotations: [{ id: "note-1", stepIndex: 0, text: "newer note", createdAt: "2026-07-24T00:00:00.000Z" }],
+  };
+  browser.eventSources[0].onmessage({ data: JSON.stringify(newer) });
+
+  review.resolve(new FakeResponse(migrationSession("same", {
+    status: "completed",
+    cursor: -1,
+    annotations: [],
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "medium",
+      dependsOn: [],
+      attempt: 1,
+      status: "completed",
+      review: { decision: "accept", reviewedAt: "2026-07-24T00:00:00.000Z" },
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  })));
+  await pending;
+
+  assert.deepEqual(controller.state.active.annotations, newer.annotations);
+  assert.equal(controller.state.active.cursor, 0);
+  assert.match(browser.element("notes").innerHTML, /newer note/);
+  assert.equal(browser.element("review-accept").disabled, false);
+});
+
+test("high-risk execution confirmation is precise, cancellation is inert, and retry labels are visible", async (t) => {
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/high/steps/0/run" && options.method === "POST") {
+      return new FakeResponse(migrationSession("high", {
+        status: "awaiting_review",
+        cursor: 0,
+        steps: [{
+          id: "prepare-project",
+          title: "Prepare project",
+          description: "Read files",
+          expected: "Ready",
+          risk: "high",
+          dependsOn: [],
+          attempt: 1,
+          status: "awaiting_review",
+          action: { command: ["node", "prepare.js"], cwd: "." },
+        }],
+      }));
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  const confirms = [];
+  globalThis.confirm = (message) => {
+    confirms.push(message);
+    return false;
+  };
+  controller.renderSession(migrationSession("high", {
+    status: "failed",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "high",
+      dependsOn: [],
+      attempt: 1,
+      status: "failed",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  }));
+
+  assert.match(browser.element("run-next").textContent, /Retry step 1/i);
+  const requestCount = browser.requests.length;
+  await browser.element("run-next").onclick();
+  assert.equal(browser.requests.length, requestCount);
+  assert.match(confirms[0], /Prepare project/);
+  assert.match(confirms[0], /prepare-project/);
+  assert.match(confirms[0], /Risk: high/);
+
+  globalThis.confirm = (message) => {
+    confirms.push(message);
+    return true;
+  };
+  await browser.element("run-next").onclick();
+
+  const request = browser.requests.findLast(({ path }) => path.endsWith("/steps/0/run"));
+  assert.equal(request.path, "/api/sessions/high/steps/0/run");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    confirmed: true,
+    confirmedRisk: true,
+  });
 });

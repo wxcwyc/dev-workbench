@@ -1,7 +1,7 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, safePreviewUrl, summarizeOnboarding } from "./onboarding.js";
 import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeCommandArgument, removePlanStep, toPlanInput, updateCommandArgument, updatePlanStep, validatePlanDraft } from "./plan-editor.js";
 
-const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,events:null,onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
+const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,activeGeneration:0,events:null,sessionAction:{request:0,pending:false,sessionId:null},onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
 const $=(selector)=>document.querySelector(selector);
 
 async function api(path,options={}){
@@ -13,6 +13,31 @@ async function api(path,options={}){
 
 function escapeHtml(value){return String(value??"").replace(/[&<>'"]/g,(character)=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[character]);}
 function stringValues(value){return Array.isArray(value)?value.filter((item)=>typeof item==="string"):[];}
+function stepRisk(step){return step?.risk??"low";}
+function stepDependencies(step){return Array.isArray(step?.dependsOn)?step.dependsOn:[];}
+function stepAttempt(step){return Number.isInteger(step?.attempt)?step.attempt:0;}
+function dependenciesSatisfied(session,step){return stepDependencies(step).every((dependencyId)=>session.steps.some((candidate)=>candidate.id===dependencyId&&candidate.status==="completed"));}
+function awaitingReviewIndex(session){return session?.workbench==="migration"?session.steps.findIndex((step)=>step.status==="awaiting_review"):-1;}
+function nextRunnableIndex(session){
+  if(!session)return-1;
+  if(session.workbench==="migration"){
+    if(awaitingReviewIndex(session)!==-1||session.steps.some((step)=>step.status==="running"))return-1;
+    return session.steps.findIndex((step)=>["pending","failed"].includes(step.status)&&dependenciesSatisfied(session,step));
+  }
+  return session.steps.findIndex((step)=>["pending","failed"].includes(step.status));
+}
+function runButtonLabel(session,index){
+  if(index<0)return"Plan completed";
+  return `${session.steps[index].status==="failed"?"Retry":"Run"} step ${index+1}`;
+}
+function confirmationMessage(session,step,index){
+  const command=step.action?.command?.join(" ");
+  if(stepRisk(step)==="high"){
+    return `${step.status==="failed"?"Retry":"Run"} high-risk migration step?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nRisk: high${command?`\nCommand: ${command}\nProject root: ${session.projectRoot}`:"\nObservation only"}\n\nProceed?`;
+  }
+  if(command)return `Run this command?\n\n${command}\n\nin ${session.projectRoot}`;
+  return `Run step ${index+1}?`;
+}
 function setOnboardingStatus(message,kind=""){
   const status=$("#onboarding-status");
   status.textContent=message;
@@ -259,7 +284,7 @@ function renderTree(snapshot){
 function renderMigration(session){
   const snapshot=session.currentSnapshot;
   const command=snapshot?.command;
-  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>`<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small></div>`).join("")}</div></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.sourceLabel??"Source")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.sourceUrl))}"></iframe></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.targetLabel??"Target")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.targetUrl))}"></iframe></section><section class="panel"><div class="panel-title">Files & changes</div><div class="panel-body tree">${renderTree(snapshot)}</div></section><section class="panel"><div class="panel-title">Git diff</div><div class="panel-body"><pre>${escapeHtml(snapshot?.git?.diff||snapshot?.git?.status||"No Git diff at this checkpoint.")}</pre></div></section><section class="panel" style="grid-column:2/4"><div class="panel-title">Command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout)}${escapeHtml(command.stderr)}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
+  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_"," "))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">Risk: ${escapeHtml(stepRisk(step))}</span></div><div class="step-meta"><span class="step-attempt">Attempt ${escapeHtml(stepAttempt(step))}</span></div><div class="step-dependencies"><strong>Depends on:</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):"none")}</div></div>`;}).join("")}</div></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.sourceLabel??"Source")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.sourceUrl))}"></iframe></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.targetLabel??"Target")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.targetUrl))}"></iframe></section><section class="panel"><div class="panel-title">Files & changes</div><div class="panel-body tree">${renderTree(snapshot)}</div></section><section class="panel"><div class="panel-title">Git diff</div><div class="panel-body"><pre>${escapeHtml(snapshot?.git?.diff||snapshot?.git?.status||"No Git diff at this checkpoint.")}</pre></div></section><section class="panel" style="grid-column:2/4"><div class="panel-title">Command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout)}${escapeHtml(command.stderr)}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
 }
 
 function isPristineMigration(session){
@@ -269,6 +294,9 @@ function isPristineMigration(session){
 function canEditPlan(session){return isPristineMigration(session);}
 function planIssue(path){return state.planEditor.issues.find((issue)=>issue.path===path)?.message??"";}
 function inlinePlanError(path){return `<span class="inline-error" data-error-path="${path}">${escapeHtml(planIssue(path))}</span>`;}
+function planDependencyIssues(stepIndex){
+  return state.planEditor.issues.filter((issue)=>issue.path.startsWith(`/steps/${stepIndex}/dependsOn`));
+}
 
 function syncPlanEditorValidation({preserveStatus=false}={}){
   const draft=state.planEditor.draft;
@@ -295,7 +323,9 @@ function renderPlanEditor({preserveStatus=false}={}){
   $("#plan-editor-steps").innerHTML=draft.steps.map((step,index)=>{
     const title=step.title.trim()||`Untitled step ${index+1}`;
     const argv=step.command.map((argument,argumentIndex)=>`<div class="plan-argv-row"><input type="text" data-field="argument" data-step-index="${index}" data-argument-index="${argumentIndex}" value="${escapeHtml(argument)}" aria-label="Argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}><button type="button" class="plan-remove" data-action="remove-argument" data-step-index="${index}" data-argument-index="${argumentIndex}" aria-label="Remove argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}>Remove</button>${inlinePlanError(`/steps/${index}/action/command/${argumentIndex}`)}</div>`).join("");
-    return `<details class="plan-step" open><summary><span class="plan-step-index">${String(index+1).padStart(2,"0")}</span><span class="plan-step-title">${escapeHtml(title)}</span></summary><div class="plan-step-content"><div class="plan-step-actions"><button type="button" data-action="move-up" data-step-index="${index}" aria-label="Move step ${index+1} up" ${locked||index===0?"disabled":""}>↑</button><button type="button" data-action="move-down" data-step-index="${index}" aria-label="Move step ${index+1} down" ${locked||index===last?"disabled":""}>↓</button><button type="button" class="plan-remove" data-action="remove-step" data-step-index="${index}" ${locked?"disabled":""}>Delete</button></div><div class="plan-field-grid"><label>Title<input type="text" data-field="title" data-step-index="${index}" value="${escapeHtml(step.title)}" ${locked?"disabled":""}>${inlinePlanError(`/steps/${index}/title`)}</label><label>Description<textarea data-field="description" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.description)}</textarea>${inlinePlanError(`/steps/${index}/description`)}</label><label>Expected result<textarea data-field="expected" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.expected)}</textarea>${inlinePlanError(`/steps/${index}/expected`)}</label></div><label class="plan-action-toggle"><input type="checkbox" data-field="actionEnabled" data-step-index="${index}" ${step.actionEnabled?"checked":""} ${locked?"disabled":""}> Run a command for this step</label><div class="plan-action-fields" ${step.actionEnabled?"":`aria-disabled="true"`}><div class="plan-argv-list">${argv||`<span class="muted">No arguments yet.</span>`}</div>${inlinePlanError(`/steps/${index}/action/command`)}<button type="button" data-action="add-argument" data-step-index="${index}" ${locked||!step.actionEnabled?"disabled":""}>+ Add argument</button><label>Working directory<input type="text" data-field="cwd" data-step-index="${index}" value="${escapeHtml(step.cwd)}" ${locked||!step.actionEnabled?"disabled":""}>${inlinePlanError(`/steps/${index}/action/cwd`)}</label></div></div></details>`;
+    const dependencyChoices=draft.steps.slice(0,index).map((candidate,candidateIndex)=>`<label><input type="checkbox" data-field="dependsOn" data-step-index="${index}" data-dependency-id="${escapeHtml(candidate.id)}" ${step.dependsOn.includes(candidate.id)?"checked":""} ${locked?"disabled":""}> <span>${escapeHtml(candidate.title.trim()||`Untitled step ${candidateIndex+1}`)} <code>${escapeHtml(candidate.id)}</code></span></label>`).join("");
+    const dependencyIssues=planDependencyIssues(index).map((issue)=>`<span class="inline-error" data-error-path="${issue.path}">${escapeHtml(planIssue(issue.path))}</span>`).join("");
+    return `<details class="plan-step" open><summary><span class="plan-step-index">${String(index+1).padStart(2,"0")}</span><span class="plan-step-title">${escapeHtml(title)}</span></summary><div class="plan-step-content"><div class="plan-step-actions"><button type="button" data-action="move-up" data-step-index="${index}" aria-label="Move step ${index+1} up" ${locked||index===0?"disabled":""}>↑</button><button type="button" data-action="move-down" data-step-index="${index}" aria-label="Move step ${index+1} down" ${locked||index===last?"disabled":""}>↓</button><button type="button" class="plan-remove" data-action="remove-step" data-step-index="${index}" ${locked?"disabled":""}>Delete</button></div><div class="plan-step-metadata"><div class="plan-risk-grid"><label>Step ID<input type="text" value="${escapeHtml(step.id)}" readonly aria-readonly="true" aria-label="Step ID ${index+1}"></label><label>Risk<select data-field="risk" data-step-index="${index}" ${locked?"disabled":""}><option value="low" ${stepRisk(step)==="low"?"selected":""}>Low</option><option value="medium" ${stepRisk(step)==="medium"?"selected":""}>Medium</option><option value="high" ${stepRisk(step)==="high"?"selected":""}>High</option></select>${inlinePlanError(`/steps/${index}/risk`)}</label></div><fieldset class="plan-dependency-fieldset"><legend class="field-label">Depends on earlier steps</legend><div class="plan-dependency-list">${dependencyChoices||`<span class="plan-dependency-hint">No earlier steps yet.</span>`}</div><div class="plan-dependency-issues">${dependencyIssues}</div></fieldset></div><div class="plan-field-grid"><label>Title<input type="text" data-field="title" data-step-index="${index}" value="${escapeHtml(step.title)}" ${locked?"disabled":""}>${inlinePlanError(`/steps/${index}/title`)}</label><label>Description<textarea data-field="description" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.description)}</textarea>${inlinePlanError(`/steps/${index}/description`)}</label><label class="plan-field-wide">Expected result<textarea data-field="expected" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.expected)}</textarea>${inlinePlanError(`/steps/${index}/expected`)}</label></div><label class="plan-action-toggle"><input type="checkbox" data-field="actionEnabled" data-step-index="${index}" ${step.actionEnabled?"checked":""} ${locked?"disabled":""}> Run a command for this step</label><div class="plan-action-fields" ${step.actionEnabled?"":`aria-disabled="true"`}><div class="plan-argv-list">${argv||`<span class="muted">No arguments yet.</span>`}</div>${inlinePlanError(`/steps/${index}/action/command`)}<button type="button" data-action="add-argument" data-step-index="${index}" ${locked||!step.actionEnabled?"disabled":""}>+ Add argument</button><label>Working directory<input type="text" data-field="cwd" data-step-index="${index}" value="${escapeHtml(step.cwd)}" ${locked||!step.actionEnabled?"disabled":""}>${inlinePlanError(`/steps/${index}/action/cwd`)}</label></div></div></details>`;
   }).join("")||`<div class="plan-empty">No plan steps. Add one or save an empty plan.</div>`;
   $("#plan-editor-add").disabled=locked;
   $("#plan-editor-cancel").disabled=false;
@@ -355,6 +385,7 @@ async function savePlan(){
 function renderSession(session){
   if(state.planEditor.sessionId&&state.planEditor.sessionId!==session.id)closePlanEditor();
   state.active=session;
+  state.activeGeneration+=1;
   if(state.planEditor.sessionId===session.id){
     state.planEditor.stale=!isPristineMigration(session);
     syncPlanEditorValidation();
@@ -376,11 +407,24 @@ function renderSession(session){
   $("#execution-view").classList.toggle("hidden",session.workbench!=="execution");
   $("#migration-view").classList.toggle("hidden",session.workbench!=="migration");
   if(session.workbench==="execution")renderExecution(session);else renderMigration(session);
-  const nextIndex=session.steps.findIndex((step)=>["pending","failed"].includes(step.status));
-  $("#run-next").classList.toggle("hidden",session.workbench==="execution"&&nextIndex===-1);
-  $("#run-next").disabled=nextIndex===-1||session.status==="running";
+  const nextIndex=nextRunnableIndex(session);
+  const reviewIndex=awaitingReviewIndex(session);
+  const actionPending=state.sessionAction.pending;
+  $("#review-controls").classList.toggle("hidden",reviewIndex===-1);
+  $("#review-controls").hidden=reviewIndex===-1;
+  $("#review-accept").hidden=reviewIndex===-1;
+  $("#review-reject").hidden=reviewIndex===-1;
+  $("#review-accept").disabled=reviewIndex===-1||actionPending;
+  $("#review-reject").disabled=reviewIndex===-1||actionPending;
+  if(reviewIndex!==-1){
+    $("#review-accept").textContent=`Accept step ${reviewIndex+1}`;
+    $("#review-reject").textContent=`Reject step ${reviewIndex+1}`;
+  }
+  $("#run-next").classList.toggle("hidden",reviewIndex!==-1||(session.workbench==="execution"&&nextIndex===-1));
+  $("#run-next").hidden=reviewIndex!==-1||(session.workbench==="execution"&&nextIndex===-1);
+  $("#run-next").disabled=actionPending||nextIndex===-1||session.status==="running";
   $("#run-next").dataset.index=String(nextIndex);
-  $("#run-next").textContent=nextIndex<0?"Plan completed":`Run step ${nextIndex+1}`;
+  $("#run-next").textContent=runButtonLabel(session,nextIndex);
   renderTimeline(session);
   $("#notes-title").textContent=session.cursor<0?"Notes":"Notes for step "+(session.cursor+1);
   $("#notes").innerHTML=annotations(session).map((note)=>`<div class="note">${escapeHtml(note.text)}<small> · ${new Date(note.createdAt).toLocaleString()}</small></div>`).join("")||`<span class="muted">No notes for this step.</span>`;
@@ -410,6 +454,44 @@ async function openSession(id){
   const sessionEvents=new EventSource(`/api/sessions/${id}/events`);
   state.events=sessionEvents;
   sessionEvents.onmessage=(event)=>{if(state.events!==sessionEvents)return;const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
+}
+async function mutateActiveSession(path,body){
+  const sessionId=state.active?.id;
+  if(!sessionId||state.sessionAction.pending)return;
+  const request=++state.sessionAction.request;
+  state.sessionAction.pending=true;
+  state.sessionAction.sessionId=sessionId;
+  renderSession(state.active);
+  const renderGeneration=state.activeGeneration;
+  let session;
+  let mutationError;
+  try{session=await api(path,{method:"POST",body:JSON.stringify(body)});}
+  catch(error){mutationError=error;}
+  if(request===state.sessionAction.request)state.sessionAction.pending=false;
+  if(state.active?.id!==sessionId){if(state.active)renderSession(state.active);return;}
+  if(mutationError){alert(mutationError.message);await openSession(sessionId);return;}
+  if(state.activeGeneration!==renderGeneration){renderSession(state.active);await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});return;}
+  renderSession(session);
+  await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+}
+async function runCurrentStep(){
+  const index=Number($("#run-next").dataset.index);
+  const session=state.active;
+  const step=session?.steps[index];
+  if(!session||!step||index<0)return;
+  if((step.action||stepRisk(step)==="high")&&!confirm(confirmationMessage(session,step,index)))return;
+  const body=step.action?{confirmed:true}:{};
+  if(stepRisk(step)==="high"){
+    const highRiskConfirmation={confirmedRisk:true};
+    Object.assign(body,highRiskConfirmation);
+  }
+  await mutateActiveSession(`/api/sessions/${session.id}/steps/${index}/run`,body);
+}
+async function reviewCurrentStep(body){
+  const session=state.active;
+  const index=awaitingReviewIndex(session);
+  if(!session||index<0)return;
+  await mutateActiveSession(`/api/sessions/${session.id}/steps/${index}/review`,body);
 }
 async function seek(stepIndex){renderSession(await api(`/api/sessions/${state.active.id}/seek`,{method:"POST",body:JSON.stringify({stepIndex})}));}
 async function createExample(name){const session=await api(`/api/examples/${name}`,{method:"POST",body:"{}"});await refreshSessions();await openSession(session.id);}
@@ -489,6 +571,11 @@ $("#plan-editor-steps").oninput=(event)=>{
   if(!target||state.planEditor.saving||!state.planEditor.draft)return;
   const stepIndex=Number(target.dataset.stepIndex);
   if(target.dataset.field==="argument")state.planEditor.draft=updateCommandArgument(state.planEditor.draft,stepIndex,Number(target.dataset.argumentIndex),target.value);
+  else if(target.dataset.field==="dependsOn"){
+    const current=stepDependencies(state.planEditor.draft.steps[stepIndex]);
+    const next=target.checked?Array.from(new Set([...current,target.dataset.dependencyId])):current.filter((dependency)=>dependency!==target.dataset.dependencyId);
+    state.planEditor.draft=updatePlanStep(state.planEditor.draft,stepIndex,{dependsOn:next});
+  }
   else state.planEditor.draft=updatePlanStep(state.planEditor.draft,stepIndex,{[target.dataset.field]:target.dataset.field==="actionEnabled"?target.checked:target.value});
   const card=target.closest(".plan-step");
   if(target.dataset.field==="title"){
@@ -519,7 +606,9 @@ $("#plan-editor-steps").onclick=(event)=>{
 $("#logic-demo").onclick=()=>createExample("logic-trace").catch((error)=>alert(error.message));
 $("#migration-demo").onclick=()=>createExample("migration-demo").catch((error)=>alert(error.message));
 $("#session-file").onchange=async(event)=>{try{const input=JSON.parse(await event.target.files[0].text());const session=await api("/api/sessions",{method:"POST",body:JSON.stringify(input)});await refreshSessions();await openSession(session.id);}catch(error){alert(error.message);}event.target.value="";};
-$("#run-next").onclick=async()=>{const index=Number($("#run-next").dataset.index);const step=state.active.steps[index];if(step.action&&!confirm(`Run this command?\n\n${step.action.command.join(" ")}\n\nin ${state.active.projectRoot}`))return;try{renderSession(await api(`/api/sessions/${state.active.id}/steps/${index}/run`,{method:"POST",body:JSON.stringify({confirmed:true})}));await refreshSessions();}catch(error){alert(error.message);await openSession(state.active.id);}};
+$("#run-next").onclick=async()=>runCurrentStep();
+$("#review-accept").onclick=async()=>reviewCurrentStep({decision:"accept"});
+$("#review-reject").onclick=async()=>reviewCurrentStep({decision:"reject"});
 $("#previous").onclick=()=>seek(state.active.cursor-1);$("#next").onclick=()=>seek(state.active.cursor+1);$("#latest").onclick=()=>seek(Number($("#latest").dataset.index));
 $("#note-form").onsubmit=async(event)=>{event.preventDefault();const text=$("#note-text").value.trim();if(!text)return;renderSession(await api(`/api/sessions/${state.active.id}/annotations`,{method:"POST",body:JSON.stringify({stepIndex:state.active.cursor,text})}));$("#note-text").value="";};
 

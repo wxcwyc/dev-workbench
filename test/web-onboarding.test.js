@@ -23,6 +23,9 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.match(html, /<label[^>]+for="project-path"/);
   assert.match(html, /<input[^>]+id="project-path"/);
   assert.match(html, /id="onboarding-create"/);
+  assert.match(html, /id="review-controls"/);
+  assert.match(html, /id="review-accept"/);
+  assert.match(html, /id="review-reject"/);
   assert.match(html, /id="onboarding-preview"[^>]+aria-live="polite"/);
   assert.match(html, /id="onboarding-status"[^>]+aria-live="polite"/);
   assert.match(html, /id="onboarding-close"[^>]+aria-label="Close project onboarding"/);
@@ -30,6 +33,10 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.match(styles, /#project-onboarding \.onboarding-file:focus-within\{/);
   assert.match(styles, /#project-onboarding \.onboarding-status\{[^}]*max-height:[^;}]+;[^}]*overflow:auto/);
   assert.match(styles, /#project-onboarding button,#project-onboarding input,#project-onboarding select,#project-onboarding textarea\{font:inherit}/);
+  assert.match(styles, /button:focus-visible,[^{]*select:focus-visible/);
+  assert.match(styles, /@media\(max-width:900px\)\{[^}]*\.session-header/);
+  assert.match(styles, /#review-controls\{display:grid;grid-template-columns:1fr}/);
+  assert.match(styles, /#review-controls button\{text-align:center}/);
   const fileHandler = app.slice(app.indexOf('$("#onboarding-file").onchange'));
   assert.ok(fileHandler.indexOf("invalidateOnboardingPreview()") < fileHandler.indexOf("await file.text()"));
   const createHandler = app.slice(app.indexOf("async function createOnboardingSession"));
@@ -71,6 +78,11 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.equal(migrationHandler.match(/src="\$\{escapeHtml\(safePreviewUrl\(session\.metadata\.(?:source|target)Url\)\)\}"/g)?.length, 2);
   assert.equal(migrationHandler.match(/<iframe class="preview" sandbox="allow-scripts allow-forms"/g)?.length, 2);
   assert.doesNotMatch(migrationHandler, /allow-same-origin|allow-top-navigation|allow-popups/);
+  assert.match(app, /\$\("#review-accept"\)\.onclick=async/);
+  assert.match(app, /\$\("#review-reject"\)\.onclick=async/);
+  assert.match(app, /confirmedRisk:\s*true/);
+  assert.match(app, /decision:\s*"accept"/);
+  assert.match(app, /decision:\s*"reject"/);
 });
 
 test("parseSessionImport parses an object and treats whitespace as no import", () => {

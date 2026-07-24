@@ -11,6 +11,7 @@ const elementIds = [
   "plan-editor", "plan-editor-add", "plan-editor-cancel", "plan-editor-save",
   "plan-editor-status", "plan-editor-steps", "edit-plan",
   "project-inspect-form", "project-onboarding", "project-path", "run-next",
+  "review-accept", "review-controls", "review-reject",
   "session-file", "session-path", "session-status", "session-title", "sessions",
   "step-counter", "timeline", "workbench", "workbench-badge",
 ];

@@ -41,7 +41,16 @@
       <div id="workbench" class="hidden">
         <div class="session-header">
           <div><span id="workbench-badge" class="badge"></span><h1 id="session-title"></h1><p id="session-path" class="muted"></p></div>
-          <div><span id="session-status"></span><button id="edit-plan" type="button" hidden disabled aria-describedby="edit-plan-reason">Edit plan</button><span id="edit-plan-reason" class="muted">Plan editing is available only before the migration starts.</span><button id="run-next" class="primary">Run next step</button></div>
+          <div id="session-controls" class="session-controls">
+            <span id="session-status"></span>
+            <button id="edit-plan" type="button" hidden disabled aria-describedby="edit-plan-reason">Edit plan</button>
+            <span id="edit-plan-reason" class="muted">Plan editing is available only before the migration starts.</span>
+            <div id="review-controls" class="review-controls hidden">
+              <button id="review-accept" class="primary" type="button" hidden>Accept step</button>
+              <button id="review-reject" type="button" hidden>Reject step</button>
+            </div>
+            <button id="run-next" class="primary" type="button">Run next step</button>
+          </div>
         </div>
         <div id="execution-view" class="hidden"></div>
         <div id="migration-view" class="hidden"></div>
