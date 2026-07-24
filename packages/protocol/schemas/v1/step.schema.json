@@ -9,6 +9,8 @@
     "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
     "description": { "type": "string" },
     "expected": {},
+    "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+    "dependsOn": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "action": {
       "type": ["object", "null"],
       "required": ["command"],

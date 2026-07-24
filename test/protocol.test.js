@@ -33,6 +33,15 @@ test("step schema matches the editable plan field contract", async () => {
   assert.equal(schema.properties.id.pattern, "\\S");
   assert.equal(schema.properties.title.pattern, "\\S");
   assert.equal(schema.properties.description.type, "string");
+  assert.deepEqual(schema.properties.risk, {
+    type: "string",
+    enum: ["low", "medium", "high"]
+  });
+  assert.deepEqual(schema.properties.dependsOn, {
+    type: "array",
+    items: { type: "string" },
+    uniqueItems: true
+  });
   assert.equal(schema.additionalProperties, false);
 });
 
@@ -48,6 +57,219 @@ test("plan validation accepts steps and exposes the plan update event", () => {
 
   assert.equal(assertPlanInput(input), input);
   assert.ok(EVENT_TYPES.includes("plan.updated"));
+});
+
+test("session and plan validation accept migration step metadata", () => {
+  const steps = [
+    { id: "prepare-project", title: "Prepare project" },
+    {
+      id: "install-runtime",
+      title: "Install runtime",
+      risk: "high",
+      dependsOn: ["prepare-project"]
+    }
+  ];
+  const plan = { steps };
+  const session = {
+    title: "Runtime migration",
+    workbench: "migration",
+    projectRoot: "/tmp/project",
+    steps
+  };
+
+  assert.equal(assertPlanInput(plan), plan);
+  assert.equal(assertSessionInput(session), session);
+});
+
+test("session and plan validation reject invalid migration step metadata at precise paths", () => {
+  const cases = [
+    {
+      name: "unsupported risk",
+      steps: [{ id: "prepare", title: "Prepare", risk: "critical" }],
+      path: "/steps/0/risk"
+    },
+    {
+      name: "non-array dependencies",
+      steps: [{ id: "prepare", title: "Prepare", dependsOn: "setup" }],
+      path: "/steps/0/dependsOn"
+    },
+    {
+      name: "non-string dependency",
+      steps: [{ id: "prepare", title: "Prepare", dependsOn: [1] }],
+      path: "/steps/0/dependsOn/0"
+    },
+    {
+      name: "duplicate step IDs",
+      steps: [{ id: "prepare", title: "Prepare" }, { id: "prepare", title: "Prepare again" }],
+      path: "/steps/1/id"
+    },
+    {
+      name: "duplicate dependency IDs",
+      steps: [
+        { id: "prepare", title: "Prepare" },
+        { id: "install", title: "Install", dependsOn: ["prepare", "prepare"] }
+      ],
+      path: "/steps/1/dependsOn/1"
+    },
+    {
+      name: "missing dependency target",
+      steps: [
+        { id: "prepare", title: "Prepare" },
+        { id: "install", title: "Install", dependsOn: ["missing"] }
+      ],
+      path: "/steps/1/dependsOn/0"
+    },
+    {
+      name: "self-dependency",
+      steps: [{ id: "prepare", title: "Prepare", dependsOn: ["prepare"] }],
+      path: "/steps/0/dependsOn/0"
+    },
+    {
+      name: "dependency on a later step",
+      steps: [
+        { id: "prepare", title: "Prepare", dependsOn: ["install"] },
+        { id: "install", title: "Install" }
+      ],
+      path: "/steps/0/dependsOn/0"
+    }
+  ];
+  const validators = [
+    ["plan", (steps) => assertPlanInput({ steps })],
+    ["session", (steps) => assertSessionInput({
+      title: "Runtime migration",
+      workbench: "migration",
+      projectRoot: "/tmp/project",
+      steps
+    })]
+  ];
+
+  for (const { name, steps, path } of cases) {
+    for (const [documentType, validate] of validators) {
+      assert.throws(
+        () => validate(steps),
+        (error) => error instanceof ProtocolValidationError
+          && error.documentType === documentType
+          && error.issues.some((item) => item.path === path),
+        `${documentType}: ${name}`
+      );
+    }
+  }
+});
+
+test("ambiguous step IDs report only the duplicate ID root cause", () => {
+  const cases = [
+    {
+      name: "self relationship",
+      steps: [
+        { id: "a", title: "First" },
+        { id: "a", title: "Second", dependsOn: ["a"] }
+      ],
+      expectedIssues: [{ path: "/steps/1/id", message: "must be unique" }]
+    },
+    {
+      name: "missing relationship from an ambiguous step",
+      steps: [
+        { id: "a", title: "First" },
+        { id: "a", title: "Second", dependsOn: ["missing"] }
+      ],
+      expectedIssues: [
+        { path: "/steps/1/id", message: "must be unique" },
+        { path: "/steps/1/dependsOn/0", message: "must reference an existing step" }
+      ]
+    },
+    {
+      name: "later relationship from an ambiguous step",
+      steps: [
+        { id: "a", title: "First" },
+        { id: "a", title: "Second", dependsOn: ["later"] },
+        { id: "later", title: "Later" }
+      ],
+      expectedIssues: [
+        { path: "/steps/1/id", message: "must be unique" },
+        { path: "/steps/1/dependsOn/0", message: "must reference an earlier step" }
+      ]
+    },
+    {
+      name: "all duplicate targets are later",
+      steps: [
+        { id: "source", title: "Source", dependsOn: ["a"] },
+        { id: "a", title: "First target" },
+        { id: "a", title: "Second target" }
+      ],
+      expectedIssues: [
+        { path: "/steps/2/id", message: "must be unique" },
+        { path: "/steps/0/dependsOn/0", message: "must reference an earlier step" }
+      ]
+    },
+    {
+      name: "all duplicate targets are earlier",
+      steps: [
+        { id: "a", title: "First target" },
+        { id: "a", title: "Second target" },
+        { id: "source", title: "Source", dependsOn: ["a"] }
+      ],
+      expectedIssues: [{ path: "/steps/1/id", message: "must be unique" }]
+    },
+    {
+      name: "duplicate targets are before and after the source",
+      steps: [
+        { id: "a", title: "Earlier target" },
+        { id: "source", title: "Source", dependsOn: ["a"] },
+        { id: "a", title: "Later target" }
+      ],
+      expectedIssues: [{ path: "/steps/2/id", message: "must be unique" }]
+    }
+  ];
+
+  for (const { name, steps, expectedIssues } of cases) {
+    const validators = [
+      ["plan", () => assertPlanInput({ steps })],
+      ["session", () => assertSessionInput({
+        title: "Runtime migration",
+        workbench: "migration",
+        projectRoot: "/tmp/project",
+        steps
+      })]
+    ];
+    for (const [documentType, validate] of validators) {
+      assert.throws(
+        validate,
+        (error) => error instanceof ProtocolValidationError
+          && error.documentType === documentType
+          && assert.deepEqual(error.issues, expectedIssues) === undefined,
+        `${documentType}: ${name}`
+      );
+    }
+  }
+});
+
+test("invalid step IDs do not participate in self-reference checks", () => {
+  for (const id of ["", "   "]) {
+    const steps = [{ id, title: "Invalid ID", dependsOn: [id] }];
+    const expectedIssues = [
+      { path: "/steps/0/id", message: "must be a non-empty string" },
+      { path: "/steps/0/dependsOn/0", message: "must reference an existing step" }
+    ];
+    const validators = [
+      ["plan", () => assertPlanInput({ steps })],
+      ["session", () => assertSessionInput({
+        title: "Runtime migration",
+        workbench: "migration",
+        projectRoot: "/tmp/project",
+        steps
+      })]
+    ];
+
+    for (const [documentType, validate] of validators) {
+      assert.throws(
+        validate,
+        (error) => error instanceof ProtocolValidationError
+          && error.documentType === documentType
+          && assert.deepEqual(error.issues, expectedIssues) === undefined,
+        `${documentType}: ${JSON.stringify(id)}`
+      );
+    }
+  }
 });
 
 test("plan validation reports precise JSON pointer paths", () => {

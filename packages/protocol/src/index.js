@@ -7,6 +7,7 @@ export const EVENT_TYPES = Object.freeze([
 export const PROTOCOL_VERSION = "1.0";
 export const TRACE_EVENT_KINDS = Object.freeze(["evaluation", "branch", "failure", "backtrack", "solution"]);
 export const ADAPTER_CAPABILITIES = Object.freeze(["trace", "artifacts", "source-locations"]);
+const STEP_RISKS = ["low", "medium", "high"];
 
 export class ProtocolValidationError extends Error {
   constructor(documentType, issues) {
@@ -65,12 +66,62 @@ function validateTraceItem(item, path, issues) {
 
 function validateStep(step, path, issues) {
   if (!requireObject(step, path, issues)) return;
-  allowedKeys(step, ["id", "title", "description", "expected", "action", "traceState"], path, issues);
+  allowedKeys(step, ["id", "title", "description", "expected", "risk", "dependsOn", "action", "traceState"], path, issues);
   if (step.id !== undefined) requireString(step.id, `${path}/id`, issues);
   requireString(step.title, `${path}/title`, issues);
   if (step.description !== undefined && typeof step.description !== "string") issue(issues, `${path}/description`, "must be a string");
+  if (step.risk !== undefined && !STEP_RISKS.includes(step.risk)) {
+    issue(issues, `${path}/risk`, `must be one of ${STEP_RISKS.join(", ")}`);
+  }
+  if (step.dependsOn !== undefined && !Array.isArray(step.dependsOn)) {
+    issue(issues, `${path}/dependsOn`, "must be an array");
+  } else {
+    step.dependsOn?.forEach((dependency, index) => {
+      if (typeof dependency !== "string") issue(issues, `${path}/dependsOn/${index}`, "must be a string");
+    });
+  }
   if (step.action !== undefined && step.action !== null) validateAction(step.action, `${path}/action`, issues);
   if (step.traceState !== undefined && step.traceState !== null) requireObject(step.traceState, `${path}/traceState`, issues);
+}
+
+function validateStepRelationships(steps, issues) {
+  if (!Array.isArray(steps)) return;
+
+  const stepIndexesById = new Map();
+  steps.forEach((step, index) => {
+    if (!isObject(step) || typeof step.id !== "string" || !step.id.trim()) return;
+    const indexes = stepIndexesById.get(step.id);
+    if (indexes) {
+      indexes.push(index);
+      issue(issues, `/steps/${index}/id`, "must be unique");
+    } else {
+      stepIndexesById.set(step.id, [index]);
+    }
+  });
+
+  steps.forEach((step, stepIndex) => {
+    if (!isObject(step) || !Array.isArray(step.dependsOn)) return;
+    const seen = new Set();
+    step.dependsOn.forEach((dependency, dependencyIndex) => {
+      if (typeof dependency !== "string") return;
+      const path = `/steps/${stepIndex}/dependsOn/${dependencyIndex}`;
+      if (seen.has(dependency)) {
+        issue(issues, path, "must be unique");
+        return;
+      }
+      seen.add(dependency);
+      const targetIndexes = stepIndexesById.get(dependency);
+      if (typeof step.id === "string" && step.id.trim() && dependency === step.id && targetIndexes?.length === 1) {
+        issue(issues, path, "must not reference the same step");
+        return;
+      }
+      if (targetIndexes === undefined) {
+        issue(issues, path, "must reference an existing step");
+      } else if (targetIndexes.every((targetIndex) => targetIndex > stepIndex)) {
+        issue(issues, path, "must reference an earlier step");
+      }
+    });
+  });
 }
 
 function throwIssues(documentType, issues) {
@@ -87,7 +138,8 @@ export function assertSessionInput(input) {
   requireString(input.projectRoot, "/projectRoot", issues);
   if (input.metadata !== undefined) requireObject(input.metadata, "/metadata", issues);
   if (input.steps !== undefined && !Array.isArray(input.steps)) issue(issues, "/steps", "must be an array");
-  input.steps?.forEach((step, index) => validateStep(step, `/steps/${index}`, issues));
+  if (Array.isArray(input.steps)) input.steps.forEach((step, index) => validateStep(step, `/steps/${index}`, issues));
+  validateStepRelationships(input.steps, issues);
   if (input.trace !== undefined && !Array.isArray(input.trace)) issue(issues, "/trace", "must be an array");
   input.trace?.forEach((item, index) => validateTraceItem(item, `/trace/${index}`, issues));
   if (input.steps !== undefined && input.trace !== undefined) issue(issues, "/", "must contain either steps or trace, not both");
@@ -104,6 +156,7 @@ export function assertPlanInput(input) {
   } else {
     input.steps.forEach((step, index) => validateStep(step, `/steps/${index}`, issues));
   }
+  validateStepRelationships(input.steps, issues);
   throwIssues("plan", issues);
   return input;
 }
