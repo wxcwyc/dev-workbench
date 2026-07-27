@@ -38,6 +38,55 @@ test("migration steps must execute in a valid state", () => {
   assert.equal(engine.nextRunnable(session), 0);
 });
 
+test("failed migration steps retain their command snapshot", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "install", title: "Install dependency" }]
+  });
+  engine.startStep(session, 0);
+  const beforeFailure = new Date().toISOString();
+
+  engine.failStep(session, 0, new Error("command failed"), {
+    command: ["npm", "install", "example"],
+    cwd: "/tmp/example"
+  });
+
+  assert.equal(session.steps[0].status, "failed");
+  assert.deepEqual(session.steps[0].error, { name: "Error", message: "command failed" });
+  assert.deepEqual(session.snapshots[0].command, ["npm", "install", "example"]);
+  assert.equal(session.snapshots[0].stepIndex, 0);
+  assert.ok(session.snapshots[0].capturedAt >= beforeFailure);
+  assert.equal(session.cursor, 0);
+  assert.equal(session.status, "failed");
+  assert.equal(session.events.at(-1).type, "step.failed");
+});
+
+test("failStep without a snapshot preserves existing snapshots and cursor", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "install", title: "Install dependency" }]
+  });
+  session.snapshots.push({ command: ["npm", "view", "example"], stepIndex: 0 });
+  session.cursor = 0;
+  engine.startStep(session, 0);
+  const snapshots = session.snapshots;
+  const beforeSnapshots = structuredClone(session.snapshots);
+
+  engine.failStep(session, 0, new Error("command failed"));
+
+  assert.equal(session.steps[0].status, "failed");
+  assert.deepEqual(session.snapshots, beforeSnapshots);
+  assert.strictEqual(session.snapshots, snapshots);
+  assert.equal(session.cursor, 0);
+  assert.equal(session.events.at(-1).type, "step.failed");
+});
+
 test("streamed trace events append immutable snapshots in strict sequence", () => {
   const engine = new SessionEngine();
   const session = engine.create({ title: "Live trace", workbench: "execution", projectRoot: "/tmp/example" });
@@ -579,6 +628,41 @@ test("completeStep is atomic when reading the snapshot throws", () => {
   assert.equal(session.steps[0].status, "failed");
 });
 
+test("failStep is atomic when reading the snapshot throws", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  engine.startStep(session, 0);
+  const refs = {
+    steps: session.steps,
+    step: session.steps[0],
+    snapshots: session.snapshots,
+    events: session.events
+  };
+  const before = structuredClone(session);
+  const snapshot = {};
+  Object.defineProperty(snapshot, "command", {
+    enumerable: true,
+    get() {
+      throw new Error("snapshot getter failed");
+    }
+  });
+
+  assert.throws(
+    () => engine.failStep(session, 0, new Error("command failed"), snapshot),
+    /snapshot getter failed/
+  );
+  assert.deepEqual(session, before);
+  assert.strictEqual(session.steps, refs.steps);
+  assert.strictEqual(session.steps[0], refs.step);
+  assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.events, refs.events);
+});
+
 test("completeStep is atomic when its public result cannot be cloned", () => {
   const engine = new SessionEngine();
   const metadata = { callback() {} };
@@ -694,7 +778,15 @@ test("failStep is atomic when its public result cannot be cloned", () => {
     updatedAt: session.updatedAt
   };
 
-  assert.throws(() => engine.failStep(session, 0, new Error("command failed")), /clone/i);
+  assert.throws(
+    () => engine.failStep(
+      session,
+      0,
+      new Error("command failed"),
+      { command: ["npm", "install", "example"], cwd: "/tmp/example" }
+    ),
+    /clone/i
+  );
   assert.deepEqual(session.steps[0], before.step);
   assert.deepEqual(session.snapshots, before.snapshots);
   assert.deepEqual(session.events, before.events);

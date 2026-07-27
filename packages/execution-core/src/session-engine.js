@@ -209,7 +209,7 @@ export class SessionEngine {
     return result;
   }
 
-  failStep(session, index, error) {
+  failStep(session, index, error, snapshot = null) {
     const step = this.requireStep(session, index);
     if (step.status !== "running") throw new Error(`Step ${index + 1} is not running`);
     const candidateStep = {
@@ -220,9 +220,15 @@ export class SessionEngine {
     };
     const steps = session.steps.slice();
     steps[index] = candidateStep;
+    let snapshots;
+    if (snapshot !== null) {
+      snapshots = session.snapshots.slice();
+      snapshots[index] = { ...snapshot, stepIndex: index, capturedAt: timestamp() };
+    }
     const candidate = {
       ...session,
       steps,
+      ...(snapshot !== null ? { snapshots, cursor: index } : {}),
       status: "failed",
       events: [
         ...session.events,
@@ -238,6 +244,10 @@ export class SessionEngine {
     const result = publicSession(candidate);
 
     session.steps = candidate.steps;
+    if (snapshot !== null) {
+      session.snapshots = candidate.snapshots;
+      session.cursor = candidate.cursor;
+    }
     session.status = candidate.status;
     session.events = candidate.events;
     session.updatedAt = candidate.updatedAt;
