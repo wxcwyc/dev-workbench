@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { createApp } from "../apps/server/src/server.js";
+import { TerminalBuffer } from "../packages/execution-core/src/terminal-buffer.js";
 
 async function startTestApp(t, options = {}) {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-server-projects-"));
@@ -35,10 +36,62 @@ async function startTestApp(t, options = {}) {
   const { port } = server.address();
   return {
     allowedRoot,
+    server,
     stateRoot,
     temporaryRoot,
     url: `http://127.0.0.1:${port}`,
   };
+}
+
+class FakePreviewSupervisor {
+  constructor() {
+    this.listeners = new Map();
+    this.calls = [];
+    this.states = {
+      source: { state: "stopped", actualUrl: "http://127.0.0.1:4173/" },
+      target: { state: "running", actualUrl: "http://127.0.0.1:4174/" },
+    };
+    this.stopAllCalls = 0;
+  }
+
+  async snapshot() {
+    return structuredClone(this.states);
+  }
+
+  subscribe(sessionId, listener) {
+    const listeners = this.listeners.get(sessionId) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(sessionId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.listeners.delete(sessionId);
+    };
+  }
+
+  publish(sessionId, slot, state) {
+    this.states[slot] = state;
+    const event = { type: "preview.state", sessionId, slot, state };
+    for (const listener of this.listeners.get(sessionId) ?? []) listener(event);
+  }
+
+  async start(session, slot) {
+    this.calls.push(["start", session.id, slot]);
+    return this.states[slot];
+  }
+
+  async stop(sessionId, slot) {
+    this.calls.push(["stop", sessionId, slot]);
+    return this.states[slot];
+  }
+
+  async restart(session, slot) {
+    this.calls.push(["restart", session.id, slot]);
+    return this.states[slot];
+  }
+
+  async stopAll() {
+    this.stopAllCalls += 1;
+  }
 }
 
 async function postJson(url, body) {
@@ -71,6 +124,14 @@ async function withTimeout(promise, label, timeoutMs = 2000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function waitForCondition(predicate, label) {
+  await withTimeout((async () => {
+    while (!predicate()) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  })(), label);
 }
 
 function createSseReader(response) {
@@ -1082,4 +1143,282 @@ test("run preserves the real post-completion persistence error and releases the 
   assert.equal(stored.steps[0].status, "running");
   const annotation = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "Lock released" });
   assert.equal(annotation.response.status, 201);
+});
+
+test("runtime snapshot is available only for existing Migration sessions", async (t) => {
+  const terminal = new TerminalBuffer();
+  const previews = new FakePreviewSupervisor();
+  const app = await startTestApp(t, { terminal, previews });
+  await makeSampleProject(app.allowedRoot);
+  const migration = await postJson(`${app.url}/api/sessions`, {
+    title: "Runtime",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  terminal.append(migration.body.id, {
+    source: "preview:source",
+    stream: "stdout",
+    text: "ready\n",
+  });
+
+  const response = await fetch(`${app.url}/api/sessions/${migration.body.id}/runtime`);
+  assert.equal(response.status, 200);
+  const snapshot = await response.json();
+  assert.equal(Number.isNaN(Date.parse(snapshot.events[0].at)), false);
+  delete snapshot.events[0].at;
+  assert.deepEqual(snapshot, {
+    source: previews.states.source,
+    target: previews.states.target,
+    events: [{
+      type: "terminal.output",
+      sequence: 1,
+      source: "preview:source",
+      stream: "stdout",
+      text: "ready\n",
+    }],
+    latestSequence: 1,
+  });
+
+  const execution = await postJson(`${app.url}/api/sessions`, {
+    title: "Execution",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [],
+  });
+  assert.equal((await fetch(`${app.url}/api/sessions/${execution.body.id}/runtime`)).status, 400);
+  assert.equal((await fetch(`${app.url}/api/sessions/00000000-0000-4000-8000-000000000000/runtime`)).status, 404);
+});
+
+test("runtime SSE sends a snapshot followed by preview and terminal events and cleans up", async (t) => {
+  const terminal = new TerminalBuffer();
+  const previews = new FakePreviewSupervisor();
+  const app = await startTestApp(t, { terminal, previews, heartbeatIntervalMs: 5 });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Live runtime",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const response = await fetch(`${app.url}/api/sessions/${created.body.id}/runtime/events`, {
+    signal: abort.signal,
+  });
+  assert.equal(response.status, 200);
+  const stream = createSseReader(response);
+  t.after(() => stream.cancel());
+
+  const initial = await withTimeout(stream.next(), "runtime snapshot");
+  assert.equal(initial.type, "runtime.snapshot");
+  assert.equal(initial.latestSequence, 0);
+  previews.publish(created.body.id, "source", { state: "running" });
+  assert.deepEqual(await withTimeout(stream.next(), "preview state"), {
+    type: "preview.state",
+    sessionId: created.body.id,
+    slot: "source",
+    state: { state: "running" },
+  });
+  const output = terminal.append(created.body.id, {
+    source: "preview:source",
+    stream: "stderr",
+    text: "warning\n",
+  });
+  assert.deepEqual(await withTimeout(stream.next(), "terminal output"), output);
+
+  await stream.cancel();
+  abort.abort();
+  await waitForCondition(
+    () => !previews.listeners.has(created.body.id)
+      && terminal.sessions.get(created.body.id).listeners.size === 0,
+    "runtime SSE cleanup",
+  );
+  assert.equal(previews.listeners.has(created.body.id), false);
+  assert.equal(terminal.sessions.get(created.body.id).listeners.size, 0);
+});
+
+test("preview lifecycle routes validate exact paths, media type, and empty object", async (t) => {
+  const previews = new FakePreviewSupervisor();
+  const app = await startTestApp(t, { previews, terminal: new TerminalBuffer() });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Preview controls",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const base = `${app.url}/api/sessions/${created.body.id}/previews`;
+
+  for (const [action, expectedCall] of [
+    ["start", "start"],
+    ["stop", "stop"],
+    ["restart", "restart"],
+  ]) {
+    const result = await postJson(`${base}/source/${action}`, {});
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.body, previews.states.source);
+    assert.equal(previews.calls.at(-1)[0], expectedCall);
+  }
+
+  assert.equal((await postJson(`${base}/other/start`, {})).response.status, 404);
+  assert.equal((await postJson(`${base}/source/pause`, {})).response.status, 404);
+  assert.equal((await postJson(`${base}/source/start/extra`, {})).response.status, 404);
+  assert.equal((await postJson(`${base}/source/start`, { extra: true })).response.status, 400);
+  assert.equal((await fetch(`${base}/source/start`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: "{}",
+  })).status, 415);
+  assert.equal((await fetch(`${base}/source/start`, { method: "POST" })).status, 415);
+});
+
+test("preview supervisor conflict is returned while independent slots may overlap", async (t) => {
+  let releaseSource;
+  let sourceStarted;
+  const sourceBlocked = new Promise((resolve) => { releaseSource = resolve; });
+  const sourceClaimed = new Promise((resolve) => { sourceStarted = resolve; });
+  const previews = new FakePreviewSupervisor();
+  let sourceActive = false;
+  previews.start = async (session, slot) => {
+    if (slot === "source") {
+      if (sourceActive) {
+        const error = new Error("Preview operation already in progress");
+        error.statusCode = 409;
+        throw error;
+      }
+      sourceActive = true;
+      sourceStarted();
+      await sourceBlocked;
+      sourceActive = false;
+    }
+    return previews.states[slot];
+  };
+  const app = await startTestApp(t, { previews, terminal: new TerminalBuffer() });
+  t.after(() => releaseSource());
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Independent controls",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const base = `${app.url}/api/sessions/${created.body.id}/previews`;
+  const first = postJson(`${base}/source/start`, {});
+  await withTimeout(sourceClaimed, "source preview claim");
+  assert.equal((await postJson(`${base}/source/start`, {})).response.status, 409);
+  assert.equal((await postJson(`${base}/target/start`, {})).response.status, 200);
+  releaseSource();
+  assert.equal((await withTimeout(first, "source preview completion")).response.status, 200);
+});
+
+test("Migration command output streams to terminal and failed command evidence is retained", async (t) => {
+  const terminal = new TerminalBuffer();
+  const commandResult = {
+    command: ["failing-command"],
+    cwd: ".",
+    stdout: "partial output\n",
+    stderr: "failure evidence\n",
+    exitCode: 2,
+    startedAt: "2026-07-27T00:00:00.000Z",
+    completedAt: "2026-07-27T00:00:01.000Z",
+  };
+  const app = await startTestApp(t, {
+    terminal,
+    previews: new FakePreviewSupervisor(),
+    runCommand: async (_root, _action, options) => {
+      options.onOutput({ stream: "stdout", text: "partial output\n" });
+      options.onOutput({ stream: "stderr", text: "failure evidence\n" });
+      const error = new Error("Command exited with code 2");
+      error.result = commandResult;
+      throw error;
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Failed evidence",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Fail", action: { command: ["failing-command"] } }],
+  });
+
+  const run = await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, {
+    confirmed: true,
+  });
+  assert.equal(run.response.status, 400);
+  const events = terminal.snapshot(created.body.id).events;
+  assert.deepEqual(events.map(({ source, stream, text }) => ({ source, stream, text })), [
+    { source: "step:0", stream: "stdout", text: "partial output\n" },
+    { source: "step:0", stream: "stderr", text: "failure evidence\n" },
+  ]);
+  const stored = await (await fetch(`${app.url}/api/sessions/${created.body.id}`)).json();
+  assert.equal(stored.steps[0].status, "failed");
+  assert.deepEqual(stored.currentSnapshot.command, commandResult);
+});
+
+test("managed shutdown aborts steps, stops previews once, and delays close callbacks", async (t) => {
+  let commandStarted;
+  const started = new Promise((resolve) => { commandStarted = resolve; });
+  let stopAllResolve;
+  const stopAllBlocked = new Promise((resolve) => { stopAllResolve = resolve; });
+  const previews = new FakePreviewSupervisor();
+  previews.stopAll = async () => {
+    previews.stopAllCalls += 1;
+    await stopAllBlocked;
+  };
+  const app = await startTestApp(t, {
+    previews,
+    terminal: new TerminalBuffer(),
+    runCommand: async (_root, action, { signal }) => {
+      commandStarted();
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const error = new Error("Command aborted");
+          error.name = "AbortError";
+          error.result = {
+            command: action.command,
+            stdout: "",
+            stderr: "",
+            exitCode: null,
+          };
+          reject(error);
+        }, { once: true });
+      });
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Shutdown",
+    workbench: "migration",
+    projectRoot: "sample",
+    metadata: {
+      previewServices: {
+        source: { command: ["node", "-e", ""], port: 4173 },
+      },
+    },
+    steps: [{ title: "Long command", action: { command: ["long-command"] } }],
+  });
+  const run = postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, {
+    confirmed: true,
+  });
+  await withTimeout(started, "active step");
+
+  const callbacks = [];
+  app.server.close(() => callbacks.push("first"));
+  app.server.close(() => callbacks.push("second"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(previews.stopAllCalls, 1);
+  assert.deepEqual(callbacks, []);
+  const rejectedLifecycle = await postJson(
+    `${app.url}/api/sessions/${created.body.id}/previews/source/start`,
+    {},
+  );
+  assert.equal(rejectedLifecycle.response.status, 503);
+
+  const closed = new Promise((resolve) => app.server.once("close", resolve));
+  stopAllResolve();
+  assert.equal((await withTimeout(run, "aborted step")).response.status, 400);
+  await withTimeout(closed, "managed close");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(callbacks, ["first", "second"]);
 });

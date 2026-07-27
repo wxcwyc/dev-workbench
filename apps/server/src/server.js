@@ -5,12 +5,14 @@ import { EventEmitter } from "node:events";
 import { SessionEngine } from "../../../packages/execution-core/src/session-engine.js";
 import { RecentProjectStore } from "../../../packages/execution-core/src/recent-project-store.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
+import { TerminalBuffer } from "../../../packages/execution-core/src/terminal-buffer.js";
 import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
 import { ProtocolValidationError, assertPlanInput, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
 import { resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
 import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
 import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
+import { PreviewProcessSupervisor } from "../../../packages/project-adapters/src/preview-process-supervisor.js";
 import { manifest as prologManifest, prologAdapter } from "../../../packages/prolog-adapter/src/index.js";
 import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot } from "./config.js";
 
@@ -118,9 +120,15 @@ export async function createApp(options = {}) {
   const engine = new SessionEngine();
   const store = new SessionStore(runtime.stateRoot);
   const runCommand = options.runCommand ?? runConfirmedCommand;
+  const terminal = options.terminal ?? new TerminalBuffer();
+  const previews = options.previews ?? new PreviewProcessSupervisor({ terminal });
   const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
   const events = new EventEmitter();
   const runningSessions = new Set();
+  const activeStepControllers = new Map();
+  const activeStepRequests = new Set();
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15000;
+  let shuttingDown = false;
   await store.initialize();
 
   const emit = (session) => events.emit(`session:${session.id}`, publicSession(session));
@@ -134,6 +142,15 @@ export async function createApp(options = {}) {
     if (!session) { const error = new Error("Session not found"); error.statusCode = 404; throw error; }
     return session;
   };
+  const requireMigrationSession = async (id) => {
+    const session = await requireSession(id);
+    if (session.workbench !== "migration") rejectRequest("Preview runtime requires a Migration session", 400);
+    return session;
+  };
+  const runtimeSnapshot = async (session) => ({
+    ...await previews.snapshot(session),
+    ...terminal.snapshot(session.id),
+  });
 
   async function createSession(input) {
     assertSessionInput(input);
@@ -185,7 +202,7 @@ export async function createApp(options = {}) {
     }
   }
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, validateRequestOrigin(request));
       const pathname = url.pathname;
@@ -244,10 +261,64 @@ export async function createApp(options = {}) {
         const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
         const listener = (value) => send(value);
         events.on(`session:${session.id}`, listener);
-        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000);
+        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), heartbeatIntervalMs);
         request.on("close", () => { clearInterval(heartbeat); events.off(`session:${session.id}`, listener); });
         send(publicSession(session));
         return;
+      }
+
+      const runtimeMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/runtime$/i);
+      if (request.method === "GET" && runtimeMatch) {
+        const session = await requireMigrationSession(runtimeMatch[1]);
+        return sendJson(response, 200, await runtimeSnapshot(session));
+      }
+
+      const runtimeEventMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/runtime\/events$/i);
+      if (request.method === "GET" && runtimeEventMatch) {
+        const session = await requireMigrationSession(runtimeEventMatch[1]);
+        response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
+        const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+        const unsubscribePreview = previews.subscribe(session.id, send);
+        const unsubscribeTerminal = terminal.subscribe(session.id, send);
+        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), heartbeatIntervalMs);
+        let cleanedUp = false;
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(heartbeat);
+          unsubscribePreview();
+          unsubscribeTerminal();
+        };
+        response.once("close", cleanup);
+        try {
+          send({ type: "runtime.snapshot", ...await runtimeSnapshot(session) });
+        } catch (error) {
+          cleanup();
+          throw error;
+        }
+        return;
+      }
+
+      const previewMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/previews\/(source|target)\/(start|stop|restart)$/);
+      if (request.method === "POST" && previewMatch) {
+        if (shuttingDown) rejectRequest("Server is shutting down", 503);
+        const id = previewMatch[1];
+        const slot = previewMatch[2];
+        const action = previewMatch[3];
+        const body = await readJson(request);
+        if (
+          body === null
+          || Array.isArray(body)
+          || typeof body !== "object"
+          || Object.keys(body).length !== 0
+        ) {
+          throw new Error("Preview lifecycle body must be an empty object");
+        }
+        const session = await requireMigrationSession(id);
+        const result = action === "stop"
+          ? await previews.stop(session.id, slot)
+          : await previews[action](session, slot);
+        return sendJson(response, 200, result);
       }
 
       const traceMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/trace$/i);
@@ -330,7 +401,17 @@ export async function createApp(options = {}) {
 
       const runMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/run$/i);
       if (request.method === "POST" && runMatch) {
+        if (shuttingDown) rejectRequest("Server is shutting down", 503);
         const id = runMatch[1];
+        let finishStepRequest;
+        const stepRequestDone = new Promise((resolve) => { finishStepRequest = resolve; });
+        activeStepRequests.add(stepRequestDone);
+        const finish = () => {
+          activeStepRequests.delete(stepRequestDone);
+          finishStepRequest();
+        };
+        response.once("finish", finish);
+        response.once("close", finish);
         const release = claimSession(id, "Session already has a running step");
         try {
           if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "run" });
@@ -341,16 +422,46 @@ export async function createApp(options = {}) {
           const step = engine.requireStep(session, index);
           if (step.risk === "high" && body.confirmedRisk !== true) throw new Error("High-risk execution requires confirmedRisk=true");
           if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
+          let baseline = null;
           try {
             engine.startStep(session, index); await store.save(session); emit(session);
-            const baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
-            const result = step.action ? await runCommand(session.projectRoot, step.action) : null;
+            baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
+            let result = null;
+            if (step.action) {
+              const controller = new AbortController();
+              activeStepControllers.set(id, controller);
+              if (shuttingDown) controller.abort("shutdown");
+              try {
+                result = await runCommand(session.projectRoot, step.action, {
+                  signal: controller.signal,
+                  onOutput: ({ stream, text }) => terminal.append(id, {
+                    source: `step:${index}`,
+                    stream,
+                    text,
+                  }),
+                });
+              } finally {
+                if (activeStepControllers.get(id) === controller) activeStepControllers.delete(id);
+              }
+            }
             const snapshot = step.traceState ? { trace: step.traceState } : await captureProjectSnapshot(session.projectRoot, baseline, result);
             engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
             return sendJson(response, 200, publicSession(session));
           } catch (error) {
             if (session.steps[index]?.status === "running") {
-              engine.failStep(session, index, error); await store.save(session); emit(session);
+              let snapshot = null;
+              if (error.result) {
+                try {
+                  snapshot = await captureProjectSnapshot(session.projectRoot, baseline, error.result);
+                } catch (snapshotError) {
+                  runtime.warn(`Could not capture failed command snapshot for session ${id}: ${snapshotError.message}`);
+                }
+              }
+              try {
+                engine.failStep(session, index, error, snapshot); await store.save(session); emit(session);
+              } catch (failureError) {
+                runtime.warn(`Could not persist failed step for session ${id}: ${failureError.message}`);
+              }
             }
             throw error;
           }
@@ -367,9 +478,44 @@ export async function createApp(options = {}) {
       });
     }
   });
+
+  const originalClose = server.close.bind(server);
+  const closeCallbacks = [];
+  let shutdownPromise = null;
+  server.close = (callback) => {
+    if (typeof callback === "function") closeCallbacks.push(callback);
+    if (!shutdownPromise) {
+      shuttingDown = true;
+      for (const controller of activeStepControllers.values()) controller.abort("shutdown");
+      shutdownPromise = (async () => {
+        await previews.stopAll();
+        await Promise.all([...activeStepRequests]);
+        await new Promise((resolve, reject) => {
+          originalClose((error) => error ? reject(error) : resolve());
+        });
+      })();
+      shutdownPromise.then(
+        () => {
+          for (const closeCallback of closeCallbacks.splice(0)) closeCallback();
+        },
+        (error) => {
+          for (const closeCallback of closeCallbacks.splice(0)) closeCallback(error);
+        },
+      );
+    }
+    return server;
+  };
+  return server;
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const server = await createApp();
   server.listen(port, "127.0.0.1", () => console.log(`Dev Workbench: http://127.0.0.1:${port}`));
+  const closeForSignal = () => new Promise((resolve) => server.close(() => resolve()));
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, async () => {
+      await closeForSignal();
+      process.exitCode = 0;
+    });
+  }
 }
