@@ -7,8 +7,10 @@ export async function runConfirmedCommand(projectRoot, action, {
   maxOutputBytes = 8 * 1024 * 1024,
   onOutput = () => {},
   signal,
+  terminationGraceMs = 1000,
 } = {}) {
   if (!Array.isArray(action?.command) || !action.command.length || action.command.some((part) => typeof part !== "string")) throw new Error("Step action.command must be a non-empty string array");
+  if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("terminationGraceMs must be a finite non-negative integer");
   const [executable, ...args] = action.command;
   const cwd = await resolveCommandCwd(projectRoot, action.cwd ?? ".");
   const startedAt = new Date().toISOString();
@@ -40,10 +42,12 @@ export async function runConfirmedCommand(projectRoot, action, {
     let failure = null;
     let terminated = false;
     let timeout;
+    let terminationGraceTimeout;
     let child;
 
     const cleanup = () => {
       clearTimeout(timeout);
+      clearTimeout(terminationGraceTimeout);
       signal?.removeEventListener("abort", handleAbort);
     };
     const makeResult = (exitCode, childSignal) => ({
@@ -72,7 +76,10 @@ export async function runConfirmedCommand(projectRoot, action, {
       failure = error;
       if (!terminated) {
         terminated = true;
-        child.kill();
+        child.kill("SIGTERM");
+        terminationGraceTimeout = setTimeout(() => {
+          if (!settled) child.kill("SIGKILL");
+        }, terminationGraceMs);
       }
     };
     function handleAbort() {

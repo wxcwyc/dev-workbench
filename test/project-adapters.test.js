@@ -231,6 +231,52 @@ test("command runner times out and waits for the child to exit", async (context)
   assert.equal(await fs.readFile(stopped, "utf8"), "yes");
 });
 
+test("command runner escalates to SIGKILL when the child ignores SIGTERM", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-force-kill-"));
+  const sigtermReceived = path.join(root, "sigterm-received");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = [
+    "const fs=require('node:fs');",
+    "process.on('SIGTERM',()=>fs.writeFileSync('sigterm-received','yes'));",
+    "setTimeout(()=>process.exit(0),1000);",
+    "setInterval(()=>{},1000);",
+  ].join("");
+  const started = Date.now();
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [process.execPath, "-e", script],
+    }, {
+      timeoutMs: 200,
+      terminationGraceMs: 50,
+    }),
+    (error) => {
+      assert.match(error.message, /timed out/i);
+      assert.equal(error.result.exitCode, null);
+      assert.equal(error.result.signal, "SIGKILL");
+      assert.ok(Date.now() - started < 750);
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(sigtermReceived, "utf8"), "yes");
+});
+
+test("command runner validates terminationGraceMs", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-grace-option-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  for (const terminationGraceMs of [-1, 1.5, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      runConfirmedCommand(root, {
+        command: [process.execPath, "-e", ""],
+      }, {
+        terminationGraceMs,
+      }),
+      /terminationGraceMs.*non-negative integer/i,
+    );
+  }
+});
+
 test("command runner caps combined output and terminates the child", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-overflow-"));
   const stopped = path.join(root, "stopped");
