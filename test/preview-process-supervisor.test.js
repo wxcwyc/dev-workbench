@@ -324,6 +324,31 @@ test("same-slot overlapping operations reject with status 409", async (context) 
   await first;
 });
 
+test("starting an already running slot rejects with 409 without disturbing ownership", async (context) => {
+  const session = await projectSession(context);
+  const child = new FakeChild(250);
+  const { supervisor, spawned } = fakeSupervisor({ children: [child] });
+  let probes = 0;
+  supervisor.probePort = async () => {
+    probes += 1;
+    return false;
+  };
+  const running = await supervisor.start(session, "source");
+
+  await assert.rejects(
+    supervisor.start(session, "source"),
+    (error) => error.statusCode === 409 && /already running/i.test(error.message),
+  );
+
+  const current = (await supervisor.snapshot(session)).source;
+  assert.equal(probes, 1);
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(child.kills, []);
+  assert.equal(current.state, "running");
+  assert.equal(current.pid, running.pid);
+  await supervisor.stopAll();
+});
+
 test("listeners are session-isolated, unsubscribable, and exception-safe", async (context) => {
   const session = await projectSession(context);
   const { supervisor } = fakeSupervisor({ occupied: true });

@@ -115,8 +115,8 @@ async function defaultHealthCheck(url) {
   }
 }
 
-function operationConflict() {
-  const error = new Error("A preview operation is already in progress for this slot");
+function operationConflict(message = "A preview operation is already in progress for this slot") {
+  const error = new Error(message);
   error.statusCode = 409;
   return error;
 }
@@ -251,7 +251,7 @@ export class PreviewProcessSupervisor {
     if (!config) throw new Error(`Preview slot ${slot} is not configured`);
 
     const existing = this.records.get(this.#key(session.id, slot));
-    if (existing?.child) throw new Error(`Preview slot ${slot} is already running`);
+    if (existing?.child) throw operationConflict(`Preview slot ${slot} is already running`);
 
     const occupied = await this.probePort("127.0.0.1", config.port);
     if (occupied) {
