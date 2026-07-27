@@ -412,6 +412,94 @@ test("startup timeout is enforced when a health request stalls", async (context)
   assert.ok(Date.now() - startedAt < 30);
 });
 
+test("startup deadline aborts a pending health check and cleans up the child", async (context) => {
+  const session = await projectSession(context);
+  const child = new FakeChild(304);
+  const { supervisor } = fakeSupervisor({
+    children: [child],
+    startupTimeoutMs: 5,
+  });
+  let healthSignal;
+  supervisor.healthCheck = (url, { signal } = {}) => {
+    healthSignal = signal;
+    return new Promise(() => {});
+  };
+
+  const state = await supervisor.start(session, "source");
+
+  assert.equal(healthSignal.aborted, true);
+  assert.equal(state.state, "exited");
+  assert.match(state.diagnostic, /timed out/i);
+  assert.equal(child.closed, true);
+  assert.equal(supervisor.startControllers.size, 0);
+});
+
+test("stopAll aborts pending health immediately and leaves no operation or child", async (context) => {
+  const session = await projectSession(context);
+  const child = new FakeChild(305);
+  const { supervisor, spawned } = fakeSupervisor({
+    children: [child],
+    startupTimeoutMs: 500,
+  });
+  let healthSignal;
+  let healthStarted;
+  const enteredHealth = new Promise((resolve) => {
+    healthStarted = resolve;
+  });
+  supervisor.healthCheck = (url, { signal } = {}) => {
+    healthSignal = signal;
+    healthStarted();
+    return new Promise(() => {});
+  };
+  const starting = supervisor.start(session, "source");
+  await enteredHealth;
+  assert.equal(spawned.length, 1);
+  const startedAt = Date.now();
+
+  await supervisor.stopAll();
+  const state = await starting;
+
+  assert.ok(Date.now() - startedAt < 100);
+  assert.equal(healthSignal.aborted, true);
+  assert.equal(state.state, "exited");
+  assert.equal(child.closed, true);
+  assert.equal(supervisor.operations.size, 0);
+  assert.equal(supervisor.startControllers.size, 0);
+});
+
+test("child process errors expose safe structured evidence", async (context) => {
+  const session = await projectSession(context);
+  const child = new FakeChild(306);
+  const { supervisor } = fakeSupervisor({
+    children: [child],
+    healthy: false,
+  });
+  const starting = supervisor.start(session, "source");
+  while (supervisor.records.size === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const childError = {
+    name: "SpawnError",
+    code: "EACCES",
+    message: "launch failed",
+    unsafe: { secret: true },
+  };
+  child.emit("error", childError);
+  child.close(null, null);
+
+  const state = await starting;
+
+  assert.equal(state.state, "exited");
+  assert.deepEqual(state.error, {
+    name: "SpawnError",
+    code: "EACCES",
+    message: "launch failed",
+  });
+  assert.match(state.diagnostic, /EACCES.*launch failed/i);
+  state.error.message = "mutated";
+  assert.equal((await supervisor.snapshot(session)).source.error.message, "launch failed");
+});
+
 test("unexpected running exit records evidence", async (context) => {
   const session = await projectSession(context);
   const child = new FakeChild(401);

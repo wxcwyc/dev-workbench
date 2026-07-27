@@ -105,14 +105,23 @@ async function defaultProbePort(host, port) {
   });
 }
 
-async function defaultHealthCheck(url) {
+async function defaultHealthCheck(url, { signal } = {}) {
   try {
-    const response = await fetch(url, { redirect: "manual" });
+    const response = await fetch(url, { redirect: "manual", signal });
     await response.body?.cancel();
     return response.status >= 200 && response.status <= 399;
-  } catch {
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
     return false;
   }
+}
+
+function safeProcessError(error) {
+  return {
+    name: typeof error?.name === "string" ? error.name : "Error",
+    ...(typeof error?.code === "string" ? { code: error.code } : {}),
+    message: typeof error?.message === "string" ? error.message : String(error),
+  };
 }
 
 function operationConflict(message = "A preview operation is already in progress for this slot") {
@@ -156,6 +165,7 @@ export class PreviewProcessSupervisor {
     this.nextGeneration = 1;
     this.stoppingAll = false;
     this.stopAllPromise = null;
+    this.startControllers = new Map();
   }
 
   #key(sessionId, slot) {
@@ -247,6 +257,20 @@ export class PreviewProcessSupervisor {
   }
 
   async #start(session, slot) {
+    const key = this.#key(session.id, slot);
+    const controller = new AbortController();
+    this.startControllers.set(key, controller);
+    try {
+      return await this.#startControlled(session, slot, controller);
+    } finally {
+      controller.abort("start-complete");
+      if (this.startControllers.get(key) === controller) {
+        this.startControllers.delete(key);
+      }
+    }
+  }
+
+  async #startControlled(session, slot, controller) {
     const config = await resolvePreviewConfig(session, slot);
     if (!config) throw new Error(`Preview slot ${slot} is not configured`);
 
@@ -286,9 +310,11 @@ export class PreviewProcessSupervisor {
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
+      const processError = safeProcessError(error);
       Object.assign(record, {
         state: "exited",
-        diagnostic: `Preview process failed to spawn: ${error.message}`,
+        error: processError,
+        diagnostic: `Preview process failed to spawn${processError.code ? ` (${processError.code})` : ""}: ${processError.message}`,
         exitedAt: new Date().toISOString(),
       });
       this.#emit(record);
@@ -315,72 +341,100 @@ export class PreviewProcessSupervisor {
       resolveClosed = resolve;
     });
     child.once("error", (error) => {
-      closeEvidence = { error };
+      closeEvidence = { error: safeProcessError(error) };
     });
     child.once("close", (exitCode, signal) => {
       closed = true;
       closeEvidence = { ...closeEvidence, exitCode, signal };
       resolveClosed(closeEvidence);
+      controller.abort("child-exit");
       const current = this.records.get(this.#key(session.id, slot));
       if (current !== record || current.generation !== generation || record.expectedExit) return;
+      const processError = closeEvidence.error;
       Object.assign(record, {
         state: "exited",
         child: null,
         exitCode,
         signal,
         exitedAt: new Date().toISOString(),
-        diagnostic: record.state === "running"
-          ? "Preview process exited unexpectedly"
-          : "Preview process exited before becoming healthy",
+        ...(processError ? { error: processError } : {}),
+        diagnostic: processError
+          ? `Preview process error${processError.code ? ` ${processError.code}` : ""}: ${processError.message}`
+          : record.state === "running"
+            ? "Preview process exited unexpectedly"
+            : "Preview process exited before becoming healthy",
       });
       this.#emit(record);
     });
 
-    const deadline = Date.now() + this.startupTimeoutMs;
-    while (!closed && Date.now() <= deadline) {
-      let healthTimeout;
-      const remainingMs = Math.max(0, deadline - Date.now());
-      const healthy = await Promise.race([
-        Promise.resolve(this.healthCheck(config.healthUrl)).catch(() => false),
-        closedPromise.then(() => false),
-        new Promise((resolve) => {
-          healthTimeout = setTimeout(() => resolve(false), remainingMs);
-        }),
-      ]);
-      clearTimeout(healthTimeout);
-      if (healthy) {
-        if (closed) break;
-        Object.assign(record, {
-          state: "running",
-          readyAt: new Date().toISOString(),
-        });
-        this.#emit(record);
+    let resolveAborted;
+    const abortedPromise = new Promise((resolve) => {
+      resolveAborted = resolve;
+    });
+    const handleAbort = () => resolveAborted(false);
+    controller.signal.addEventListener("abort", handleAbort, { once: true });
+    const deadlineTimer = setTimeout(
+      () => controller.abort("startup-timeout"),
+      this.startupTimeoutMs,
+    );
+    try {
+      while (!closed && !controller.signal.aborted) {
+        const healthy = await Promise.race([
+          Promise.resolve()
+            .then(() => this.healthCheck(config.healthUrl, { signal: controller.signal }))
+            .catch(() => false),
+          closedPromise.then(() => false),
+          abortedPromise,
+        ]);
+        if (healthy) {
+          if (closed || controller.signal.aborted) break;
+          Object.assign(record, {
+            state: "running",
+            readyAt: new Date().toISOString(),
+          });
+          this.#emit(record);
+          return this.#publicState(record);
+        }
+        if (closed || controller.signal.aborted) break;
+        if (this.healthIntervalMs > 0) {
+          let intervalTimer;
+          await Promise.race([
+            closedPromise,
+            abortedPromise,
+            new Promise((resolve) => {
+              intervalTimer = setTimeout(resolve, this.healthIntervalMs);
+            }),
+          ]);
+          clearTimeout(intervalTimer);
+        } else {
+          await Promise.resolve();
+        }
+      }
+
+      if (closed) {
         return this.#publicState(record);
       }
-      if (this.healthIntervalMs > 0) {
-        await Promise.race([closedPromise, delay(this.healthIntervalMs)]);
-      } else {
-        await Promise.resolve();
-      }
-    }
 
-    if (closed) {
+      const shutdown = controller.signal.reason === "shutdown";
+      record.expectedExit = shutdown ? "shutdown" : "startup-timeout";
+      child.kill("SIGTERM");
+      await this.#waitForClose(child, closedPromise);
+      Object.assign(record, {
+        state: "exited",
+        child: null,
+        exitCode: closeEvidence?.exitCode ?? null,
+        signal: closeEvidence?.signal ?? null,
+        exitedAt: new Date().toISOString(),
+        diagnostic: shutdown
+          ? "Preview startup was cancelled during shutdown"
+          : `Preview startup timed out after ${this.startupTimeoutMs}ms`,
+      });
+      this.#emit(record);
       return this.#publicState(record);
+    } finally {
+      clearTimeout(deadlineTimer);
+      controller.signal.removeEventListener("abort", handleAbort);
     }
-
-    record.expectedExit = "startup-timeout";
-    child.kill("SIGTERM");
-    await this.#waitForClose(child, closedPromise);
-    Object.assign(record, {
-      state: "exited",
-      child: null,
-      exitCode: closeEvidence?.exitCode ?? null,
-      signal: closeEvidence?.signal ?? null,
-      exitedAt: new Date().toISOString(),
-      diagnostic: `Preview startup timed out after ${this.startupTimeoutMs}ms`,
-    });
-    this.#emit(record);
-    return this.#publicState(record);
   }
 
   stop(sessionId, slot) {
@@ -441,6 +495,9 @@ export class PreviewProcessSupervisor {
   async stopAll() {
     if (this.stopAllPromise) return this.stopAllPromise;
     this.stoppingAll = true;
+    for (const controller of this.startControllers.values()) {
+      controller.abort("shutdown");
+    }
     this.stopAllPromise = (async () => {
       while (this.operations.size > 0) {
         await delay(1);
@@ -449,6 +506,7 @@ export class PreviewProcessSupervisor {
       await Promise.all(owned.map((record) => this.#stop(record.sessionId, record.slot)));
       this.operations.clear();
       this.listeners.clear();
+      this.startControllers.clear();
     })().finally(() => {
       this.stoppingAll = false;
       this.stopAllPromise = null;
