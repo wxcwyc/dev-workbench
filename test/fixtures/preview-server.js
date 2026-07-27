@@ -3,6 +3,10 @@ import http from "node:http";
 const port = Number(process.argv[2]);
 const mode = process.argv[3] ?? "normal";
 
+if (process.env.NODE_TEST_CONTEXT && process.argv[2] === undefined) {
+  process.exit(0);
+}
+
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   process.stderr.write("usage: preview-server.js <port> [mode]\n");
   process.exit(2);
