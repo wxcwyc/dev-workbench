@@ -28,6 +28,9 @@ export class TerminalBuffer {
     maxBytes = 256 * 1024,
     now = () => new Date().toISOString(),
   } = {}) {
+    if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
+      throw new TypeError("maxBytes must be a finite positive integer");
+    }
     this.maxBytes = maxBytes;
     this.now = now;
     this.sessions = new Map();
@@ -64,7 +67,7 @@ export class TerminalBuffer {
       state.bytes -= Buffer.byteLength(removed.text, "utf8");
     }
 
-    for (const listener of state.listeners) {
+    for (const listener of [...state.listeners]) {
       try {
         listener(event);
       } catch {

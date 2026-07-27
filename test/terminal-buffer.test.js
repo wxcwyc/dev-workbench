@@ -15,6 +15,16 @@ function output(overrides = {}) {
   };
 }
 
+test("constructor accepts only finite positive integer maxBytes values", () => {
+  for (const maxBytes of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    assert.throws(
+      () => new TerminalBuffer({ maxBytes, now }),
+      TypeError,
+      `expected ${maxBytes} to be rejected`,
+    );
+  }
+});
+
 test("append creates terminal output events with per-session sequences", () => {
   const buffer = new TerminalBuffer({ maxBytes: 12, now });
 
@@ -149,6 +159,23 @@ test("a throwing subscriber does not block append or other subscribers", () => {
 
   assert.deepEqual(received, [event]);
   assert.deepEqual(buffer.snapshot("session-1").events, [event]);
+});
+
+test("a subscriber added during delivery starts with the next event", () => {
+  const buffer = new TerminalBuffer({ now });
+  const lateSequences = [];
+  let subscribedLate = false;
+  buffer.subscribe("session-1", () => {
+    if (subscribedLate) return;
+    subscribedLate = true;
+    buffer.subscribe("session-1", (event) => lateSequences.push(event.sequence));
+  });
+
+  buffer.append("session-1", output({ text: "first" }));
+  assert.deepEqual(lateSequences, []);
+
+  buffer.append("session-1", output({ text: "second" }));
+  assert.deepEqual(lateSequences, [2]);
 });
 
 test("delete drops events, sequence, and subscribers", () => {
