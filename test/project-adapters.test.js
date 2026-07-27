@@ -135,6 +135,216 @@ test("confirmed command runner uses argv without a shell and stays inside projec
   assert.equal(await resolveProjectRoot(root, os.tmpdir()), await fs.realpath(root));
 });
 
+test("command runner streams decoded stdout and stderr in arrival order", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-stream-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const output = [];
+  const script = [
+    "const bytes = Buffer.from('你');",
+    "process.stdout.write(bytes.subarray(0, 2));",
+    "setTimeout(() => process.stdout.write(bytes.subarray(2)), 20);",
+    "setTimeout(() => process.stderr.write('error'), 40);",
+  ].join("");
+
+  const result = await runConfirmedCommand(root, {
+    command: [process.execPath, "-e", script],
+  }, {
+    onOutput: (event) => output.push(event),
+  });
+
+  assert.deepEqual(output, [
+    { stream: "stdout", text: "你" },
+    { stream: "stderr", text: "error" },
+  ]);
+  assert.equal(result.stdout, "你");
+  assert.equal(result.stderr, "error");
+  assert.equal(result.exitCode, 0);
+  assert.ok(Date.parse(result.startedAt) <= Date.parse(result.completedAt));
+});
+
+test("command runner reports spawn errors with a complete result", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-spawn-error-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const command = [path.join(root, "missing-executable")];
+
+  await assert.rejects(
+    runConfirmedCommand(root, { command }),
+    (error) => {
+      assert.equal(error.code, "ENOENT");
+      assert.deepEqual(error.result.command, command);
+      assert.equal(error.result.cwd, root);
+      assert.equal(error.result.stdout, "");
+      assert.equal(error.result.stderr, "");
+      assert.equal(error.result.exitCode, null);
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+});
+
+test("command runner reports non-zero exits with partial output", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-exit-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const command = [
+    process.execPath,
+    "-e",
+    "process.stdout.write('out');process.stderr.write('err');process.exit(7)",
+  ];
+
+  await assert.rejects(
+    runConfirmedCommand(root, { command }),
+    (error) => {
+      assert.equal(error.result.exitCode, 7);
+      assert.equal(error.result.stdout, "out");
+      assert.equal(error.result.stderr, "err");
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+});
+
+test("command runner times out and waits for the child to exit", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-timeout-"));
+  const stopped = path.join(root, "stopped");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = [
+    "const fs=require('node:fs');",
+    "process.on('SIGTERM',()=>{fs.writeFileSync('stopped','yes');process.exit(0)});",
+    "process.stdout.write('partial');",
+    "setInterval(()=>{},1000);",
+  ].join("");
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [process.execPath, "-e", script],
+    }, {
+      timeoutMs: 50,
+    }),
+    (error) => {
+      assert.match(error.message, /timed out/i);
+      assert.equal(error.result.stdout, "partial");
+      assert.equal(error.result.exitCode, 0);
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(stopped, "utf8"), "yes");
+});
+
+test("command runner caps combined output and terminates the child", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-overflow-"));
+  const stopped = path.join(root, "stopped");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = [
+    "const fs=require('node:fs');",
+    "process.on('SIGTERM',()=>{fs.writeFileSync('stopped','yes');process.exit(0)});",
+    "process.stdout.write('你你');",
+    "setInterval(()=>{},1000);",
+  ].join("");
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [process.execPath, "-e", script],
+    }, {
+      maxOutputBytes: 4,
+    }),
+    (error) => {
+      assert.match(error.message, /output.*exceeded/i);
+      assert.ok(Buffer.byteLength(error.result.stdout) <= 4);
+      assert.equal(error.result.stderr, "");
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(stopped, "utf8"), "yes");
+});
+
+test("command runner aborts and waits for the child to exit", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-abort-"));
+  const stopped = path.join(root, "stopped");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const controller = new AbortController();
+  const script = [
+    "const fs=require('node:fs');",
+    "process.on('SIGTERM',()=>{fs.writeFileSync('stopped','yes');process.exit(0)});",
+    "process.stdout.write('partial');",
+    "setInterval(()=>{},1000);",
+  ].join("");
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [process.execPath, "-e", script],
+    }, {
+      signal: controller.signal,
+      onOutput: () => controller.abort(),
+    }),
+    (error) => {
+      assert.equal(error.name, "AbortError");
+      assert.equal(error.result.stdout, "partial");
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(stopped, "utf8"), "yes");
+});
+
+test("command runner does not spawn for an already-aborted signal", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-pre-abort-"));
+  const marker = path.join(root, "spawned");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [
+        process.execPath,
+        "-e",
+        "require('node:fs').writeFileSync('spawned','unsafe')",
+      ],
+    }, {
+      signal: controller.signal,
+    }),
+    (error) => {
+      assert.equal(error.name, "AbortError");
+      assert.equal(error.result.exitCode, null);
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+  await assert.rejects(fs.access(marker), { code: "ENOENT" });
+});
+
+test("command runner rejects onOutput errors after terminating the child", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-command-callback-"));
+  const stopped = path.join(root, "stopped");
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const callbackError = new Error("output callback failed");
+  const script = [
+    "const fs=require('node:fs');",
+    "process.on('SIGTERM',()=>{fs.writeFileSync('stopped','yes');process.exit(0)});",
+    "process.stdout.write('partial');",
+    "setInterval(()=>{},1000);",
+  ].join("");
+
+  await assert.rejects(
+    runConfirmedCommand(root, {
+      command: [process.execPath, "-e", script],
+    }, {
+      onOutput: () => {
+        throw callbackError;
+      },
+    }),
+    (error) => {
+      assert.equal(error, callbackError);
+      assert.equal(error.result.stdout, "partial");
+      assert.ok(Date.parse(error.result.startedAt) <= Date.parse(error.result.completedAt));
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(stopped, "utf8"), "yes");
+});
+
 test("command runner treats executable shell metacharacters as a literal filename", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-literal-executable-"));
   const marker = path.join(root, "preserve.txt");
