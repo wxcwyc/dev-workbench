@@ -4,6 +4,7 @@ import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeC
 const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,activeGeneration:0,events:null,runtime:{sessionId:null,source:null,target:null,events:[],latestSequence:0,filter:"all",eventSource:null,requests:{source:0,target:0},pending:{source:false,target:false},refresh:{source:0,target:0}},sessionAction:{request:0,pending:false,sessionId:null},onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
 const $=(selector)=>document.querySelector(selector);
 const terminalClientLimit=256*1024;
+const previewStates=new Set(["unconfigured","stopped","starting","running","conflict","exited","stopping"]);
 
 async function api(path,options={}){
   const response=await fetch(path,{headers:{"content-type":"application/json",...(options.headers??{})},...options});
@@ -298,11 +299,18 @@ function isPlainObject(value){
   return prototype===Object.prototype||prototype===null;
 }
 function isPreviewState(value){
-  return isPlainObject(value)
-    &&typeof value.state==="string"
-    &&value.state.length>0
-    &&Number.isInteger(value.latestSequence)
-    &&value.latestSequence>=0;
+  if(!isPlainObject(value)||!previewStates.has(value.state)||!Number.isInteger(value.latestSequence)||value.latestSequence<0)return false;
+  if(value.actualUrl!==undefined&&typeof value.actualUrl!=="string")return false;
+  if(value.diagnostic!==undefined&&typeof value.diagnostic!=="string")return false;
+  if(value.config!==undefined){
+    if(!isPlainObject(value.config)||!Array.isArray(value.config.command)||!value.config.command.every((argument)=>typeof argument==="string"))return false;
+    if(value.config.cwd!==undefined&&typeof value.config.cwd!=="string")return false;
+  }
+  if(value.error!==undefined){
+    if(!isPlainObject(value.error))return false;
+    if(value.error.message!==undefined&&typeof value.error.message!=="string")return false;
+  }
+  return true;
 }
 function utf8Suffix(text,maxBytes){
   const characters=Array.from(text);

@@ -228,6 +228,24 @@ test("malformed runtime envelopes are ignored without breaking Session SSE", asy
   runtime.emit({ type: "runtime.snapshot", source: {}, target: {}, latestSequence: 0 });
   runtime.emit({ type: "preview.state", sessionId: "migration", slot: "source", sequence: 1, state: "bad" });
   runtime.emit({ type: "preview.state", sessionId: "migration", slot: "target", sequence: 2, state: [] });
+  const invalidStates = [
+    { state: "bogus", latestSequence: 3 },
+    { state: "stopped", latestSequence: 4, config: "bad" },
+    { state: "stopped", latestSequence: 5, config: { command: "node server.js" } },
+    { state: "stopped", latestSequence: 6, config: { command: ["node", 7] } },
+    { state: "stopped", latestSequence: 7, config: { command: ["node"], cwd: 12 } },
+    { state: "running", latestSequence: 8, actualUrl: 4173 },
+    { state: "exited", latestSequence: 9, diagnostic: { message: "bad" } },
+    { state: "exited", latestSequence: 10, error: "bad" },
+    { state: "exited", latestSequence: 11, error: { message: 12 } },
+  ];
+  invalidStates.forEach((state, index) => runtime.emit({
+    type: "preview.state",
+    sessionId: "migration",
+    slot: index % 2 === 0 ? "source" : "target",
+    sequence: index + 3,
+    state,
+  }));
 
   assert.equal(controller.state.runtime.source, null);
   assert.equal(controller.state.runtime.target, null);
