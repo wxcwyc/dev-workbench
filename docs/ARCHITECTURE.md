@@ -31,6 +31,25 @@ Migration Center 的首版计划编辑器只作用于 pristine Migration session
 
 Migration 的成功执行会先进入 `awaiting_review`，再由 accept/reject 推进；reject 会把步骤标记为可重试的 `failed`，下一次 retry/start 才会递增 `attempt`。execution-time editing、downstream invalidation、revision conflict 和并发修订控制都留给后续工作。
 
+## Preview runtime
+
+Migration session 现在可以在 `metadata.previewServices.source|target` 中声明 preview 进程。每个 slot 只接受 `command`、`cwd`、`port`、`healthPath` 和 `previewPath`，并由 `PreviewProcessSupervisor` 解析成 loopback-only 的 `actualUrl` / `healthUrl`：
+
+- URL 固定归属 `http://127.0.0.1:<port>`，`healthPath` 和 `previewPath` 必须是 origin-relative path；
+- supervisor 在启动前先探测 `127.0.0.1:<port>`，若端口已被外部进程占用，则把 slot 标记为 `conflict` 并保留诊断，不会尝试接管或停止该端口；
+- 只有 supervisor 自己 spawn 的子进程会进入 stop/restart/stopAll；`server.close()`、SIGINT 和 SIGTERM 共用幂等的 managed shutdown：拒绝新的 runtime mutation、abort active step 并关闭 SSE，再以 `SIGTERM` / 超时后 `SIGKILL` 停止 owned preview，等待 step 请求收尾后关闭 HTTP；
+- 启动阶段轮询健康检查；健康成功后状态变为 `running`，否则保留 `starting`/`exited` 证据与异常诊断。
+
+preview 配置和已完成 step 的 command result 属于持久化 Session；`PreviewProcessSupervisor` 持有的 child reference、生命周期状态和诊断，以及 `TerminalBuffer` 的输出 tail 都只存在于当前服务进程内。它们不会写入 Session JSON，工作台重启后 preview 状态恢复为 `stopped`，runtime tail 清空。
+
+实时输出由 `TerminalBuffer` 和 runtime SSE 提供：
+
+- preview `stdout`/`stderr` 与 migration step `stdout`/`stderr` 都归一为 `terminal.output` 事件；
+- `TerminalBuffer` 只保留每个 session 最近 256 KiB UTF-8 输出，用于 `/api/sessions/:id/runtime` 快照与 `/api/sessions/:id/runtime/events` SSE 回放；
+- runtime SSE 先发送 `runtime.snapshot`，再补发快照截点之后的新 `preview.state` / `terminal.output` 事件，避免重复回放快照已覆盖的内容；
+- runtime SSE 独立于既有 Session SSE；前者只描述当前进程的 ephemeral runtime，后者仍是持久化 Session transition 的权威通道；
+- step 命令的完整结果仍保存在 step snapshot 的 `command` 字段，`runConfirmedCommand()` 最多捕获 8 MiB 合并 stdout/stderr 证据。
+
 ## Package boundaries
 
 ```text
@@ -66,9 +85,11 @@ The first runtime adapter is a zero-dependency interpreter for the pure Horn-cla
 ## Safety boundary
 
 - `DEV_WORKBENCH_ALLOWED_ROOT` 限制可操作项目范围；
+- HTTP 服务只绑定 `127.0.0.1`，并要求 `Host` / `Origin` 精确匹配当前 loopback 地址和监听端口；
 - 项目 cwd 同时经过词法路径和 `realpath` 检查，拒绝执行前已存在的 `..` 或符号链接边界逃逸；
 - 项目检查拒绝符号链接或非目录根路径，并在扫描开始和结束时比较根目录的 device/inode；`package.json` 通过 no-follow 文件句柄打开、以句柄重新检查类型和身份，并采用有上限的读取。这些措施可阻止静态符号链接、可观察到的常规替换和超大 manifest 造成的资源滥用；
-- command 必须是字符串数组，由 `execFile` 以 `shell=false` 直接执行；executable 和参数中的 shell 元字符只作为字面字符传递，不会被 shell 解析；
+- command 必须是字符串数组，由 `spawn(..., shell=false)` 直接执行；executable 和参数中的 shell 元字符只作为字面字符传递，不会被 shell 解析；
+- preview supervisor 同样使用 `spawn(..., shell=false)`，并把 preview URL/health URL 限制为本机 loopback；
 - 有 action 的步骤必须提交 `confirmed=true`；
 - 一个 session 同时最多运行一个步骤；
 - HTTP JSON body 限制为 1 MB；
@@ -79,7 +100,7 @@ The first runtime adapter is a zero-dependency interpreter for the pure Horn-cla
 ## Next adapters
 
 1. Prolog runtime adapter：从解释器事件直接生成 rule/unification/backtracking trace；
-2. Browser preview adapter：启动并监督 source/target dev server；
-3. Git checkpoint adapter：每步生成可恢复 commit 或 worktree；
-4. Test adapter：把失败用例、覆盖率和日志映射到时间轴；
-5. Container worker：在一次性隔离环境中执行迁移步骤。
+2. Git checkpoint adapter：每步生成可恢复 commit 或 worktree；
+3. Test adapter：把失败用例、覆盖率和日志映射到时间轴；
+4. Container worker：在一次性隔离环境中执行迁移步骤；
+5. Preview runtime 扩展：PTY/input、持久 preview logs、创建后 preview config 编辑器和远程 worker。

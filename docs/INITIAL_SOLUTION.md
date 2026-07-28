@@ -89,7 +89,7 @@ MVP 使用原子重命名写入 JSON 会话。它适合单机、小并发和便�
 
 ### SSE 实时更新
 
-服务端通过 SSE 把会话状态推送给 UI。SSE 足以表达单向执行事件，并且比 WebSocket 更容易调试和降级。
+服务端通过 SSE 把会话状态推送给 UI。SSE 足以表达单向执行事件，并且比 WebSocket 更容易调试和降级。当前除了权威发布持久化 Session transition 的 session SSE，还提供独立的 migration runtime SSE：先发送一次 runtime snapshot，再推送 preview state 和 terminal output 增量事件。
 
 ### 无 Shell 命令执行
 
@@ -99,7 +99,7 @@ MVP 使用原子重命名写入 JSON 会话。它适合单机、小并发和便�
 { "command": ["node", "scripts/migrate.mjs", "content"] }
 ```
 
-服务使用 `execFile` 执行，不接受 `sh -c` 字符串。cwd 必须处于声明的 projectRoot 中，并且有 action 的步骤要求 UI 显式确认。
+服务使用 `spawn(..., shell=false)` 执行，不接受 `sh -c` 字符串。cwd 必须处于声明的 projectRoot 中，并且有 action 的步骤要求 UI 显式确认。
 
 ## 初始工作流
 
@@ -114,17 +114,19 @@ Adapter 产生 trace
 → 用户添加注释
 ```
 
-当前内置 Prolog 风格示例使用静态 JSON trace，目的是验证交互协议。真实解释器 adapter 属于下一阶段。
+当前内置逻辑示例已经切换到 runtime 实际执行；真实解释器输出会逐事件写入共享 session。
 
 ### Migration Center
 
 ```text
 导入迁移计划
 → 展示下一步命令和预期结果
+→ 可选启动/重启 source 与 target preview
 → 用户确认
 → 捕获执行前快照
 → 运行 argv command
-→ 捕获执行后文件树和 Git 状态
+→ 通过 runtime SSE 推送 preview / step stdout、stderr
+→ 捕获执行后文件树、Git 状态和 command 结果
 → 保存 snapshot
 → 用户检查后进入下一步
 ```
@@ -139,6 +141,8 @@ Adapter 产生 trace
 - Git status 和 diff 捕获；
 - projectRoot 边界；
 - argv 命令执行与逐步确认；
+- Preview Process Supervisor、runtime snapshot 和 runtime SSE；
+- TerminalBuffer 实时输出聚合；
 - 单 session 运行互斥；
 - HTTP API 与 SSE；
 - Execution Explorer UI；
@@ -146,14 +150,24 @@ Adapter 产生 trace
 - 逻辑 trace 与迁移演示；
 - 核心单元测试和两条 API 烟测。
 
+当前 preview/runtime 的具体约束：
+
+- preview service 只接受 session metadata 中的 source/target 配置，并始终解析到 `127.0.0.1:<port>` 的 health/preview URL；
+- preview 配置和已完成的 command result 持久化在 Session；supervisor 生命周期状态、child reference 与 terminal tail 只存在于当前进程，重启后不会恢复；
+- `TerminalBuffer` 只保留每个 session 最近 256 KiB UTF-8 终端输出；
+- step `command` 结果最多保留 8 MiB stdout/stderr 证据，并写入完成或失败 snapshot；
+- managed shutdown 会先 abort active step 并关闭 SSE，再停止 workbench 自己创建的 preview child process，等待 step 请求收尾后关闭 HTTP；
+- 如果目标端口已被外部进程占用，只会显示 `conflict`，不会把该端口上的现有进程视为本工具资产。
+
 ## 初始方案的已知限制
 
-- 逻辑 trace 需要外部生成，尚未连接真实解释器；
-- 新旧预览只接受 URL，尚不能负责启动和监督 dev server；
+- 预览运行时没有 PTY，也不支持向 step 或 preview 进程写入 input；
+- preview 日志只保存在内存中的 runtime buffer，没有独立持久化 preview log；
+- 创建 session 后还不能在 UI 中编辑 preview 配置；
 - 文件树能显示文件变化，但没有内置代码编辑器和逐文件 diff；
 - Git snapshot 不是可恢复 checkpoint；
 - JSON 存储不适合大型 trace；
-- 运行中的进程不能流式输出，也不能暂停或终止；
+- 没有 remote worker 或隔离执行环境；
 - 本地命令仍拥有当前用户权限；
 - 当前没有多人身份认证和项目级授权。
 

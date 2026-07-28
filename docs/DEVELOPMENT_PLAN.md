@@ -7,14 +7,14 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 已完成；Milestone 2 的 UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice 已完成） |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 与 Milestone 2 已完成；Milestone 3+ 待完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
 
-## 当前开发进度（2026-07-24）
+## 当前开发进度（2026-07-28）
 
-Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice：
+Phase 1 的 Milestone 1 与 Milestone 2 已完成。Milestone 2 当前包含 UI 项目接入、迁移计划编辑器首版、review lifecycle、Preview Process Supervisor，以及实时终端输出：
 
 - 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
 - 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
@@ -24,8 +24,12 @@ Phase 1 的 Milestone 1 已完成首个可运行版本，Milestone 2 已完成 U
 - 内置逻辑示例已从静态手写 trace 切换为 runtime 实际执行。
 - UI 可以输入允许目录内的真实路径，完成边界与符号链接校验，并只读探测 Git、package manager、语言和常见框架；
 - UI 可以从最近项目重新探测路径，选择 Execution 或 Migration，导入可选 trace/plan JSON，并在创建空会话或计划会话前检查规范化步骤与安全边界；Migration 计划现在保留稳定 ID 只读、risk、dependsOn 和 review gate，成功执行的步骤会先进入 `awaiting_review`，高风险步骤在每次 run 和 retry 时都需要显式确认，再由用户接受或拒绝后继续。
+- Migration session 可以声明 source/target preview service；supervisor 只生成 `127.0.0.1:<port>` 的 health/preview URL，启动前先探测端口占用，冲突时只报告 `conflict`，不会终止工作台外部进程；
+- Preview 与 step 的 `stdout`/`stderr` 都会进入 runtime SSE；`TerminalBuffer` 为每个 session 保留最近 256 KiB UTF-8 输出，step 完成后的 command snapshot 最多保留 8 MiB 结果证据；
+- `/api/sessions/:id/runtime` 和 `/api/sessions/:id/runtime/events` 已提供独立于 Session SSE 的 runtime snapshot/SSE；preview lifecycle 与 terminal tail 是 ephemeral runtime，不写入持久化 Session；
+- managed shutdown 会 abort active step、关闭 session/runtime SSE、stop owned previews，再等待 step 请求收尾并关闭 HTTP，避免遗留受管子进程。
 
-当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑和 Prolog runtime。Milestone 2 仍在进行中，review lifecycle 的 dependency / risk slice 已完成；Preview Process Supervisor 与实时终端输出尚未完成。
+当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑、Prolog runtime、Preview Process Supervisor、TerminalBuffer，以及 runtime SSE。
 
 ## Phase 0：交互与架构验证
 
@@ -113,12 +117,15 @@ Prolog adapter 至少产生：
 
 功能：
 
-- 为 source 和 target 分别配置启动命令、端口和健康检查；
+- 为 source 和 target 分别配置启动命令、端口、health path 和 preview path；
+- 只生成 loopback-only 的 `http://127.0.0.1:<port>` health/preview URL；
 - 启动、停止、重启和监控 dev server；
-- 实时采集 stdout/stderr；
+- 实时采集 preview 与 step 的 stdout/stderr；
+- `/api/sessions/:id/runtime` 与 runtime SSE 提供 preview state + terminal output 快照和增量事件；
 - iframe 并排预览和手动刷新；
 - 端口冲突诊断；
-- 服务异常退出后保留证据并允许重启。
+- 服务异常退出后保留证据并允许重启；
+- 服务关闭时执行 managed shutdown，只清理自己创建的 preview child process。
 
 验收条件：
 
@@ -126,6 +133,13 @@ Prolog adapter 至少产生：
 - UI 显示服务状态和实际 URL；
 - 工作台退出时能清理自己创建的子进程；
 - 不终止用户在工作台外启动的进程。
+
+当前限制：
+
+- 没有 PTY，也不支持向运行中的 step 或 preview 进程写入 input；
+- runtime terminal 只保留每个 session 最近 256 KiB 输出，preview 日志不会单独持久化到磁盘；
+- preview 配置必须在创建 session 时写入 metadata，创建后还没有专门的 preview config editor；
+- 仍然只支持本地受信任进程，不支持 remote worker。
 
 ### 5. Git Checkpoint 与恢复
 
@@ -199,15 +213,15 @@ Prolog adapter 至少产生：
 
 ### Milestone 2：真实 Migration Runtime
 
-状态：进行中。UI 项目接入首版、迁移计划编辑器首版，以及 review lifecycle 的 dependency / risk slice 已完成；下一步是 Preview Process Supervisor 与实时终端输出。
+状态：已完成。当前范围是本地项目接入、迁移计划编辑器、review lifecycle、Preview Process Supervisor、runtime SSE 与实时终端输出；Git checkpoint/worktree 恢复、持久 preview logs、PTY/input、remote worker 和创建后 preview config 编辑器仍留在后续里程碑。
 
 1. UI 项目接入（首版已完成）；
 2. 迁移计划编辑器（首版已完成）；
 3. review lifecycle、dependency 和 risk 语义（已完成）；
-4. Preview Process Supervisor；
-5. 实时终端输出。
+4. Preview Process Supervisor（已完成）；
+5. 实时终端输出（已完成）。
 
-交付结果：Migration Center 可以编辑并保存真实迁移计划，并在每个成功步骤后要求 review 决策；后续配套能力补齐后再形成完整的新旧 Web 项目操控闭环。
+交付结果：Migration Center 可以编辑并保存真实迁移计划，在每个成功步骤后要求 review 决策，监督 source/target preview 进程，并通过 runtime SSE 向 UI 推送 preview state 与终端输出；Git checkpoint/worktree 恢复尚未纳入该里程碑。
 
 ### Milestone 3：可恢复审查闭环
 
