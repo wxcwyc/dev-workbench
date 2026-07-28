@@ -127,6 +127,7 @@ export async function createApp(options = {}) {
   const runningSessions = new Set();
   const activeStepControllers = new Map();
   const activeStepRequests = new Set();
+  const activeSseStreams = new Set();
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15000;
   let shuttingDown = false;
   await store.initialize();
@@ -257,12 +258,23 @@ export async function createApp(options = {}) {
       const eventMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/events$/i);
       if (request.method === "GET" && eventMatch) {
         const session = await requireSession(eventMatch[1]);
+        if (shuttingDown) rejectRequest("Server is shutting down", 503);
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
         const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
         const listener = (value) => send(value);
         events.on(`session:${session.id}`, listener);
         const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), heartbeatIntervalMs);
-        request.on("close", () => { clearInterval(heartbeat); events.off(`session:${session.id}`, listener); });
+        let cleanedUp = false;
+        const stream = { response, cleanup };
+        function cleanup() {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(heartbeat);
+          events.off(`session:${session.id}`, listener);
+          activeSseStreams.delete(stream);
+        }
+        activeSseStreams.add(stream);
+        response.once("close", cleanup);
         send(publicSession(session));
         return;
       }
@@ -276,6 +288,7 @@ export async function createApp(options = {}) {
       const runtimeEventMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/runtime\/events$/i);
       if (request.method === "GET" && runtimeEventMatch) {
         const session = await requireMigrationSession(runtimeEventMatch[1]);
+        if (shuttingDown) rejectRequest("Server is shutting down", 503);
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
         const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
         const pendingEvents = [];
@@ -288,13 +301,17 @@ export async function createApp(options = {}) {
         const unsubscribeTerminal = terminal.subscribe(session.id, sendIncremental);
         const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), heartbeatIntervalMs);
         let cleanedUp = false;
+        const stream = { response, cleanup: null };
         const cleanup = () => {
           if (cleanedUp) return;
           cleanedUp = true;
           clearInterval(heartbeat);
           unsubscribePreview();
           unsubscribeTerminal();
+          activeSseStreams.delete(stream);
         };
+        stream.cleanup = cleanup;
+        activeSseStreams.add(stream);
         response.once("close", cleanup);
         try {
           const snapshot = await runtimeSnapshot(session);
@@ -504,6 +521,10 @@ export async function createApp(options = {}) {
     if (!shutdownPromise) {
       shuttingDown = true;
       for (const controller of activeStepControllers.values()) controller.abort("shutdown");
+      for (const stream of [...activeSseStreams]) {
+        stream.cleanup();
+        if (!stream.response.writableEnded) stream.response.end();
+      }
       shutdownPromise = (async () => {
         await previews.stopAll();
         await Promise.all([...activeStepRequests]);

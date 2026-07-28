@@ -1555,3 +1555,72 @@ test("managed shutdown aborts steps, stops previews once, and delays close callb
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(callbacks, ["first", "second"]);
 });
+
+test("managed shutdown ends active session and runtime SSE streams before closing", async (t) => {
+  let releaseStopAll;
+  const stopAllBlocked = new Promise((resolve) => { releaseStopAll = resolve; });
+  const previews = new FakePreviewSupervisor();
+  previews.stopAll = async () => {
+    previews.stopAllCalls += 1;
+    await stopAllBlocked;
+  };
+  const terminal = new TerminalBuffer();
+  const app = await startTestApp(t, { previews, terminal });
+  t.after(() => releaseStopAll());
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "SSE shutdown",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const abortSession = new AbortController();
+  const abortRuntime = new AbortController();
+  t.after(() => {
+    abortSession.abort();
+    abortRuntime.abort();
+  });
+  const sessionResponse = await fetch(
+    `${app.url}/api/sessions/${created.body.id}/events`,
+    { signal: abortSession.signal },
+  );
+  const runtimeResponse = await fetch(
+    `${app.url}/api/sessions/${created.body.id}/runtime/events`,
+    { signal: abortRuntime.signal },
+  );
+  const sessionStream = createSseReader(sessionResponse);
+  const runtimeStream = createSseReader(runtimeResponse);
+  t.after(() => {
+    sessionStream.cancel();
+    runtimeStream.cancel();
+  });
+  await withTimeout(sessionStream.next(), "initial session SSE before shutdown");
+  await withTimeout(runtimeStream.next(), "initial runtime SSE before shutdown");
+
+  let closeCallbackCalled = false;
+  const closed = new Promise((resolve, reject) => {
+    app.server.close((error) => {
+      closeCallbackCalled = true;
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  await assert.rejects(
+    withTimeout(sessionStream.next(), "session SSE shutdown"),
+    /SSE stream ended/,
+  );
+  await assert.rejects(
+    withTimeout(runtimeStream.next(), "runtime SSE shutdown"),
+    /SSE stream ended/,
+  );
+  assert.equal(closeCallbackCalled, false);
+  assert.equal(previews.stopAllCalls, 1);
+  assert.equal(previews.listeners.has(created.body.id), false);
+  assert.equal(terminal.sessions.get(created.body.id).listeners.size, 0);
+  assert.equal((await fetch(`${app.url}/api/sessions/${created.body.id}/events`)).status, 503);
+  assert.equal((await fetch(`${app.url}/api/sessions/${created.body.id}/runtime/events`)).status, 503);
+
+  releaseStopAll();
+  await withTimeout(closed, "SSE managed close callback");
+  assert.equal(closeCallbackCalled, true);
+});
