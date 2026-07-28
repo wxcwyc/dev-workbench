@@ -1238,7 +1238,7 @@ test("runtime SSE sends a snapshot followed by preview and terminal events and c
   assert.equal(terminal.sessions.get(created.body.id).listeners.size, 0);
 });
 
-test("runtime SSE buffers subscribed events until the initial snapshot is sent", async (t) => {
+test("runtime SSE does not replay buffered events already represented by the snapshot", async (t) => {
   const terminal = new TerminalBuffer();
   const previews = new FakePreviewSupervisor();
   let snapshotStarted;
@@ -1279,19 +1279,96 @@ test("runtime SSE buffers subscribed events until the initial snapshot is sent",
   t.after(() => stream.cancel());
   const initial = await withTimeout(stream.next(), "ordered runtime snapshot");
   assert.equal(initial.type, "runtime.snapshot");
-  assert.deepEqual(await withTimeout(stream.next(), "buffered preview state"), {
+  assert.deepEqual(initial.source, { state: "running" });
+  assert.equal(initial.latestSequence, output.sequence);
+
+  previews.publish(created.body.id, "source", { state: "exited" });
+  const laterOutput = terminal.append(created.body.id, {
+    source: "preview:source",
+    stream: "stdout",
+    text: "after snapshot\n",
+  });
+  assert.deepEqual(await withTimeout(stream.next(), "post-snapshot preview state"), {
     type: "preview.state",
     sessionId: created.body.id,
     slot: "source",
-    state: { state: "running" },
+    state: { state: "exited" },
   });
-  assert.deepEqual(await withTimeout(stream.next(), "buffered terminal output"), output);
+  assert.deepEqual(await withTimeout(stream.next(), "post-snapshot terminal output"), laterOutput);
   await stream.cancel();
   abort.abort();
   await waitForCondition(
     () => !previews.listeners.has(created.body.id)
       && terminal.sessions.get(created.body.id).listeners.size === 0,
     "ordered runtime SSE cleanup",
+  );
+});
+
+test("runtime SSE replays buffered events captured after their snapshot cutoff", async (t) => {
+  const terminal = new TerminalBuffer();
+  const previews = new FakePreviewSupervisor();
+  let snapshotStarted;
+  let releaseSnapshot;
+  const started = new Promise((resolve) => { snapshotStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseSnapshot = resolve; });
+  previews.snapshot = async () => {
+    const captured = structuredClone(previews.states);
+    snapshotStarted();
+    await blocked;
+    return captured;
+  };
+  const originalTerminalSnapshot = terminal.snapshot.bind(terminal);
+  let lateOutput;
+  terminal.snapshot = (sessionId) => {
+    const captured = originalTerminalSnapshot(sessionId);
+    lateOutput ??= terminal.append(sessionId, {
+      source: "preview:source",
+      stream: "stderr",
+      text: "after terminal cutoff\n",
+    });
+    return captured;
+  };
+  t.after(() => releaseSnapshot());
+  const app = await startTestApp(t, { terminal, previews });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Runtime cutoff",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const responsePromise = fetch(`${app.url}/api/sessions/${created.body.id}/runtime/events`, {
+    signal: abort.signal,
+  });
+  await withTimeout(started, "preview snapshot cutoff");
+  previews.publish(created.body.id, "source", { state: "running" });
+  releaseSnapshot();
+
+  const response = await withTimeout(responsePromise, "cutoff runtime SSE response");
+  const stream = createSseReader(response);
+  t.after(() => stream.cancel());
+  const initial = await withTimeout(stream.next(), "cutoff runtime snapshot");
+  assert.equal(initial.type, "runtime.snapshot");
+  assert.deepEqual(initial.source, {
+    state: "stopped",
+    actualUrl: "http://127.0.0.1:4173/",
+  });
+  assert.equal(initial.latestSequence, 0);
+  assert.deepEqual(await withTimeout(stream.next(), "post-cutoff preview state"), {
+    type: "preview.state",
+    sessionId: created.body.id,
+    slot: "source",
+    state: { state: "running" },
+  });
+  assert.deepEqual(await withTimeout(stream.next(), "post-cutoff terminal output"), lateOutput);
+  await stream.cancel();
+  abort.abort();
+  await waitForCondition(
+    () => !previews.listeners.has(created.body.id)
+      && terminal.sessions.get(created.body.id).listeners.size === 0,
+    "cutoff runtime SSE cleanup",
   );
 });
 

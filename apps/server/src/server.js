@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
 import { SessionEngine } from "../../../packages/execution-core/src/session-engine.js";
 import { RecentProjectStore } from "../../../packages/execution-core/src/recent-project-store.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
@@ -297,9 +298,27 @@ export async function createApp(options = {}) {
         };
         response.once("close", cleanup);
         try {
-          send({ type: "runtime.snapshot", ...await runtimeSnapshot(session) });
+          const snapshot = await runtimeSnapshot(session);
+          send({ type: "runtime.snapshot", ...snapshot });
           snapshotSent = true;
-          for (const event of pendingEvents) send(event);
+          const previewCutoffs = new Map();
+          for (let index = 0; index < pendingEvents.length; index += 1) {
+            const event = pendingEvents[index];
+            if (
+              event.type === "preview.state"
+              && isDeepStrictEqual(event.state, snapshot[event.slot])
+            ) {
+              previewCutoffs.set(event.slot, index);
+            }
+          }
+          for (let index = 0; index < pendingEvents.length; index += 1) {
+            const event = pendingEvents[index];
+            const capturedTerminal = event.type === "terminal.output"
+              && event.sequence <= snapshot.latestSequence;
+            const capturedPreview = event.type === "preview.state"
+              && index <= (previewCutoffs.get(event.slot) ?? -1);
+            if (!capturedTerminal && !capturedPreview) send(event);
+          }
           pendingEvents.length = 0;
         } catch (error) {
           cleanup();
