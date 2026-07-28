@@ -181,6 +181,18 @@ test("runtime snapshots and events are ordered, escaped, bounded, and filterable
   assert.deepEqual(controller.state.runtime.events.map(({ sequence }) => sequence), [1, 2, 3]);
 
   const filter = new FakeElement(browser.document);
+  filter.dataset.terminalFilter = "source";
+  await browser.element("migration-view").onclick({ target: filter });
+  html = browser.element("migration-view").innerHTML;
+  assert.match(html, /ready/);
+  assert.doesNotMatch(html, /&lt;warn&gt;|&lt;step&gt;/);
+
+  filter.dataset.terminalFilter = "target";
+  await browser.element("migration-view").onclick({ target: filter });
+  html = browser.element("migration-view").innerHTML;
+  assert.match(html, /&lt;warn&gt;/);
+  assert.doesNotMatch(html, /ready|&lt;step&gt;/);
+
   filter.dataset.terminalFilter = "step";
   await browser.element("migration-view").onclick({ target: filter });
   html = browser.element("migration-view").innerHTML;
@@ -188,8 +200,39 @@ test("runtime snapshots and events are ordered, escaped, bounded, and filterable
   assert.doesNotMatch(html, /ready/);
   assert.doesNotMatch(html, /&lt;warn&gt;/);
 
+  filter.dataset.terminalFilter = "all";
+  await browser.element("migration-view").onclick({ target: filter });
+  html = browser.element("migration-view").innerHTML;
+  assert.match(html, /ready/);
+  assert.match(html, /&lt;warn&gt;/);
+  assert.match(html, /&lt;step&gt;/);
+
   runtime.emit({ type: "terminal.output", sequence: 4, source: "step:0", stream: "stdout", text: "x".repeat(300 * 1024), at: "2026-07-28T00:00:04.000Z" });
   assert.ok(controller.state.runtime.events.reduce((bytes, event) => bytes + new TextEncoder().encode(event.text).length, 0) <= 256 * 1024);
+});
+
+test("malformed runtime envelopes are ignored without breaking Session SSE", async (t) => {
+  const active = migrationSession("migration");
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(active);
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  const sessionEvents = browser.eventSources[0];
+  const runtime = browser.eventSources[1];
+
+  runtime.emit("{not json");
+  runtime.emit({ type: "runtime.unknown", source: {}, target: {}, events: [], latestSequence: 0 });
+  runtime.emit({ type: "runtime.snapshot", source: "bad", target: {}, events: [], latestSequence: 0 });
+  runtime.emit({ type: "runtime.snapshot", source: [], target: {}, events: [], latestSequence: 0 });
+  runtime.emit({ type: "runtime.snapshot", source: {}, target: {}, latestSequence: 0 });
+  runtime.emit({ type: "preview.state", sessionId: "migration", slot: "source", sequence: 1, state: "bad" });
+  runtime.emit({ type: "preview.state", sessionId: "migration", slot: "target", sequence: 2, state: [] });
+
+  assert.equal(controller.state.runtime.source, null);
+  assert.equal(controller.state.runtime.target, null);
+  sessionEvents.emit({ ...active, title: "Session stream remains healthy" });
+  assert.equal(controller.state.active.title, "Session stream remains healthy");
 });
 
 test("preview controls post exact actions with independent locks and reject stale HTTP state", async (t) => {
@@ -199,6 +242,9 @@ test("preview controls post exact actions with independent locks and reject stal
     if (path === "/api/sessions/migration") return new FakeResponse(migrationSession("migration"));
     if (path === "/api/sessions/migration/previews/source/start" && options.method === "POST") return sourceStart.promise;
     if (path === "/api/sessions/migration/previews/target/stop" && options.method === "POST") return targetStop.promise;
+    if (path === "/api/sessions/migration/previews/target/restart" && options.method === "POST") {
+      return new FakeResponse({ state: "running", latestSequence: 10 });
+    }
     throw new Error(`Unexpected fetch ${path}`);
   });
   await controller.openSession("migration");
@@ -244,6 +290,84 @@ test("preview controls post exact actions with independent locks and reject stal
   assert.equal(controller.state.runtime.source.state, "running");
   assert.equal(controller.state.runtime.target.state, "stopped");
   assert.deepEqual(controller.state.runtime.pending, { source: false, target: false });
+
+  targetButton.dataset.previewAction = "restart";
+  await browser.element("migration-view").onclick({ target: targetButton });
+  const restart = browser.requests.at(-1);
+  assert.equal(restart.path, "/api/sessions/migration/previews/target/restart");
+  assert.equal(restart.options.method, "POST");
+  assert.deepEqual(JSON.parse(restart.options.body), {});
+  assert.equal(controller.state.runtime.target.state, "running");
+});
+
+test("a lifecycle response cannot update runtime after session ownership switches", async (t) => {
+  const start = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(migrationSession("migration"));
+    if (path === "/api/sessions/execution") return new FakeResponse(session("execution"));
+    if (path === "/api/sessions/migration/previews/source/start" && options.method === "POST") return start.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  browser.eventSources[1].emit({
+    type: "runtime.snapshot",
+    source: { state: "stopped", actualUrl: "http://127.0.0.1:4173/", latestSequence: 1 },
+    target: { state: "stopped", actualUrl: "http://127.0.0.1:4174/", latestSequence: 2 },
+    events: [],
+    latestSequence: 0,
+  });
+  const button = new FakeElement(browser.document);
+  button.dataset.previewAction = "start";
+  button.dataset.slot = "source";
+  const pending = browser.element("migration-view").onclick({ target: button });
+
+  await controller.openSession("execution");
+  start.resolve(new FakeResponse({ state: "running", latestSequence: 8 }));
+  await pending;
+
+  assert.equal(controller.state.active.id, "execution");
+  assert.equal(controller.state.runtime.sessionId, null);
+  assert.equal(controller.state.runtime.source, null);
+});
+
+test("historical snapshot command remains separate from current live output", async (t) => {
+  const historical = migrationSession("migration", {
+    cursor: 0,
+    currentSnapshot: {
+      command: {
+        command: ["node", "older-step.js"],
+        stdout: "historical stdout\n",
+        stderr: "historical stderr\n",
+      },
+    },
+  });
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(historical);
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  browser.eventSources[1].emit({
+    type: "runtime.snapshot",
+    source: { state: "stopped", latestSequence: 0 },
+    target: { state: "stopped", latestSequence: 0 },
+    events: [{
+      type: "terminal.output",
+      sequence: 1,
+      source: "step:0",
+      stream: "stdout",
+      text: "live output\n",
+      at: "2026-07-28T00:00:00.000Z",
+    }],
+    latestSequence: 1,
+  });
+
+  const html = browser.element("migration-view").innerHTML;
+  assert.match(html, /Historical command output/);
+  assert.match(html, /older-step\.js/);
+  assert.match(html, /historical stdout/);
+  assert.match(html, /Live runtime output/);
+  assert.match(html, /live output/);
+  assert.ok(html.indexOf("Live runtime output") < html.indexOf("Historical command output"));
 });
 
 test("refresh reloads only the selected safe preview iframe", async (t) => {

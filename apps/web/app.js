@@ -292,6 +292,18 @@ function renderTree(snapshot){
 }
 
 function utf8Bytes(text){return new TextEncoder().encode(text).length;}
+function isPlainObject(value){
+  if(value===null||typeof value!=="object"||Array.isArray(value))return false;
+  const prototype=Object.getPrototypeOf(value);
+  return prototype===Object.prototype||prototype===null;
+}
+function isPreviewState(value){
+  return isPlainObject(value)
+    &&typeof value.state==="string"
+    &&value.state.length>0
+    &&Number.isInteger(value.latestSequence)
+    &&value.latestSequence>=0;
+}
 function utf8Suffix(text,maxBytes){
   const characters=Array.from(text);
   let suffix="";
@@ -328,7 +340,7 @@ function boundTerminalEvents(events){
 }
 function applyRuntimeSnapshot(envelope,owner){
   if(state.runtime.eventSource!==owner||state.runtime.sessionId!==state.active?.id)return;
-  if(!envelope?.source||!envelope?.target||!Array.isArray(envelope.events)||!Number.isInteger(envelope.latestSequence))return;
+  if(!isPreviewState(envelope?.source)||!isPreviewState(envelope?.target)||!Array.isArray(envelope.events)||!Number.isInteger(envelope.latestSequence)||envelope.latestSequence<0)return;
   state.runtime.source=envelope.source;
   state.runtime.target=envelope.target;
   state.runtime.events=boundTerminalEvents(envelope.events);
@@ -337,7 +349,7 @@ function applyRuntimeSnapshot(envelope,owner){
 }
 function applyPreviewState(envelope,owner){
   if(state.runtime.eventSource!==owner||state.runtime.sessionId!==state.active?.id)return;
-  if(envelope?.type!=="preview.state"||envelope.sessionId!==state.runtime.sessionId||!["source","target"].includes(envelope.slot)||!Number.isInteger(envelope.sequence)||!envelope.state)return;
+  if(envelope?.type!=="preview.state"||envelope.sessionId!==state.runtime.sessionId||!["source","target"].includes(envelope.slot)||!Number.isInteger(envelope.sequence)||envelope.sequence<1||!isPreviewState(envelope.state))return;
   const current=state.runtime[envelope.slot];
   if(envelope.sequence<=(current?.latestSequence??0))return;
   state.runtime[envelope.slot]={...envelope.state,latestSequence:envelope.sequence};
