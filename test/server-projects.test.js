@@ -47,9 +47,10 @@ class FakePreviewSupervisor {
   constructor() {
     this.listeners = new Map();
     this.calls = [];
+    this.nextEventSequence = 1;
     this.states = {
-      source: { state: "stopped", actualUrl: "http://127.0.0.1:4173/" },
-      target: { state: "running", actualUrl: "http://127.0.0.1:4174/" },
+      source: { state: "stopped", actualUrl: "http://127.0.0.1:4173/", latestSequence: 0 },
+      target: { state: "running", actualUrl: "http://127.0.0.1:4174/", latestSequence: 0 },
     };
     this.stopAllCalls = 0;
   }
@@ -69,9 +70,18 @@ class FakePreviewSupervisor {
   }
 
   publish(sessionId, slot, state) {
-    this.states[slot] = state;
-    const event = { type: "preview.state", sessionId, slot, state };
+    const sequence = this.nextEventSequence++;
+    const sequencedState = { ...state, latestSequence: sequence };
+    this.states[slot] = sequencedState;
+    const event = {
+      type: "preview.state",
+      sessionId,
+      slot,
+      sequence,
+      state: sequencedState,
+    };
     for (const listener of this.listeners.get(sessionId) ?? []) listener(event);
+    return structuredClone(event);
   }
 
   async start(session, slot) {
@@ -1213,13 +1223,8 @@ test("runtime SSE sends a snapshot followed by preview and terminal events and c
   const initial = await withTimeout(stream.next(), "runtime snapshot");
   assert.equal(initial.type, "runtime.snapshot");
   assert.equal(initial.latestSequence, 0);
-  previews.publish(created.body.id, "source", { state: "running" });
-  assert.deepEqual(await withTimeout(stream.next(), "preview state"), {
-    type: "preview.state",
-    sessionId: created.body.id,
-    slot: "source",
-    state: { state: "running" },
-  });
+  const previewEvent = previews.publish(created.body.id, "source", { state: "running" });
+  assert.deepEqual(await withTimeout(stream.next(), "preview state"), previewEvent);
   const output = terminal.append(created.body.id, {
     source: "preview:source",
     stream: "stderr",
@@ -1266,6 +1271,7 @@ test("runtime SSE does not replay buffered events already represented by the sna
   });
   await withTimeout(started, "delayed runtime snapshot");
 
+  previews.publish(created.body.id, "source", { state: "starting" });
   previews.publish(created.body.id, "source", { state: "running" });
   const output = terminal.append(created.body.id, {
     source: "preview:source",
@@ -1279,21 +1285,16 @@ test("runtime SSE does not replay buffered events already represented by the sna
   t.after(() => stream.cancel());
   const initial = await withTimeout(stream.next(), "ordered runtime snapshot");
   assert.equal(initial.type, "runtime.snapshot");
-  assert.deepEqual(initial.source, { state: "running" });
+  assert.deepEqual(initial.source, { state: "running", latestSequence: 2 });
   assert.equal(initial.latestSequence, output.sequence);
 
-  previews.publish(created.body.id, "source", { state: "exited" });
+  const laterPreview = previews.publish(created.body.id, "source", { state: "exited" });
   const laterOutput = terminal.append(created.body.id, {
     source: "preview:source",
     stream: "stdout",
     text: "after snapshot\n",
   });
-  assert.deepEqual(await withTimeout(stream.next(), "post-snapshot preview state"), {
-    type: "preview.state",
-    sessionId: created.body.id,
-    slot: "source",
-    state: { state: "exited" },
-  });
+  assert.deepEqual(await withTimeout(stream.next(), "post-snapshot preview state"), laterPreview);
   assert.deepEqual(await withTimeout(stream.next(), "post-snapshot terminal output"), laterOutput);
   await stream.cancel();
   abort.abort();
@@ -1343,7 +1344,8 @@ test("runtime SSE replays buffered events captured after their snapshot cutoff",
     signal: abort.signal,
   });
   await withTimeout(started, "preview snapshot cutoff");
-  previews.publish(created.body.id, "source", { state: "running" });
+  const starting = previews.publish(created.body.id, "source", { state: "starting" });
+  const stopped = previews.publish(created.body.id, "source", { state: "stopped" });
   releaseSnapshot();
 
   const response = await withTimeout(responsePromise, "cutoff runtime SSE response");
@@ -1354,14 +1356,11 @@ test("runtime SSE replays buffered events captured after their snapshot cutoff",
   assert.deepEqual(initial.source, {
     state: "stopped",
     actualUrl: "http://127.0.0.1:4173/",
+    latestSequence: 0,
   });
   assert.equal(initial.latestSequence, 0);
-  assert.deepEqual(await withTimeout(stream.next(), "post-cutoff preview state"), {
-    type: "preview.state",
-    sessionId: created.body.id,
-    slot: "source",
-    state: { state: "running" },
-  });
+  assert.deepEqual(await withTimeout(stream.next(), "post-cutoff starting state"), starting);
+  assert.deepEqual(await withTimeout(stream.next(), "post-cutoff stopped state"), stopped);
   assert.deepEqual(await withTimeout(stream.next(), "post-cutoff terminal output"), lateOutput);
   await stream.cancel();
   abort.abort();

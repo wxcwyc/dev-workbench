@@ -2,7 +2,6 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { isDeepStrictEqual } from "node:util";
 import { SessionEngine } from "../../../packages/execution-core/src/session-engine.js";
 import { RecentProjectStore } from "../../../packages/execution-core/src/recent-project-store.js";
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
@@ -301,22 +300,12 @@ export async function createApp(options = {}) {
           const snapshot = await runtimeSnapshot(session);
           send({ type: "runtime.snapshot", ...snapshot });
           snapshotSent = true;
-          const previewCutoffs = new Map();
-          for (let index = 0; index < pendingEvents.length; index += 1) {
-            const event = pendingEvents[index];
-            if (
-              event.type === "preview.state"
-              && isDeepStrictEqual(event.state, snapshot[event.slot])
-            ) {
-              previewCutoffs.set(event.slot, index);
-            }
-          }
-          for (let index = 0; index < pendingEvents.length; index += 1) {
-            const event = pendingEvents[index];
+          for (const event of pendingEvents) {
             const capturedTerminal = event.type === "terminal.output"
               && event.sequence <= snapshot.latestSequence;
             const capturedPreview = event.type === "preview.state"
-              && index <= (previewCutoffs.get(event.slot) ?? -1);
+              && Number.isInteger(event.sequence)
+              && event.sequence <= snapshot[event.slot]?.latestSequence;
             if (!capturedTerminal && !capturedPreview) send(event);
           }
           pendingEvents.length = 0;
