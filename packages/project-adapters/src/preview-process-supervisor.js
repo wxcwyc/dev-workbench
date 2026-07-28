@@ -163,6 +163,7 @@ export class PreviewProcessSupervisor {
     this.listeners = new Map();
     this.operations = new Set();
     this.nextGeneration = 1;
+    this.nextEventSequence = 1;
     this.stoppingAll = false;
     this.stopAllPromise = null;
     this.startControllers = new Map();
@@ -178,10 +179,13 @@ export class PreviewProcessSupervisor {
   }
 
   #emit(record) {
+    const sequence = this.nextEventSequence++;
+    record.latestSequence = sequence;
     const event = {
       type: "preview.state",
       sessionId: record.sessionId,
       slot: record.slot,
+      sequence,
       state: this.#publicState(record),
     };
     for (const listener of this.listeners.get(record.sessionId) ?? []) {
@@ -222,8 +226,9 @@ export class PreviewProcessSupervisor {
             config: clone(config),
             actualUrl: config.actualUrl,
             healthUrl: config.healthUrl,
+            latestSequence: 0,
           }
-        : { state: "unconfigured" };
+        : { state: "unconfigured", latestSequence: 0 };
     }
     return result;
   }

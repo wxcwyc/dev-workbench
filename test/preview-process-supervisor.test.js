@@ -203,12 +203,79 @@ test("snapshot exposes stopped configured slots and unconfigured slots defensive
 
   const first = await supervisor.snapshot(session);
   assert.equal(first.source.state, "stopped");
+  assert.equal(first.source.latestSequence, 0);
   assert.equal(first.source.actualUrl, "http://127.0.0.1:4101/preview");
   assert.equal(first.target.state, "unconfigured");
+  assert.equal(first.target.latestSequence, 0);
 
   first.source.config.command[0] = "mutated";
   const second = await supervisor.snapshot(session);
   assert.equal(second.source.config.command[0], process.execPath);
+});
+
+test("preview state events expose an exact monotonically increasing snapshot cutoff", async (context) => {
+  const session = await projectSession(context);
+  const child = new FakeChild(199);
+  const { supervisor } = fakeSupervisor({ children: [child] });
+  const events = [];
+  supervisor.subscribe(session.id, (event) => events.push(event));
+
+  await supervisor.start(session, "source");
+  const runningSnapshot = (await supervisor.snapshot(session)).source;
+  await supervisor.stop(session.id, "source");
+  const stoppedSnapshot = (await supervisor.snapshot(session)).source;
+
+  assert.deepEqual(events.map((event) => event.state.state), [
+    "starting",
+    "running",
+    "stopping",
+    "stopped",
+  ]);
+  assert.ok(events.every((event) => event.sequence === event.state.latestSequence));
+  assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3, 4]);
+  assert.ok(events.every((event) => !("child" in event.state)));
+  assert.ok(events.every((event) => !("generation" in event.state)));
+  assert.equal(runningSnapshot.latestSequence, events[1].sequence);
+  assert.equal(stoppedSnapshot.latestSequence, events.at(-1).sequence);
+});
+
+test("preview event sequences are globally monotonic across slots and sessions", async (context) => {
+  const first = await projectSession(context);
+  first.metadata.previewServices.target = {
+    command: [process.execPath],
+    port: 4102,
+  };
+  const second = {
+    ...first,
+    id: "session-2",
+    metadata: {
+      previewServices: {
+        source: {
+          command: [process.execPath],
+          port: 4103,
+        },
+      },
+    },
+  };
+  const { supervisor } = fakeSupervisor({ occupied: true });
+  const events = [];
+  supervisor.subscribe(first.id, (event) => events.push(event));
+  supervisor.subscribe(second.id, (event) => events.push(event));
+
+  await supervisor.start(first, "source");
+  await supervisor.start(first, "target");
+  await supervisor.start(second, "source");
+
+  assert.deepEqual(events.map(({ sessionId, slot }) => [
+    sessionId,
+    slot,
+  ]), [
+    ["session-1", "source"],
+    ["session-1", "target"],
+    ["session-2", "source"],
+  ]);
+  assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3]);
+  assert.ok(events.every((event) => event.sequence === event.state.latestSequence));
 });
 
 test("start probes before spawning, streams output, and reaches running", async (context) => {
