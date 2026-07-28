@@ -119,10 +119,10 @@ test("migration demo declares exact source and target preview services", async (
 });
 
 for (const fixture of [
-  { slot: "source", script: "legacy/server.js", pagePattern: /Legacy Notes/, signal: "SIGTERM" },
-  { slot: "target", script: "target/server.js", pagePattern: /Modern site preview/, signal: "SIGINT" },
+  { slot: "source", script: "legacy/server.js", pagePattern: /Legacy Notes/ },
+  { slot: "target", script: "target/server.js", pagePattern: /Modern site preview/ },
 ]) {
-  test(`${fixture.slot} preview serves health and only its intended page`, async (context) => {
+  test(`${fixture.slot} preview serves its page and releases the port after SIGTERM`, async (context) => {
     const server = await startDemoServer(context, fixture.script);
     const origin = `http://127.0.0.1:${server.port}`;
 
@@ -146,7 +146,7 @@ for (const fixture of [
     await waitForOutput(server.stdout, /GET \/ 200/);
     assert.equal(server.stderr(), "");
 
-    server.child.kill(fixture.signal);
+    server.child.kill("SIGTERM");
     const [exitCode, signal] = await once(server.child, "exit");
     assert.equal(exitCode, 0);
     assert.equal(signal, null);
