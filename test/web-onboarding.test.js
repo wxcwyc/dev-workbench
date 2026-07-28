@@ -271,11 +271,16 @@ test("formatApiError includes protocol detail paths and has a fallback", () => {
   assert.equal(formatApiError(null), "Request failed");
 });
 
-test("safePreviewUrl permits only absolute HTTP previews and exact about:blank", () => {
+test("safePreviewUrl permits only supervised loopback HTTP previews and exact about:blank", () => {
   const cases = [
-    ["http://example.test/source", "http://example.test/source"],
-    ["https://example.test/target?mode=preview", "https://example.test/target?mode=preview"],
+    ["http://127.0.0.1:4173/source", "http://127.0.0.1:4173/source"],
+    ["http://127.0.0.1:4174/target?mode=preview", "http://127.0.0.1:4174/target?mode=preview"],
     ["about:blank", "about:blank"],
+    ["http://example.test/source", "about:blank"],
+    ["https://127.0.0.1:4173/target", "about:blank"],
+    ["http://localhost:4173/source", "about:blank"],
+    ["http://[::1]:4173/source", "about:blank"],
+    ["http://127.0.0.1.attacker.test/source", "about:blank"],
     ["javascript:alert(1)", "about:blank"],
     ["data:text/html,<script>alert(1)</script>", "about:blank"],
     ["file:///etc/passwd", "about:blank"],

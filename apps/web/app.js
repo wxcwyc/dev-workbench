@@ -389,8 +389,7 @@ function resetRuntime(sessionId=null){
 }
 function previewDetails(session,slot){
   const runtime=state.runtime.sessionId===session.id?state.runtime[slot]:null;
-  const fallbackUrl=slot==="source"?session.metadata.sourceUrl:session.metadata.targetUrl;
-  return runtime??{state:"loading",actualUrl:fallbackUrl??"about:blank",latestSequence:0};
+  return runtime??{state:"loading",actualUrl:"about:blank",latestSequence:0};
 }
 function previewCardContent(session,slot){
   const preview=previewDetails(session,slot);

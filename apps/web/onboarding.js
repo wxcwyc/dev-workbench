@@ -10,10 +10,17 @@ function formatArgument(argument) {
 
 export function safePreviewUrl(value) {
   if (value === "about:blank") return value;
-  if (typeof value !== "string") return "about:blank";
+  if (typeof value !== "string" || !/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}\//.test(value)) {
+    return "about:blank";
+  }
   try {
     const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "about:blank";
+    return parsed.protocol === "http:"
+      && parsed.hostname === "127.0.0.1"
+      && parsed.username === ""
+      && parsed.password === ""
+      ? parsed.href
+      : "about:blank";
   } catch {
     return "about:blank";
   }

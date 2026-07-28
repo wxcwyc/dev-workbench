@@ -140,6 +140,26 @@ test("Migration owns session and runtime streams while Execution owns only sessi
   assert.equal(controller.state.runtime.source, null);
 });
 
+test("migration previews ignore metadata URLs while awaiting supervised runtime", async (t) => {
+  const imported = migrationSession("migration", {
+    metadata: {
+      sourceUrl: "https://attacker.example/steal",
+      targetUrl: "http://127.0.0.1:9000/admin",
+    },
+  });
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(imported);
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+
+  await controller.openSession("migration");
+
+  const html = browser.element("migration-view").innerHTML;
+  assert.doesNotMatch(html, /attacker\.example|127\.0\.0\.1:9000/);
+  assert.equal([...html.matchAll(/<a href="about:blank"/g)].length, 2);
+  assert.equal([...html.matchAll(/<iframe class="preview"[^>]+src="about:blank"/g)].length, 2);
+});
+
 test("runtime snapshots and events are ordered, escaped, bounded, and filterable", async (t) => {
   const { browser, controller } = await loadController(t, (path) => {
     if (path === "/api/sessions/migration") {
