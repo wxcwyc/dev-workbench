@@ -2,12 +2,17 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const stage = process.argv[2];
-const root = path.join(import.meta.dirname, ".generated");
-const target = path.join(root, "target");
+const target = path.join(import.meta.dirname, "target");
+const resetPage = "<!doctype html><html><body><main><h1>Modern site preview</h1><p>Run the migration steps to build this target.</p></main></body></html>\n";
 
 if (stage === "reset") {
-  await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(target, { recursive: true });
+  await Promise.all(
+    ["package.json", "index.html", "content.json", "app.js", "styles.css"].map((file) =>
+      fs.rm(path.join(target, file), { force: true })
+    ),
+  );
+  await fs.writeFile(path.join(target, "index.html"), resetPage);
   console.log("Target workspace reset.");
 } else if (stage === "shell") {
   await fs.mkdir(target, { recursive: true });

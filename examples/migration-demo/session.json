@@ -5,7 +5,23 @@
     "sourceLabel": "Legacy site",
     "targetLabel": "Modern site",
     "sourceUrl": "about:blank",
-    "targetUrl": "about:blank"
+    "targetUrl": "about:blank",
+    "previewServices": {
+      "source": {
+        "command": ["node", "legacy/server.js"],
+        "cwd": ".",
+        "port": 4173,
+        "healthPath": "/health",
+        "previewPath": "/"
+      },
+      "target": {
+        "command": ["node", "target/server.js"],
+        "cwd": ".",
+        "port": 4174,
+        "healthPath": "/health",
+        "previewPath": "/"
+      }
+    }
   },
   "steps": [
     { "id": "reset-target-workspace", "title": "Reset target workspace", "description": "Create a clean target project while keeping the legacy source visible.", "risk": "high", "dependsOn": [], "action": { "command": ["node", "step-runner.js", "reset"] } },
