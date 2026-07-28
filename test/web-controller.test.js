@@ -97,6 +97,182 @@ test("openSession gives the latest request and EventSource exclusive ownership",
   assert.equal(browser.eventSources[1].closed, false);
 });
 
+test("Migration owns session and runtime streams while Execution owns only session events", async (t) => {
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(migrationSession("migration"));
+    if (path === "/api/sessions/execution") return new FakeResponse(session("execution"));
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+
+  await controller.openSession("migration");
+  const sessionEvents = browser.eventSources[0];
+  const runtimeEvents = browser.eventSources[1];
+  assert.equal(sessionEvents.url, "/api/sessions/migration/events");
+  assert.equal(runtimeEvents.url, "/api/sessions/migration/runtime/events");
+
+  runtimeEvents.emit({
+    type: "runtime.snapshot",
+    source: { state: "running", actualUrl: "http://127.0.0.1:4173/", latestSequence: 4 },
+    target: { state: "stopped", actualUrl: "http://127.0.0.1:4174/", latestSequence: 3 },
+    events: [],
+    latestSequence: 0,
+  });
+  assert.equal(controller.state.runtime.source.state, "running");
+
+  const lateRuntimeHandler = runtimeEvents.onmessage;
+  await controller.openSession("execution");
+  assert.equal(sessionEvents.closed, true);
+  assert.equal(runtimeEvents.closed, true);
+  assert.equal(sessionEvents.onmessage, null);
+  assert.equal(runtimeEvents.onmessage, null);
+  assert.equal(browser.eventSources.length, 3);
+  assert.equal(browser.eventSources[2].url, "/api/sessions/execution/events");
+  assert.equal(controller.state.runtime.sessionId, null);
+
+  lateRuntimeHandler({ data: JSON.stringify({
+    type: "preview.state",
+    sessionId: "migration",
+    slot: "source",
+    sequence: 5,
+    state: { state: "exited", latestSequence: 5 },
+  }) });
+  assert.equal(controller.state.active.id, "execution");
+  assert.equal(controller.state.runtime.source, null);
+});
+
+test("runtime snapshots and events are ordered, escaped, bounded, and filterable", async (t) => {
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") {
+      return new FakeResponse(migrationSession("migration", { cursor: 0 }));
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  const runtime = browser.eventSources[1];
+
+  runtime.emit({
+    type: "runtime.snapshot",
+    source: {
+      state: "running",
+      actualUrl: "http://127.0.0.1:4173/",
+      config: { command: ["node", "<source>.js"], cwd: ".", port: 4173 },
+      latestSequence: 2,
+    },
+    target: {
+      state: "stopped",
+      actualUrl: "http://127.0.0.1:4174/",
+      config: { command: ["node", "target.js"], cwd: ".", port: 4174 },
+      latestSequence: 1,
+    },
+    events: [
+      { type: "terminal.output", sequence: 2, source: "preview:target", stream: "stderr", text: "<warn>\n", at: "2026-07-28T00:00:01.000Z" },
+      { type: "terminal.output", sequence: 1, source: "preview:source", stream: "stdout", text: "ready\n", at: "2026-07-28T00:00:00.000Z" },
+    ],
+    latestSequence: 2,
+  });
+  let html = browser.element("migration-view").innerHTML;
+  assert.ok(html.indexOf("ready") < html.indexOf("&lt;warn&gt;"));
+  assert.doesNotMatch(html, /<warn>/);
+  assert.match(html, /Historical command output/);
+  assert.match(html, /Live runtime output/);
+
+  runtime.emit({ type: "terminal.output", sequence: 3, source: "step:0", stream: "stdout", text: "<step>\n", at: "2026-07-28T00:00:02.000Z" });
+  runtime.emit({ type: "terminal.output", sequence: 2, source: "preview:source", stream: "stdout", text: "duplicate\n", at: "2026-07-28T00:00:03.000Z" });
+  assert.deepEqual(controller.state.runtime.events.map(({ sequence }) => sequence), [1, 2, 3]);
+
+  const filter = new FakeElement(browser.document);
+  filter.dataset.terminalFilter = "step";
+  await browser.element("migration-view").onclick({ target: filter });
+  html = browser.element("migration-view").innerHTML;
+  assert.match(html, /&lt;step&gt;/);
+  assert.doesNotMatch(html, /ready/);
+  assert.doesNotMatch(html, /&lt;warn&gt;/);
+
+  runtime.emit({ type: "terminal.output", sequence: 4, source: "step:0", stream: "stdout", text: "x".repeat(300 * 1024), at: "2026-07-28T00:00:04.000Z" });
+  assert.ok(controller.state.runtime.events.reduce((bytes, event) => bytes + new TextEncoder().encode(event.text).length, 0) <= 256 * 1024);
+});
+
+test("preview controls post exact actions with independent locks and reject stale HTTP state", async (t) => {
+  const sourceStart = deferred();
+  const targetStop = deferred();
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(migrationSession("migration"));
+    if (path === "/api/sessions/migration/previews/source/start" && options.method === "POST") return sourceStart.promise;
+    if (path === "/api/sessions/migration/previews/target/stop" && options.method === "POST") return targetStop.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  const runtime = browser.eventSources[1];
+  runtime.emit({
+    type: "runtime.snapshot",
+    source: { state: "stopped", actualUrl: "http://127.0.0.1:4173/", latestSequence: 1 },
+    target: { state: "running", actualUrl: "http://127.0.0.1:4174/", latestSequence: 2 },
+    events: [],
+    latestSequence: 0,
+  });
+
+  const sourceButton = new FakeElement(browser.document);
+  sourceButton.dataset.previewAction = "start";
+  sourceButton.dataset.slot = "source";
+  const targetButton = new FakeElement(browser.document);
+  targetButton.dataset.previewAction = "stop";
+  targetButton.dataset.slot = "target";
+  const sourcePending = browser.element("migration-view").onclick({ target: sourceButton });
+  const targetPending = browser.element("migration-view").onclick({ target: targetButton });
+
+  assert.deepEqual(controller.state.runtime.pending, { source: true, target: true });
+  const lifecycleRequests = browser.requests.slice(-2);
+  assert.deepEqual(lifecycleRequests.map(({ path, options }) => [
+    path,
+    options.method,
+    JSON.parse(options.body),
+  ]), [
+    ["/api/sessions/migration/previews/source/start", "POST", {}],
+    ["/api/sessions/migration/previews/target/stop", "POST", {}],
+  ]);
+
+  runtime.emit({
+    type: "preview.state",
+    sessionId: "migration",
+    slot: "source",
+    sequence: 8,
+    state: { state: "running", actualUrl: "http://127.0.0.1:4173/", latestSequence: 8 },
+  });
+  sourceStart.resolve(new FakeResponse({ state: "starting", latestSequence: 4 }));
+  targetStop.resolve(new FakeResponse({ state: "stopped", latestSequence: 9 }));
+  await Promise.all([sourcePending, targetPending]);
+  assert.equal(controller.state.runtime.source.state, "running");
+  assert.equal(controller.state.runtime.target.state, "stopped");
+  assert.deepEqual(controller.state.runtime.pending, { source: false, target: false });
+});
+
+test("refresh reloads only the selected safe preview iframe", async (t) => {
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration") return new FakeResponse(migrationSession("migration"));
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("migration");
+  browser.eventSources[1].emit({
+    type: "runtime.snapshot",
+    source: { state: "running", actualUrl: "http://127.0.0.1:4173/", latestSequence: 1 },
+    target: { state: "running", actualUrl: "http://127.0.0.1:4174/", latestSequence: 2 },
+    events: [],
+    latestSequence: 0,
+  });
+  const sourceFrame = new FakeElement(browser.document);
+  const targetFrame = new FakeElement(browser.document);
+  browser.element("migration-view").setQuerySelectorAll('[data-preview="source"]', [sourceFrame]);
+  browser.element("migration-view").setQuerySelectorAll('[data-preview="target"]', [targetFrame]);
+  const refresh = new FakeElement(browser.document);
+  refresh.dataset.previewAction = "refresh";
+  refresh.dataset.slot = "source";
+
+  await browser.element("migration-view").onclick({ target: refresh });
+
+  assert.match(sourceFrame.getAttribute("src"), /^http:\/\/127\.0\.0\.1:4173\/\?_workbench_refresh=1$/);
+  assert.equal(targetFrame.getAttribute("src"), null);
+});
+
 test("session creation lock survives dialog close and reopen until POST settles", async (t) => {
   const creation = deferred();
   let postCount = 0;

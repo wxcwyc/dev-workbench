@@ -1,8 +1,9 @@
 import { buildOnboardingInput, formatApiError, parseSessionImport, safePreviewUrl, summarizeOnboarding } from "./onboarding.js";
 import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeCommandArgument, removePlanStep, toPlanInput, updateCommandArgument, updatePlanStep, validatePlanDraft } from "./plan-editor.js";
 
-const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,activeGeneration:0,events:null,sessionAction:{request:0,pending:false,sessionId:null},onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
+const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,activeGeneration:0,events:null,runtime:{sessionId:null,source:null,target:null,events:[],latestSequence:0,filter:"all",eventSource:null,requests:{source:0,target:0},pending:{source:false,target:false},refresh:{source:0,target:0}},sessionAction:{request:0,pending:false,sessionId:null},onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]}};
 const $=(selector)=>document.querySelector(selector);
+const terminalClientLimit=256*1024;
 
 async function api(path,options={}){
   const response=await fetch(path,{headers:{"content-type":"application/json",...(options.headers??{})},...options});
@@ -290,10 +291,137 @@ function renderTree(snapshot){
   return (snapshot?.tree?.entries??[]).map((entry)=>`<div class="${entry.type} change-${changes.get(entry.path)??""}">${entry.type==="directory"?"▸":"·"} ${escapeHtml(entry.path)} ${changes.has(entry.path)?`[${changes.get(entry.path)}]`:""}</div>`).join("")||`<span class="muted">Run a step to capture the file tree.</span>`;
 }
 
+function utf8Bytes(text){return new TextEncoder().encode(text).length;}
+function utf8Suffix(text,maxBytes){
+  const characters=Array.from(text);
+  let suffix="";
+  let bytes=0;
+  for(let index=characters.length-1;index>=0;index-=1){
+    const character=characters[index];
+    const size=utf8Bytes(character);
+    if(bytes+size>maxBytes)break;
+    suffix=character+suffix;
+    bytes+=size;
+  }
+  return suffix;
+}
+function isTerminalEvent(event){
+  return event?.type==="terminal.output"
+    &&Number.isInteger(event.sequence)
+    &&event.sequence>0
+    &&/^(?:preview:(?:source|target)|step:\d+)$/.test(event.source)
+    &&["stdout","stderr"].includes(event.stream)
+    &&typeof event.text==="string";
+}
+function boundTerminalEvents(events){
+  const ordered=[...new Map(events.filter(isTerminalEvent).map((event)=>[event.sequence,event])).values()]
+    .sort((left,right)=>left.sequence-right.sequence);
+  let bytes=ordered.reduce((total,event)=>total+utf8Bytes(event.text),0);
+  while(ordered.length>1&&bytes>terminalClientLimit){
+    bytes-=utf8Bytes(ordered.shift().text);
+  }
+  if(ordered.length&&bytes>terminalClientLimit){
+    const event=ordered[0];
+    ordered[0]={...event,text:utf8Suffix(event.text,terminalClientLimit)};
+  }
+  return ordered;
+}
+function applyRuntimeSnapshot(envelope,owner){
+  if(state.runtime.eventSource!==owner||state.runtime.sessionId!==state.active?.id)return;
+  if(!envelope?.source||!envelope?.target||!Array.isArray(envelope.events)||!Number.isInteger(envelope.latestSequence))return;
+  state.runtime.source=envelope.source;
+  state.runtime.target=envelope.target;
+  state.runtime.events=boundTerminalEvents(envelope.events);
+  state.runtime.latestSequence=Math.max(envelope.latestSequence,state.runtime.events.at(-1)?.sequence??0);
+  renderMigration(state.active);
+}
+function applyPreviewState(envelope,owner){
+  if(state.runtime.eventSource!==owner||state.runtime.sessionId!==state.active?.id)return;
+  if(envelope?.type!=="preview.state"||envelope.sessionId!==state.runtime.sessionId||!["source","target"].includes(envelope.slot)||!Number.isInteger(envelope.sequence)||!envelope.state)return;
+  const current=state.runtime[envelope.slot];
+  if(envelope.sequence<=(current?.latestSequence??0))return;
+  state.runtime[envelope.slot]={...envelope.state,latestSequence:envelope.sequence};
+  renderPreviewOnly(state.active,envelope.slot);
+}
+function applyTerminalOutput(envelope,owner){
+  if(state.runtime.eventSource!==owner||state.runtime.sessionId!==state.active?.id||!isTerminalEvent(envelope))return;
+  if(envelope.sequence<=state.runtime.latestSequence)return;
+  state.runtime.events=boundTerminalEvents([...state.runtime.events,envelope]);
+  state.runtime.latestSequence=envelope.sequence;
+  renderTerminalOnly(state.active);
+}
+function resetRuntime(sessionId=null){
+  if(state.runtime.eventSource){
+    state.runtime.eventSource.onmessage=null;
+    state.runtime.eventSource.close();
+  }
+  state.runtime.sessionId=sessionId;
+  state.runtime.source=null;
+  state.runtime.target=null;
+  state.runtime.events=[];
+  state.runtime.latestSequence=0;
+  state.runtime.filter="all";
+  state.runtime.eventSource=null;
+  state.runtime.requests.source+=1;
+  state.runtime.requests.target+=1;
+  state.runtime.pending={source:false,target:false};
+  state.runtime.refresh={source:0,target:0};
+}
+function previewDetails(session,slot){
+  const runtime=state.runtime.sessionId===session.id?state.runtime[slot]:null;
+  const fallbackUrl=slot==="source"?session.metadata.sourceUrl:session.metadata.targetUrl;
+  return runtime??{state:"loading",actualUrl:fallbackUrl??"about:blank",latestSequence:0};
+}
+function previewCardContent(session,slot){
+  const preview=previewDetails(session,slot);
+  const label=session.metadata[`${slot}Label`]??(slot==="source"?"Source":"Target");
+  const command=preview.config?.command?.join(" ")??"No preview service configured";
+  const cwd=preview.config?.cwd??".";
+  const pending=state.runtime.pending[slot];
+  const unavailable=preview.state==="unconfigured";
+  const active=["starting","running","stopping"].includes(preview.state);
+  const url=safePreviewUrl(preview.actualUrl);
+  const diagnostic=preview.diagnostic??preview.error?.message??"No runtime diagnostic.";
+  return `<div class="panel-title preview-card-title"><span>${escapeHtml(label)}</span><span class="preview-status state-${escapeHtml(preview.state)}" role="status" aria-live="polite" aria-label="${slot==="source"?"Source":"Target"} preview status">${escapeHtml(preview.state)}</span></div><div class="preview-card-meta"><code>${escapeHtml(command)}</code><small>cwd: ${escapeHtml(cwd)}</small><small>${escapeHtml(diagnostic)}</small><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div><div class="preview-actions"><button type="button" data-preview-action="start" data-slot="${slot}" aria-label="Start ${slot} preview" ${pending||active||unavailable?"disabled":""}>Start</button><button type="button" data-preview-action="stop" data-slot="${slot}" aria-label="Stop ${slot} preview" ${pending||!active?"disabled":""}>Stop</button><button type="button" data-preview-action="restart" data-slot="${slot}" aria-label="Restart ${slot} preview" ${pending||unavailable?"disabled":""}>Restart</button><button type="button" data-preview-action="refresh" data-slot="${slot}" aria-label="Refresh ${slot} preview" ${url==="about:blank"?"disabled":""}>Refresh</button></div><iframe class="preview" data-preview="${slot}" title="${escapeHtml(label)} preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(url)}"></iframe>`;
+}
+function previewCard(session,slot){
+  return `<section class="panel preview-card preview-${slot}" data-preview-card="${slot}">${previewCardContent(session,slot)}</section>`;
+}
+function renderPreviewOnly(session,slot){
+  const card=$("#migration-view").querySelector(`[data-preview-card="${slot}"]`);
+  if(!card){renderMigration(session);return;}
+  card.innerHTML=previewCardContent(session,slot);
+}
+function filteredTerminalEvents(session){
+  const filter=state.runtime.filter;
+  if(filter==="source")return state.runtime.events.filter((event)=>event.source==="preview:source");
+  if(filter==="target")return state.runtime.events.filter((event)=>event.source==="preview:target");
+  if(filter==="step")return state.runtime.events.filter((event)=>event.source===`step:${session.cursor}`);
+  return state.runtime.events;
+}
+function terminalPanelContent(session){
+  const events=filteredTerminalEvents(session);
+  const filters=[["all","All live output"],["source","Source preview"],["target","Target preview"],["step","Current step"]];
+  const lines=events.map((event)=>`<span class="terminal-line ${event.stream}"><span class="terminal-prefix">[${escapeHtml(event.source)}][${escapeHtml(event.stream)}]</span> ${escapeHtml(event.text)}</span>`).join("");
+  return `<div class="panel-title terminal-heading"><span>Live runtime output</span><span>${state.runtime.latestSequence?`SEQ ${state.runtime.latestSequence}`:"WAITING"}</span></div><div class="terminal-filters" role="group" aria-label="Filter live terminal output">${filters.map(([value,label])=>`<button type="button" data-terminal-filter="${value}" aria-pressed="${state.runtime.filter===value}">${label}</button>`).join("")}</div><div class="panel-body terminal" data-terminal-scroll><pre aria-label="Live runtime terminal output" aria-live="polite">${lines||"No live output for this filter."}</pre></div>`;
+}
+function terminalPanel(session){
+  return `<section class="panel live-terminal" data-runtime-terminal>${terminalPanelContent(session)}</section>`;
+}
+function renderTerminalOnly(session){
+  const panel=$("#migration-view").querySelector("[data-runtime-terminal]");
+  if(!panel){renderMigration(session);return;}
+  const scroll=panel.querySelector("[data-terminal-scroll]");
+  const priorTop=scroll?.scrollTop??0;
+  const follow=!scroll||scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<24;
+  panel.innerHTML=terminalPanelContent(session);
+  const next=panel.querySelector("[data-terminal-scroll]");
+  if(next)next.scrollTop=follow?next.scrollHeight:priorTop;
+}
 function renderMigration(session){
   const snapshot=session.currentSnapshot;
   const command=snapshot?.command;
-  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_"," "))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">Risk: ${escapeHtml(stepRisk(step))}</span></div><div class="step-meta"><span class="step-attempt">Attempt ${escapeHtml(stepAttempt(step))}</span></div><div class="step-dependencies"><strong>Depends on:</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):"none")}</div></div>`;}).join("")}</div></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.sourceLabel??"Source")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.sourceUrl))}"></iframe></section><section class="panel"><div class="panel-title">${escapeHtml(session.metadata.targetLabel??"Target")}</div><iframe class="preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(safePreviewUrl(session.metadata.targetUrl))}"></iframe></section><section class="panel"><div class="panel-title">Files & changes</div><div class="panel-body tree">${renderTree(snapshot)}</div></section><section class="panel"><div class="panel-title">Git diff</div><div class="panel-body"><pre>${escapeHtml(snapshot?.git?.diff||snapshot?.git?.status||"No Git diff at this checkpoint.")}</pre></div></section><section class="panel" style="grid-column:2/4"><div class="panel-title">Command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout)}${escapeHtml(command.stderr)}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
+  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_"," "))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">Risk: ${escapeHtml(stepRisk(step))}</span></div><div class="step-meta"><span class="step-attempt">Attempt ${escapeHtml(stepAttempt(step))}</span></div><div class="step-dependencies"><strong>Depends on:</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):"none")}</div></div>`;}).join("")}</div></section><div class="preview-workspace">${previewCard(session,"source")}${previewCard(session,"target")}${terminalPanel(session)}</div><section class="panel files-panel"><div class="panel-title">Files & changes</div><div class="panel-body tree">${renderTree(snapshot)}</div></section><section class="panel diff-panel"><div class="panel-title">Git diff</div><div class="panel-body"><pre>${escapeHtml(snapshot?.git?.diff||snapshot?.git?.status||"No Git diff at this checkpoint.")}</pre></div></section><section class="panel history-terminal"><div class="panel-title">Historical command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout)}${escapeHtml(command.stderr)}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
 }
 
 function isPristineMigration(session){
@@ -459,10 +587,52 @@ async function openSession(id){
   }
   if(request!==state.openSessionRequest)return;
   if(state.events){state.events.onmessage=null;state.events.close();}
+  resetRuntime(session.workbench==="migration"?session.id:null);
   renderSession(session);
   const sessionEvents=new EventSource(`/api/sessions/${id}/events`);
   state.events=sessionEvents;
-  sessionEvents.onmessage=(event)=>{if(state.events!==sessionEvents)return;const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
+  sessionEvents.onmessage=(event)=>{if(state.events!==sessionEvents)return;if(request<state.openSessionRequest)return;const session=JSON.parse(event.data);if(state.active?.id===session.id)renderSession(session);};
+  if(session.workbench!=="migration")return;
+  const runtimeEvents=new EventSource(`/api/sessions/${id}/runtime/events`);
+  state.runtime.eventSource=runtimeEvents;
+  runtimeEvents.onmessage=(event)=>{
+    if(state.runtime.eventSource!==runtimeEvents||request!==state.openSessionRequest)return;
+    let envelope;
+    try{envelope=JSON.parse(event.data);}catch{return;}
+    if(envelope?.type==="runtime.snapshot")applyRuntimeSnapshot(envelope,runtimeEvents);
+    else if(envelope?.type==="preview.state")applyPreviewState(envelope,runtimeEvents);
+    else if(envelope?.type==="terminal.output")applyTerminalOutput(envelope,runtimeEvents);
+  };
+}
+async function mutatePreview(slot,action){
+  const sessionId=state.runtime.sessionId;
+  if(state.active?.workbench!=="migration"||state.active.id!==sessionId||!["source","target"].includes(slot)||!["start","stop","restart"].includes(action)||state.runtime.pending[slot])return;
+  const request=++state.runtime.requests[slot];
+  const owner=state.runtime.eventSource;
+  const baseline=state.runtime[slot]?.latestSequence??0;
+  state.runtime.pending[slot]=true;
+  renderPreviewOnly(state.active,slot);
+  let preview;
+  let actionError;
+  try{preview=await api(`/api/sessions/${sessionId}/previews/${slot}/${action}`,{method:"POST",body:"{}"});}
+  catch(error){actionError=error;}
+  if(request!==state.runtime.requests[slot]||state.runtime.sessionId!==sessionId||state.runtime.eventSource!==owner)return;
+  state.runtime.pending[slot]=false;
+  if(actionError){alert(actionError.message);renderPreviewOnly(state.active,slot);return;}
+  const currentSequence=state.runtime[slot]?.latestSequence??0;
+  const responseSequence=preview?.latestSequence??0;
+  if(currentSequence<=baseline&&responseSequence>=currentSequence)state.runtime[slot]=preview;
+  renderPreviewOnly(state.active,slot);
+}
+function refreshPreview(slot){
+  if(!["source","target"].includes(slot)||state.active?.id!==state.runtime.sessionId)return;
+  const preview=state.runtime[slot];
+  const safe=safePreviewUrl(preview?.actualUrl);
+  if(safe==="about:blank")return;
+  const url=new URL(safe);
+  const token=++state.runtime.refresh[slot];
+  url.searchParams.set("_workbench_refresh",String(token));
+  $("#migration-view").querySelector(`[data-preview="${slot}"]`)?.setAttribute("src",url.href);
 }
 async function mutateActiveSession(path,body){
   const sessionId=state.active?.id;
@@ -622,6 +792,23 @@ $("#plan-editor-steps").onclick=(event)=>{
   else if(target.dataset.action==="add-argument")state.planEditor.draft=addCommandArgument(state.planEditor.draft,stepIndex);
   else if(target.dataset.action==="remove-argument")state.planEditor.draft=removeCommandArgument(state.planEditor.draft,stepIndex,Number(target.dataset.argumentIndex));
   renderPlanEditor();
+};
+
+$("#migration-view").onclick=async(event)=>{
+  const filter=event.target.closest("[data-terminal-filter]");
+  if(filter){
+    const value=filter.dataset.terminalFilter;
+    if(["all","source","target","step"].includes(value)){
+      state.runtime.filter=value;
+      if(state.active?.workbench==="migration")renderTerminalOnly(state.active);
+    }
+    return;
+  }
+  const control=event.target.closest("[data-preview-action]");
+  if(!control)return;
+  const {slot,previewAction:action}=control.dataset;
+  if(action==="refresh"){refreshPreview(slot);return;}
+  await mutatePreview(slot,action);
 };
 
 $("#logic-demo").onclick=()=>createExample("logic-trace").catch((error)=>alert(error.message));

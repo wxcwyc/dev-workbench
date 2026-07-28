@@ -210,6 +210,10 @@ export function installFakeBrowser(route = () => {
     close() {
       this.closed = true;
     }
+
+    emit(value) {
+      this.onmessage?.({ data: typeof value === "string" ? value : JSON.stringify(value) });
+    }
   };
 
   return {
