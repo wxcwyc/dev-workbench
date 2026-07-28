@@ -1238,6 +1238,63 @@ test("runtime SSE sends a snapshot followed by preview and terminal events and c
   assert.equal(terminal.sessions.get(created.body.id).listeners.size, 0);
 });
 
+test("runtime SSE buffers subscribed events until the initial snapshot is sent", async (t) => {
+  const terminal = new TerminalBuffer();
+  const previews = new FakePreviewSupervisor();
+  let snapshotStarted;
+  let releaseSnapshot;
+  const started = new Promise((resolve) => { snapshotStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseSnapshot = resolve; });
+  previews.snapshot = async () => {
+    snapshotStarted();
+    await blocked;
+    return structuredClone(previews.states);
+  };
+  t.after(() => releaseSnapshot());
+  const app = await startTestApp(t, { terminal, previews });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Ordered runtime",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const responsePromise = fetch(`${app.url}/api/sessions/${created.body.id}/runtime/events`, {
+    signal: abort.signal,
+  });
+  await withTimeout(started, "delayed runtime snapshot");
+
+  previews.publish(created.body.id, "source", { state: "running" });
+  const output = terminal.append(created.body.id, {
+    source: "preview:source",
+    stream: "stdout",
+    text: "during snapshot\n",
+  });
+  releaseSnapshot();
+
+  const response = await withTimeout(responsePromise, "ordered runtime SSE response");
+  const stream = createSseReader(response);
+  t.after(() => stream.cancel());
+  const initial = await withTimeout(stream.next(), "ordered runtime snapshot");
+  assert.equal(initial.type, "runtime.snapshot");
+  assert.deepEqual(await withTimeout(stream.next(), "buffered preview state"), {
+    type: "preview.state",
+    sessionId: created.body.id,
+    slot: "source",
+    state: { state: "running" },
+  });
+  assert.deepEqual(await withTimeout(stream.next(), "buffered terminal output"), output);
+  await stream.cancel();
+  abort.abort();
+  await waitForCondition(
+    () => !previews.listeners.has(created.body.id)
+      && terminal.sessions.get(created.body.id).listeners.size === 0,
+    "ordered runtime SSE cleanup",
+  );
+});
+
 test("preview lifecycle routes validate exact paths, media type, and empty object", async (t) => {
   const previews = new FakePreviewSupervisor();
   const app = await startTestApp(t, { previews, terminal: new TerminalBuffer() });

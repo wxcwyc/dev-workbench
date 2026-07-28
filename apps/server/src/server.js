@@ -278,8 +278,14 @@ export async function createApp(options = {}) {
         const session = await requireMigrationSession(runtimeEventMatch[1]);
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
         const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
-        const unsubscribePreview = previews.subscribe(session.id, send);
-        const unsubscribeTerminal = terminal.subscribe(session.id, send);
+        const pendingEvents = [];
+        let snapshotSent = false;
+        const sendIncremental = (value) => {
+          if (snapshotSent) send(value);
+          else pendingEvents.push(value);
+        };
+        const unsubscribePreview = previews.subscribe(session.id, sendIncremental);
+        const unsubscribeTerminal = terminal.subscribe(session.id, sendIncremental);
         const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), heartbeatIntervalMs);
         let cleanedUp = false;
         const cleanup = () => {
@@ -292,6 +298,9 @@ export async function createApp(options = {}) {
         response.once("close", cleanup);
         try {
           send({ type: "runtime.snapshot", ...await runtimeSnapshot(session) });
+          snapshotSent = true;
+          for (const event of pendingEvents) send(event);
+          pendingEvents.length = 0;
         } catch (error) {
           cleanup();
           throw error;
