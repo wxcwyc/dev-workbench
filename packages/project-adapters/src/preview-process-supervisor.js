@@ -69,7 +69,7 @@ export async function resolvePreviewConfig(session, slot) {
   assertOriginRelativePath(healthPath, "healthPath");
   assertOriginRelativePath(previewPath, "previewPath");
 
-  const cwd = await resolveCommandCwd(session.projectRoot, cwdCandidate);
+  const cwd = await resolveCommandCwd(session.workspace?.executionRoot ?? session.projectRoot, cwdCandidate);
   const origin = `http://127.0.0.1:${service.port}`;
   return {
     command: [...service.command],

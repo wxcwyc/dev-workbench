@@ -68,6 +68,20 @@ test("resolvePreviewConfig uses cwd and path defaults", async (context) => {
   assert.equal(config.actualUrl, "http://127.0.0.1:4102/");
 });
 
+test("resolvePreviewConfig resolves relative cwd from workspace.executionRoot when prepared", async (context) => {
+  const session = await projectSession(context);
+  const executionRoot = path.join(session.projectRoot, "managed");
+  await fs.mkdir(path.join(executionRoot, "nested"), { recursive: true });
+  session.workspace = {
+    executionRoot,
+  };
+  session.metadata.previewServices.source.cwd = "nested";
+
+  const config = await resolvePreviewConfig(session, "source");
+
+  assert.equal(config.cwd, path.join(executionRoot, "nested"));
+});
+
 test("resolvePreviewConfig reports unconfigured valid slots", async (context) => {
   const session = await projectSession(context);
 

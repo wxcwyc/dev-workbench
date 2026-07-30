@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { createApp } from "../apps/server/src/server.js";
 import { TerminalBuffer } from "../packages/execution-core/src/terminal-buffer.js";
+
+const execFileAsync = promisify(execFile);
 
 async function startTestApp(t, options = {}) {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-server-projects-"));
   const allowedRoot = path.join(temporaryRoot, "allowed");
   const stateRoot = path.join(temporaryRoot, "state", "sessions");
   await fs.mkdir(allowedRoot, { recursive: true });
+  const resolvedOptions = { ...options };
+  if (typeof options.workspaceRoot === "function") {
+    resolvedOptions.workspaceRoot = options.workspaceRoot({ temporaryRoot, allowedRoot, stateRoot });
+  }
 
   let server;
   t.after(async () => {
@@ -28,7 +36,7 @@ async function startTestApp(t, options = {}) {
     }
   });
 
-  server = await createApp({ allowedRoot, stateRoot, ...options });
+  server = await createApp({ allowedRoot, stateRoot, ...resolvedOptions });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -205,6 +213,73 @@ async function makeSampleProject(allowedRoot) {
   }));
   await fs.writeFile(path.join(sampleRoot, "src", "index.ts"), "export const ready = true;\n");
   return fs.realpath(sampleRoot);
+}
+
+async function git(cwd, ...args) {
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+async function makeGitMigrationProject(allowedRoot) {
+  const repositoryRoot = path.join(allowedRoot, "git-sample");
+  const projectRoot = path.join(repositoryRoot, "app");
+  await fs.mkdir(projectRoot, { recursive: true });
+  await git(repositoryRoot, "init", "--quiet");
+  await git(repositoryRoot, "config", "user.name", "Dev Workbench Test");
+  await git(repositoryRoot, "config", "user.email", "test@dev-workbench.invalid");
+  await fs.writeFile(path.join(repositoryRoot, ".gitignore"), "ignored.txt\n", "utf8");
+  await fs.writeFile(path.join(projectRoot, "keep.txt"), "before\n", "utf8");
+  await fs.mkdir(path.join(projectRoot, "nested"), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, "nested", "entry.txt"), "nested\n", "utf8");
+  await git(repositoryRoot, "add", ".");
+  await git(repositoryRoot, "commit", "--quiet", "-m", "initial");
+  return {
+    repositoryRoot: await fs.realpath(repositoryRoot),
+    projectRoot: await fs.realpath(projectRoot),
+  };
+}
+
+async function sourceFingerprint(repositoryRoot) {
+  return {
+    head: await git(repositoryRoot, "rev-parse", "HEAD"),
+    index: await fs.readFile(path.join(repositoryRoot, ".git", "index")),
+    status: await git(repositoryRoot, "status", "--porcelain=v2", "--untracked-files=all"),
+    keep: await fs.readFile(path.join(repositoryRoot, "app", "keep.txt")),
+  };
+}
+
+function createSampleWorkspaceAdapter() {
+  return {
+    async prepare({ projectRoot, workspaceRoot, sessionId, ownershipToken }) {
+      const canonicalProjectRoot = await fs.realpath(projectRoot);
+      await fs.mkdir(workspaceRoot, { recursive: true });
+      const worktreeRoot = path.join(workspaceRoot, sessionId);
+      await fs.mkdir(worktreeRoot, { recursive: true });
+      const executionRoot = await fs.realpath(worktreeRoot);
+      return {
+        sessionId,
+        projectRoot: canonicalProjectRoot,
+        repositoryRoot: canonicalProjectRoot,
+        projectRelativePath: ".",
+        commonGitDir: path.join(canonicalProjectRoot, ".git"),
+        worktreeRoot: executionRoot,
+        executionRoot,
+        baseOid: "a".repeat(40),
+        ownershipToken,
+        currentCheckpointId: "initial",
+      };
+    },
+    async validate() {},
+  };
+}
+
+async function prepareSessionWorkspace(app, sessionId) {
+  const prepared = await postJson(`${app.url}/api/sessions/${sessionId}/workspace/prepare`, {});
+  assert.equal(prepared.response.status, 200);
+  return prepared.body;
 }
 
 function trackSessionMutations(t, sessionId) {
@@ -564,6 +639,7 @@ test("PUT /api/sessions/:id/plan broadcasts the persisted full session over SSE"
 
 test("PUT /api/sessions/:id/plan rejects non-pristine sessions without changing stored state", async (t) => {
   const app = await startTestApp(t, {
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async () => { throw new Error("intentional command failure"); },
   });
   await makeSampleProject(app.allowedRoot);
@@ -594,6 +670,7 @@ test("PUT /api/sessions/:id/plan rejects non-pristine sessions without changing 
     steps: [{ title: "Fail", action: { command: ["never-run-for-test"] } }],
   });
   const failedUrl = `${app.url}/api/sessions/${failed.body.id}`;
+  await prepareSessionWorkspace(app, failed.body.id);
   assert.equal((await postJson(`${failedUrl}/steps/0/run`, { confirmed: true })).response.status, 400);
   cases.push({ name: "failed", url: failedUrl });
 
@@ -624,6 +701,7 @@ test("PUT /api/sessions/:id/plan returns 409 during an active operation and neve
   t.after(() => releaseCommand(commandResult));
   let runCalls = 0;
   const app = await startTestApp(t, {
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async () => {
       runCalls += 1;
       signalCommandStarted();
@@ -638,6 +716,7 @@ test("PUT /api/sessions/:id/plan returns 409 during an active operation and neve
     steps: [{ title: "Run", action: { command: ["deferred-test-command"] } }],
   });
   const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  await prepareSessionWorkspace(app, created.body.id);
   let runRequest;
   let runResult;
   try {
@@ -958,6 +1037,7 @@ test("dependency-blocked and out-of-order Migration runs do not mutate storage",
 test("high risk always requires confirmedRisk and commands additionally require confirmed before start", async (t) => {
   let commandCalls = 0;
   const app = await startTestApp(t, {
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async () => {
       commandCalls += 1;
       return { command: ["true"], stdout: "", stderr: "", exitCode: 0 };
@@ -985,6 +1065,7 @@ test("high risk always requires confirmedRisk and commands additionally require 
     steps: [{ title: "Command", risk: "high", action: { command: ["true"] } }],
   });
   const commandUrl = `${app.url}/api/sessions/${command.body.id}`;
+  await prepareSessionWorkspace(app, command.body.id);
   const commandBefore = await (await fetch(commandUrl)).json();
   const missingRisk = await postJson(`${commandUrl}/steps/0/run`, { confirmed: true });
   assert.equal(missingRisk.response.status, 400);
@@ -1002,6 +1083,320 @@ test("high risk always requires confirmedRisk and commands additionally require 
   });
   assert.equal(confirmed.response.status, 200);
   assert.equal(commandCalls, 1);
+});
+
+test("workspace preparation is migration-only, requires an exact empty object, and gates real actions and previews", async (t) => {
+  let runCalls = 0;
+  const previews = new FakePreviewSupervisor();
+  const app = await startTestApp(t, {
+    previews,
+    runCommand: async () => {
+      runCalls += 1;
+      return {
+        command: ["ignored"],
+        cwd: "/ignored",
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      };
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+
+  const migration = await postJson(`${app.url}/api/sessions`, {
+    title: "Prepare migration",
+    workbench: "migration",
+    projectRoot: "sample",
+    metadata: {
+      previewServices: {
+        source: { command: [process.execPath], port: 4101 },
+      },
+    },
+    steps: [
+      { title: "Trace only", traceState: { value: "ok" } },
+      { title: "Real action", action: { command: [process.execPath, "-e", ""], cwd: "." } },
+    ],
+  });
+  assert.equal(migration.response.status, 201);
+  const migrationUrl = `${app.url}/api/sessions/${migration.body.id}`;
+
+  for (const body of [null, [], { extra: true }]) {
+    const invalid = await postJson(`${migrationUrl}/workspace/prepare`, body);
+    assert.equal(invalid.response.status, 400);
+    assert.match(invalid.body.error, /empty object/i);
+  }
+
+  const trace = await postJson(`${migrationUrl}/steps/0/run`, {});
+  assert.equal(trace.response.status, 200);
+  assert.equal(trace.body.steps[0].status, "awaiting_review");
+
+  const preview = await postJson(`${migrationUrl}/previews/source/start`, {});
+  assert.equal(preview.response.status, 409);
+  assert.equal(preview.body.code, "workspace_required");
+  assert.deepEqual(previews.calls, []);
+
+  const reviewed = await postJson(`${migrationUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.steps[0].status, "completed");
+
+  const action = await postJson(`${migrationUrl}/steps/1/run`, { confirmed: true });
+  assert.equal(action.response.status, 409);
+  assert.equal(action.body.code, "workspace_required");
+  assert.equal(runCalls, 0);
+
+  const execution = await postJson(`${app.url}/api/sessions`, {
+    title: "Prepare execution",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const wrongWorkbench = await postJson(
+    `${app.url}/api/sessions/${execution.body.id}/workspace/prepare`,
+    {},
+  );
+  assert.equal(wrongWorkbench.response.status, 400);
+  assert.match(wrongWorkbench.body.error, /migration session/i);
+});
+
+test("workspace preparation persists once, emits once after save, and leaves the source repository unchanged", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Managed workspace",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Review" }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const mutations = trackSessionMutations(t, created.body.id);
+  const streamAbort = new AbortController();
+  t.after(() => streamAbort.abort());
+  const streamResponse = await fetch(`${sessionUrl}/events`, { signal: streamAbort.signal });
+  const stream = createSseReader(streamResponse);
+  t.after(() => stream.cancel());
+  await withTimeout(stream.next(), "initial prepared-workspace SSE session");
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+  const eventSession = await withTimeout(stream.next(), "prepared workspace SSE session");
+
+  assert.equal(prepared.response.status, 200);
+  assert.deepEqual(eventSession, prepared.body);
+  assert.deepEqual(mutations.operations(), ["save", "emit"]);
+  assert.equal(prepared.body.projectRoot, project.projectRoot);
+  assert.equal(prepared.body.workspace.projectRoot, project.projectRoot);
+  assert.equal(prepared.body.workspace.repositoryRoot, project.repositoryRoot);
+  assert.equal(prepared.body.workspace.projectRelativePath, "app");
+  assert.equal(
+    prepared.body.workspace.executionRoot,
+    path.join(prepared.body.workspace.worktreeRoot, "app"),
+  );
+  assert.equal(prepared.body.workspace.baseOid, fingerprintBefore.head);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), prepared.body);
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+  await stream.cancel();
+  streamAbort.abort();
+});
+
+test("workspace preparation reports structured dirty diagnostics and never mutates source or session state", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  await fs.writeFile(path.join(project.projectRoot, "keep.txt"), "dirty\n", "utf8");
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Dirty workspace",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const mutations = trackSessionMutations(t, created.body.id);
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+
+  assert.equal(prepared.response.status, 400);
+  assert.equal(prepared.body.code, "source_dirty");
+  assert.ok(prepared.body.details.some((item) => item.kind === "unstaged" && item.path === "app/keep.txt"));
+  assert.equal(mutations.counts().saves, 0);
+  assert.equal(mutations.counts().emits, 0);
+  assert.equal((await (await fetch(sessionUrl)).json()).workspace, null);
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+  assert.deepEqual(await fs.readdir(managedRoot), []);
+});
+
+test("workspace preparation rejects overlapping managed roots and only reuses an exactly valid existing workspace", async (t) => {
+  const overlapApp = await startTestApp(t, {
+    workspaceRoot: ({ allowedRoot }) => path.join(allowedRoot, "git-sample", "managed"),
+  });
+  await makeGitMigrationProject(overlapApp.allowedRoot);
+  const overlapSession = await postJson(`${overlapApp.url}/api/sessions`, {
+    title: "Overlap workspace",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [],
+  });
+  const overlapPrepare = await postJson(
+    `${overlapApp.url}/api/sessions/${overlapSession.body.id}/workspace/prepare`,
+    {},
+  );
+  assert.equal(overlapPrepare.response.status, 400);
+  assert.equal(overlapPrepare.body.code, "workspace_overlap");
+  assert.equal((await (await fetch(`${overlapApp.url}/api/sessions/${overlapSession.body.id}`)).json()).workspace, null);
+
+  let prepareCalls = 0;
+  let validateCalls = 0;
+  const fakeWorkspace = {
+    projectRoot: "/tmp/source/app",
+    repositoryRoot: "/tmp/source",
+    projectRelativePath: "app",
+    commonGitDir: "/tmp/source/.git",
+    worktreeRoot: "/tmp/managed/session-1",
+    executionRoot: "/tmp/managed/session-1/app",
+    baseOid: "a".repeat(40),
+    ownershipToken: "owner-1",
+    currentCheckpointId: "initial",
+  };
+  const app = await startTestApp(t, {
+    workspaceAdapter: {
+      prepare: async () => {
+        prepareCalls += 1;
+        return structuredClone(fakeWorkspace);
+      },
+      validate: async () => {
+        validateCalls += 1;
+      },
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Idempotent prepare",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const first = await postJson(`${sessionUrl}/workspace/prepare`, {});
+  const second = await postJson(`${sessionUrl}/workspace/prepare`, {});
+
+  assert.equal(first.response.status, 200);
+  assert.equal(second.response.status, 200);
+  assert.deepEqual(second.body, first.body);
+  assert.equal(prepareCalls, 1);
+  assert.equal(validateCalls, 1);
+});
+
+test("workspace preparation save failures do not publish or persist a prepared workspace", async (t) => {
+  const fakeWorkspace = {
+    projectRoot: "/tmp/source/app",
+    repositoryRoot: "/tmp/source",
+    projectRelativePath: "app",
+    commonGitDir: "/tmp/source/.git",
+    worktreeRoot: "/tmp/managed/session-1",
+    executionRoot: "/tmp/managed/session-1/app",
+    baseOid: "b".repeat(40),
+    ownershipToken: "owner-2",
+    currentCheckpointId: "initial",
+  };
+  const app = await startTestApp(t, {
+    workspaceAdapter: {
+      prepare: async () => structuredClone(fakeWorkspace),
+      validate: async () => {},
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Prepare save failure",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const streamAbort = new AbortController();
+  t.after(() => streamAbort.abort());
+  const streamResponse = await fetch(`${sessionUrl}/events`, { signal: streamAbort.signal });
+  const stream = createSseReader(streamResponse);
+  t.after(() => stream.cancel());
+  await withTimeout(stream.next(), "initial save-failure SSE session");
+
+  const originalRename = fs.rename;
+  fs.rename = async (...args) => {
+    if (path.basename(args[1]) === `${created.body.id}.json`) {
+      const error = new Error("simulated prepare save failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalRename(...args);
+  };
+  t.after(() => {
+    if (fs.rename !== originalRename) fs.rename = originalRename;
+  });
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+  const timedOut = await Promise.race([
+    stream.next().then(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(true), 150)),
+  ]);
+
+  assert.equal(prepared.response.status, 400);
+  assert.match(prepared.body.error, /simulated prepare save failure/i);
+  assert.equal(timedOut, true);
+  assert.equal((await (await fetch(sessionUrl)).json()).workspace, null);
+  await stream.cancel();
+  streamAbort.abort();
+});
+
+test("prepared migration actions execute and snapshot from workspace.executionRoot while source identity stays unchanged", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandRoot = null;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action) => {
+      commandRoot = root;
+      return {
+        command: action.command,
+        cwd: path.join(root, "nested"),
+        stdout: "ok\n",
+        stderr: "",
+        exitCode: 0,
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      };
+    },
+  });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Execution root run",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Run in workspace",
+      action: { command: [process.execPath, "-e", ""], cwd: "nested" },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+  assert.equal(prepared.response.status, 200);
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+
+  assert.equal(run.response.status, 200);
+  assert.equal(commandRoot, prepared.body.workspace.executionRoot);
+  assert.equal(run.body.projectRoot, project.projectRoot);
+  assert.equal(
+    run.body.currentSnapshot.command.cwd,
+    path.join(prepared.body.workspace.executionRoot, "nested"),
+  );
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
 });
 
 test("invalid review targets, state, media type, and workbench neither mutate nor publish", async (t) => {
@@ -1115,6 +1510,7 @@ test("run preserves the real post-completion persistence error and releases the 
   let failingRename;
   const sentinelMessage = "sentinel post-completion persistence failure";
   const appOptions = {
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async () => {
       const originalRename = fs.rename;
       const destination = path.join(app.stateRoot, `${sessionId}.json`);
@@ -1143,6 +1539,7 @@ test("run preserves the real post-completion persistence error and releases the 
   });
   sessionId = created.body.id;
   const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  await prepareSessionWorkspace(app, created.body.id);
 
   const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
 
@@ -1373,7 +1770,11 @@ test("runtime SSE replays buffered events captured after their snapshot cutoff",
 
 test("preview lifecycle routes validate exact paths, media type, and empty object", async (t) => {
   const previews = new FakePreviewSupervisor();
-  const app = await startTestApp(t, { previews, terminal: new TerminalBuffer() });
+  const app = await startTestApp(t, {
+    previews,
+    terminal: new TerminalBuffer(),
+    workspaceAdapter: createSampleWorkspaceAdapter(),
+  });
   await makeSampleProject(app.allowedRoot);
   const created = await postJson(`${app.url}/api/sessions`, {
     title: "Preview controls",
@@ -1381,6 +1782,7 @@ test("preview lifecycle routes validate exact paths, media type, and empty objec
     projectRoot: "sample",
     steps: [],
   });
+  await prepareSessionWorkspace(app, created.body.id);
   const base = `${app.url}/api/sessions/${created.body.id}/previews`;
 
   for (const [action, expectedCall] of [
@@ -1427,7 +1829,11 @@ test("preview supervisor conflict is returned while independent slots may overla
     }
     return previews.states[slot];
   };
-  const app = await startTestApp(t, { previews, terminal: new TerminalBuffer() });
+  const app = await startTestApp(t, {
+    previews,
+    terminal: new TerminalBuffer(),
+    workspaceAdapter: createSampleWorkspaceAdapter(),
+  });
   t.after(() => releaseSource());
   await makeSampleProject(app.allowedRoot);
   const created = await postJson(`${app.url}/api/sessions`, {
@@ -1436,6 +1842,7 @@ test("preview supervisor conflict is returned while independent slots may overla
     projectRoot: "sample",
     steps: [],
   });
+  await prepareSessionWorkspace(app, created.body.id);
   const base = `${app.url}/api/sessions/${created.body.id}/previews`;
   const first = postJson(`${base}/source/start`, {});
   await withTimeout(sourceClaimed, "source preview claim");
@@ -1459,6 +1866,7 @@ test("Migration command output streams to terminal and failed command evidence i
   const app = await startTestApp(t, {
     terminal,
     previews: new FakePreviewSupervisor(),
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async (_root, _action, options) => {
       options.onOutput({ stream: "stdout", text: "partial output\n" });
       options.onOutput({ stream: "stderr", text: "failure evidence\n" });
@@ -1474,6 +1882,7 @@ test("Migration command output streams to terminal and failed command evidence i
     projectRoot: "sample",
     steps: [{ title: "Fail", action: { command: ["failing-command"] } }],
   });
+  await prepareSessionWorkspace(app, created.body.id);
 
   const run = await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, {
     confirmed: true,
@@ -1502,6 +1911,7 @@ test("managed shutdown aborts steps, stops previews once, and delays close callb
   const app = await startTestApp(t, {
     previews,
     terminal: new TerminalBuffer(),
+    workspaceAdapter: createSampleWorkspaceAdapter(),
     runCommand: async (_root, action, { signal }) => {
       commandStarted();
       return new Promise((resolve, reject) => {
@@ -1531,6 +1941,7 @@ test("managed shutdown aborts steps, stops previews once, and delays close callb
     },
     steps: [{ title: "Long command", action: { command: ["long-command"] } }],
   });
+  await prepareSessionWorkspace(app, created.body.id);
   const run = postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, {
     confirmed: true,
   });

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -7,14 +8,15 @@ import { RecentProjectStore } from "../../../packages/execution-core/src/recent-
 import { SessionStore } from "../../../packages/execution-core/src/session-store.js";
 import { TerminalBuffer } from "../../../packages/execution-core/src/terminal-buffer.js";
 import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
-import { ProtocolValidationError, assertPlanInput, assertSessionInput, assertTraceEvent, publicSession } from "../../../packages/protocol/src/index.js";
-import { resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
+import { ProtocolValidationError, assertPlanInput, assertSessionInput, assertTraceEvent, assertWorkspace, publicSession } from "../../../packages/protocol/src/index.js";
+import { resolveCommandCwd, resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
+import { GitWorkspaceError, inspectGitRepository, prepareManagedWorkspace } from "../../../packages/project-adapters/src/git-adapter.js";
 import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
 import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
 import { PreviewProcessSupervisor } from "../../../packages/project-adapters/src/preview-process-supervisor.js";
 import { manifest as prologManifest, prologAdapter } from "../../../packages/prolog-adapter/src/index.js";
-import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot } from "./config.js";
+import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot, workspaceRoot } from "./config.js";
 
 const mimeTypes = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8" };
 
@@ -27,6 +29,25 @@ function rejectRequest(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   throw error;
+}
+
+function structuredError(message, statusCode, code, details) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.appCode = code;
+  if (details !== undefined) error.details = details;
+  return error;
+}
+
+function requireExactEmptyObject(body, message) {
+  if (
+    body === null
+    || Array.isArray(body)
+    || typeof body !== "object"
+    || Object.keys(body).length !== 0
+  ) {
+    throw new Error(message);
+  }
 }
 
 function validateRequestOrigin(request) {
@@ -111,15 +132,104 @@ function traceSteps(trace) {
   }));
 }
 
+function executionProjectRoot(session) {
+  return session.workspace?.executionRoot ?? session.projectRoot;
+}
+
+function checkpointRef(sessionId, attemptId, role) {
+  return `refs/dev-workbench/checkpoints/${sessionId}/${attemptId}/${role}`;
+}
+
+function currentCheckpointOid(session) {
+  const workspace = session.workspace;
+  if (!workspace || workspace.currentCheckpointId == null || workspace.currentCheckpointId === "initial") {
+    return workspace?.baseOid ?? null;
+  }
+  const priorAttempt = (session.attempts ?? []).find((attempt) => attempt.id === workspace.currentCheckpointId);
+  return priorAttempt?.result?.oid ?? workspace.baseOid;
+}
+
+function attemptIdentity(session) {
+  const oid = currentCheckpointOid(session);
+  const id = randomUUID();
+  return {
+    id,
+    baseline: {
+      oid,
+      ref: checkpointRef(session.id, id, "baseline"),
+    },
+  };
+}
+
+function resultIdentity(session, attemptIdValue) {
+  return {
+    oid: currentCheckpointOid(session),
+    ref: checkpointRef(session.id, attemptIdValue, "result"),
+  };
+}
+
+function normalizeWorkspace(workspace) {
+  const {
+    sessionId: _sessionId,
+    currentCheckpointId = "initial",
+    ...publicFields
+  } = workspace;
+  return assertWorkspace({
+    ...publicFields,
+    currentCheckpointId,
+  });
+}
+
+async function validatePreparedWorkspace(session, workspace) {
+  assertWorkspace(workspace);
+  const inspection = await inspectGitRepository(session.projectRoot);
+  const expectedExecutionRoot = await resolveCommandCwd(
+    workspace.worktreeRoot,
+    inspection.projectRelativePath,
+  );
+  const mismatches = [];
+  for (const [field, expected] of Object.entries({
+    projectRoot: inspection.projectRoot,
+    repositoryRoot: inspection.repositoryRoot,
+    projectRelativePath: inspection.projectRelativePath,
+    commonGitDir: inspection.commonGitDir,
+    baseOid: inspection.headOid,
+  })) {
+    if (workspace[field] !== expected) {
+      mismatches.push({ field, expected, actual: workspace[field] ?? null });
+    }
+  }
+  if (workspace.executionRoot !== expectedExecutionRoot) {
+    mismatches.push({
+      field: "executionRoot",
+      expected: expectedExecutionRoot,
+      actual: workspace.executionRoot ?? null,
+    });
+  }
+  if (mismatches.length > 0) {
+    throw structuredError(
+      "Prepared workspace is no longer valid for this source repository",
+      409,
+      "workspace_invalid",
+      mismatches,
+    );
+  }
+}
+
 export async function createApp(options = {}) {
   const runtime = {
     allowedRoot: options.allowedRoot ?? allowedRoot,
     stateRoot: options.stateRoot ?? stateRoot,
+    workspaceRoot: options.workspaceRoot ?? workspaceRoot,
     warn: options.warn ?? console.warn
   };
   const engine = new SessionEngine();
   const store = new SessionStore(runtime.stateRoot);
   const runCommand = options.runCommand ?? runConfirmedCommand;
+  const workspaceAdapter = options.workspaceAdapter ?? {
+    prepare: prepareManagedWorkspace,
+    validate: (session, preparedWorkspace) => validatePreparedWorkspace(session, preparedWorkspace),
+  };
   const terminal = options.terminal ?? new TerminalBuffer();
   const previews = options.previews ?? new PreviewProcessSupervisor({ terminal });
   const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
@@ -147,6 +257,12 @@ export async function createApp(options = {}) {
     const session = await requireSession(id);
     if (session.workbench !== "migration") rejectRequest("Preview runtime requires a Migration session", 400);
     return session;
+  };
+  const requirePreparedWorkspace = (session, message = "A prepared workspace is required for this operation") => {
+    if (session.workspace == null) {
+      throw structuredError(message, 409, "workspace_required");
+    }
+    return session.workspace;
   };
   const runtimeSnapshot = async (session) => ({
     ...await previews.snapshot(session),
@@ -239,6 +355,7 @@ export async function createApp(options = {}) {
       }
 
       const sessionMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)$/i);
+      const workspacePrepareMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/workspace\/prepare$/i);
       const planMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/plan$/i);
       if (request.method === "PUT" && planMatch) {
         const id = planMatch[1];
@@ -254,6 +371,45 @@ export async function createApp(options = {}) {
         } finally { release(); }
       }
       if (request.method === "GET" && sessionMatch) return sendJson(response, 200, publicSession(await requireSession(sessionMatch[1])));
+      if (request.method === "POST" && workspacePrepareMatch) {
+        const id = workspacePrepareMatch[1];
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "workspace" });
+          const body = await readJson(request);
+          requireExactEmptyObject(body, "Workspace prepare body must be an empty object");
+          const session = await requireMigrationSession(id);
+          if (session.workspace != null) {
+            await workspaceAdapter.validate(session, session.workspace);
+            return sendJson(response, 200, publicSession(session));
+          }
+          const previousWorkspace = session.workspace;
+          const previousEvents = session.events;
+          const previousUpdatedAt = session.updatedAt;
+          session.workspace = normalizeWorkspace(await workspaceAdapter.prepare({
+            projectRoot: session.projectRoot,
+            workspaceRoot: runtime.workspaceRoot,
+            sessionId: session.id,
+            ownershipToken: randomUUID(),
+          }));
+          session.events = [...session.events, {
+            id: randomUUID(),
+            type: "workspace.prepared",
+            at: new Date().toISOString(),
+          }];
+          session.updatedAt = new Date().toISOString();
+          try {
+            await store.save(session);
+          } catch (error) {
+            session.workspace = previousWorkspace;
+            session.events = previousEvents;
+            session.updatedAt = previousUpdatedAt;
+            throw error;
+          }
+          emit(session);
+          return sendJson(response, 200, publicSession(session));
+        } finally { release(); }
+      }
 
       const eventMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/events$/i);
       if (request.method === "GET" && eventMatch) {
@@ -340,15 +496,9 @@ export async function createApp(options = {}) {
         const slot = previewMatch[2];
         const action = previewMatch[3];
         const body = await readJson(request);
-        if (
-          body === null
-          || Array.isArray(body)
-          || typeof body !== "object"
-          || Object.keys(body).length !== 0
-        ) {
-          throw new Error("Preview lifecycle body must be an empty object");
-        }
+        requireExactEmptyObject(body, "Preview lifecycle body must be an empty object");
         const session = await requireMigrationSession(id);
+        requirePreparedWorkspace(session, "A prepared workspace is required before preview lifecycle actions");
         const result = action === "stop"
           ? await previews.stop(session.id, slot)
           : await previews[action](session, slot);
@@ -454,19 +604,26 @@ export async function createApp(options = {}) {
           const index = Number(runMatch[2]);
           if (index !== engine.nextRunnable(session)) throw new Error("Steps must run in plan order");
           const step = engine.requireStep(session, index);
+          const projectExecutionRoot = executionProjectRoot(session);
+          const runAttemptIdentity = step.action && session.workbench === "migration" && session.workspace != null
+            ? attemptIdentity(session)
+            : null;
+          if (step.action && session.workbench === "migration") {
+            requirePreparedWorkspace(session, "A prepared workspace is required before running migration actions");
+          }
           if (step.risk === "high" && body.confirmedRisk !== true) throw new Error("High-risk execution requires confirmedRisk=true");
           if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
           let baseline = null;
           try {
-            engine.startStep(session, index); await store.save(session); emit(session);
-            baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(session.projectRoot);
+            engine.startStep(session, index, runAttemptIdentity); await store.save(session); emit(session);
+            baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(projectExecutionRoot);
             let result = null;
             if (step.action) {
               const controller = new AbortController();
               activeStepControllers.set(id, controller);
               if (shuttingDown) controller.abort("shutdown");
               try {
-                result = await runCommand(session.projectRoot, step.action, {
+                result = await runCommand(projectExecutionRoot, step.action, {
                   signal: controller.signal,
                   onOutput: ({ stream, text }) => terminal.append(id, {
                     source: `step:${index}`,
@@ -478,21 +635,38 @@ export async function createApp(options = {}) {
                 if (activeStepControllers.get(id) === controller) activeStepControllers.delete(id);
               }
             }
-            const snapshot = step.traceState ? { trace: step.traceState } : await captureProjectSnapshot(session.projectRoot, baseline, result);
-            engine.completeStep(session, index, snapshot); await store.save(session); emit(session);
+            const snapshot = step.traceState
+              ? { trace: step.traceState }
+              : runAttemptIdentity
+                ? { files: [], command: result }
+                : await captureProjectSnapshot(projectExecutionRoot, baseline, result);
+            engine.completeStep(
+              session,
+              index,
+              snapshot,
+              runAttemptIdentity ? resultIdentity(session, runAttemptIdentity.id) : null,
+            );
+            await store.save(session); emit(session);
             return sendJson(response, 200, publicSession(session));
           } catch (error) {
             if (session.steps[index]?.status === "running") {
-              let snapshot = null;
-              if (error.result) {
+              let snapshot = runAttemptIdentity ? { files: [], command: error.result ?? null } : null;
+              if (error.result && !runAttemptIdentity) {
                 try {
-                  snapshot = await captureProjectSnapshot(session.projectRoot, baseline, error.result);
+                  snapshot = await captureProjectSnapshot(projectExecutionRoot, baseline, error.result);
                 } catch (snapshotError) {
                   runtime.warn(`Could not capture failed command snapshot for session ${id}: ${snapshotError.message}`);
                 }
               }
               try {
-                engine.failStep(session, index, error, snapshot); await store.save(session); emit(session);
+                engine.failStep(
+                  session,
+                  index,
+                  error,
+                  snapshot,
+                  runAttemptIdentity ? resultIdentity(session, runAttemptIdentity.id) : null,
+                );
+                await store.save(session); emit(session);
               } catch (failureError) {
                 runtime.warn(`Could not persist failed step for session ${id}: ${failureError.message}`);
               }
@@ -505,9 +679,16 @@ export async function createApp(options = {}) {
       if (request.method === "GET" && await serveStatic(response, pathname)) return;
       sendJson(response, 404, { error: "Not found" });
     } catch (error) {
-      const details = error instanceof ProtocolValidationError ? error.issues : undefined;
+      const details = error instanceof ProtocolValidationError
+        ? error.issues
+        : error instanceof GitWorkspaceError
+          ? error.diagnostics
+          : error.details;
+      const code = error.appCode ?? (error instanceof GitWorkspaceError ? error.code : undefined);
       sendJson(response, error.statusCode ?? 400, {
-        error: error.message, ...(details ? { details } : {}),
+        error: error.message,
+        ...(code ? { code } : {}),
+        ...(details ? { details } : {}),
         ...(Number.isInteger(error.accepted) ? { accepted: error.accepted } : {})
       });
     }
