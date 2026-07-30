@@ -4,6 +4,83 @@ import { SessionEngine } from "../packages/execution-core/src/session-engine.js"
 import { createTraceEvent } from "../packages/adapter-sdk/src/index.js";
 import { EVENT_TYPES, ProtocolValidationError, STEP_STATUSES } from "../packages/protocol/src/index.js";
 
+function checkpoint(sessionId, attemptId, role, oid, restorable = false) {
+  const identity = {
+    oid,
+    ref: `refs/dev-workbench/checkpoints/${sessionId}/${attemptId}/${role}`
+  };
+  if (role === "result") identity.restorable = restorable;
+  return identity;
+}
+
+function prepareWorkspace(session, currentCheckpointId = "initial") {
+  session.workspace = {
+    projectRoot: session.projectRoot,
+    repositoryRoot: session.projectRoot,
+    projectRelativePath: ".",
+    commonGitDir: `${session.projectRoot}/.git`,
+    worktreeRoot: `/tmp/dev-workbench/${session.id}`,
+    executionRoot: `/tmp/dev-workbench/${session.id}`,
+    baseOid: "f".repeat(40),
+    ownershipToken: "owner-1",
+    currentCheckpointId
+  };
+  return session.workspace;
+}
+
+function startMigrationAttempt(engine, session, stepIndex, { attemptId, baselineOid = "a".repeat(40) } = {}) {
+  const identity = {
+    id: attemptId ?? `attempt-${(session.steps[stepIndex].attempt ?? 0) + 1}`,
+    baseline: checkpoint(session.id, attemptId ?? `attempt-${(session.steps[stepIndex].attempt ?? 0) + 1}`, "baseline", baselineOid)
+  };
+  engine.startStep(session, stepIndex, identity);
+  return identity;
+}
+
+function completeMigrationAttempt(engine, session, stepIndex, {
+  attemptId,
+  resultOid = "b".repeat(40),
+  snapshot = { files: [] }
+} = {}) {
+  const id = attemptId ?? session.attempts.at(-1)?.id;
+  engine.completeStep(
+    session,
+    stepIndex,
+    snapshot,
+    checkpoint(session.id, id, "result", resultOid)
+  );
+}
+
+function failMigrationAttempt(engine, session, stepIndex, error, {
+  attemptId,
+  resultOid = "c".repeat(40),
+  snapshot = { files: [] }
+} = {}) {
+  const id = attemptId ?? session.attempts.at(-1)?.id;
+  engine.failStep(
+    session,
+    stepIndex,
+    error,
+    snapshot,
+    checkpoint(session.id, id, "result", resultOid)
+  );
+}
+
+function cancelMigrationAttempt(engine, session, stepIndex, attempt, {
+  attemptId,
+  resultOid = "d".repeat(40),
+  snapshot = { files: [] }
+} = {}) {
+  const id = attemptId ?? session.attempts.at(-1)?.id;
+  engine.cancelStep(
+    session,
+    stepIndex,
+    attempt,
+    snapshot,
+    checkpoint(session.id, id, "result", resultOid)
+  );
+}
+
 test("execution session records immutable checkpoints, seeks and annotations", () => {
   const engine = new SessionEngine();
   const session = engine.create({
@@ -32,13 +109,26 @@ test("execution session records immutable checkpoints, seeks and annotations", (
 test("migration steps must execute in a valid state", () => {
   const engine = new SessionEngine();
   const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example", steps: [{ title: "Initialize" }] });
-  engine.startStep(session, 0);
-  assert.throws(() => engine.startStep(session, 0), /cannot run/);
-  engine.failStep(session, 0, new Error("failed command"));
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  assert.throws(() => startMigrationAttempt(engine, session, 0, { attemptId: "attempt-2" }), /cannot run/);
+  failMigrationAttempt(engine, session, 0, new Error("failed command"), { attemptId: "attempt-1" });
   assert.equal(engine.nextRunnable(session), 0);
 });
 
-test("failed migration steps retain their command snapshot", () => {
+test("migration sessions create runtime-owned attempts and no prepared workspace", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+
+  assert.deepEqual(session.attempts, []);
+  assert.equal(session.workspace, null);
+});
+
+test("failed migration steps retain immutable attempt evidence and the latest step snapshot", () => {
   const engine = new SessionEngine();
   const session = engine.create({
     title: "Migration",
@@ -46,17 +136,27 @@ test("failed migration steps retain their command snapshot", () => {
     projectRoot: "/tmp/example",
     steps: [{ id: "install", title: "Install dependency" }]
   });
-  engine.startStep(session, 0);
+  const identity = startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   const beforeFailure = new Date().toISOString();
 
-  engine.failStep(session, 0, new Error("command failed"), {
-    command: ["npm", "install", "example"],
-    cwd: "/tmp/example"
+  failMigrationAttempt(engine, session, 0, new Error("command failed"), {
+    attemptId: identity.id,
+    snapshot: { files: [], command: { command: ["npm", "install", "example"], cwd: "/tmp/example" } }
   });
 
   assert.equal(session.steps[0].status, "failed");
   assert.deepEqual(session.steps[0].error, { name: "Error", message: "command failed" });
-  assert.deepEqual(session.snapshots[0].command, ["npm", "install", "example"]);
+  assert.equal(session.attempts.length, 1);
+  assert.equal(session.attempts[0].status, "failed");
+  assert.deepEqual(session.attempts[0].baseline, identity.baseline);
+  assert.deepEqual(session.attempts[0].snapshot.command, {
+    command: ["npm", "install", "example"],
+    cwd: "/tmp/example"
+  });
+  assert.deepEqual(session.snapshots[0].command, {
+    command: ["npm", "install", "example"],
+    cwd: "/tmp/example"
+  });
   assert.equal(session.snapshots[0].stepIndex, 0);
   assert.ok(session.snapshots[0].capturedAt >= beforeFailure);
   assert.equal(session.cursor, 0);
@@ -64,7 +164,7 @@ test("failed migration steps retain their command snapshot", () => {
   assert.equal(session.events.at(-1).type, "step.failed");
 });
 
-test("failStep without a snapshot preserves existing snapshots and cursor", () => {
+test("cancelStep requires exact attempt ownership and keeps rerunnable evidence", () => {
   const engine = new SessionEngine();
   const session = engine.create({
     title: "Migration",
@@ -72,19 +172,24 @@ test("failStep without a snapshot preserves existing snapshots and cursor", () =
     projectRoot: "/tmp/example",
     steps: [{ id: "install", title: "Install dependency" }]
   });
-  session.snapshots.push({ command: ["npm", "view", "example"], stepIndex: 0 });
-  session.cursor = 0;
-  engine.startStep(session, 0);
-  const snapshots = session.snapshots;
-  const beforeSnapshots = structuredClone(session.snapshots);
+  const identity = startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  const before = structuredClone(session);
 
-  engine.failStep(session, 0, new Error("command failed"));
+  assert.throws(
+    () => cancelMigrationAttempt(engine, session, 0, 2, { attemptId: identity.id }),
+    /attempt/i
+  );
+  assert.deepEqual(session, before);
 
-  assert.equal(session.steps[0].status, "failed");
-  assert.deepEqual(session.snapshots, beforeSnapshots);
-  assert.strictEqual(session.snapshots, snapshots);
-  assert.equal(session.cursor, 0);
-  assert.equal(session.events.at(-1).type, "step.failed");
+  cancelMigrationAttempt(engine, session, 0, 1, {
+    attemptId: identity.id,
+    snapshot: { files: [{ path: "src/app.js", oldPath: null, status: "modified", binary: false, additions: 1, deletions: 0 }] }
+  });
+
+  assert.equal(session.steps[0].status, "cancelled");
+  assert.equal(session.attempts[0].status, "cancelled");
+  assert.equal(engine.nextRunnable(session), 0);
+  assert.equal(session.events.at(-1).type, "step.cancelled");
 });
 
 test("streamed trace events append immutable snapshots in strict sequence", () => {
@@ -299,6 +404,8 @@ test("migration steps receive stable metadata and runtime defaults", () => {
   assert.equal(step.risk, "low");
   assert.deepEqual(step.dependsOn, []);
   assert.equal(step.attempt, 0);
+  assert.deepEqual(session.attempts, []);
+  assert.equal(session.workspace, null);
 });
 
 test("protocol constants expose migration review statuses and events", () => {
@@ -358,11 +465,13 @@ test("migration start enforces dependencies before incrementing attempt", () => 
   });
   const before = structuredClone(session);
 
-  assert.throws(() => engine.startStep(session, 1), /depend/i);
+  assert.throws(() => startMigrationAttempt(engine, session, 1, { attemptId: "attempt-1" }), /depend/i);
   assert.deepEqual(session, before);
 
-  engine.startStep(session, 0);
+  const identity = startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   assert.equal(session.steps[0].attempt, 1);
+  assert.equal(session.attempts[0].id, identity.id);
+  assert.deepEqual(session.attempts[0].baseline, identity.baseline);
   assert.deepEqual(
     {
       type: session.events.at(-1).type,
@@ -383,13 +492,34 @@ test("migration completion records a snapshot and waits for review", () => {
     steps: [{ id: "apply", title: "Apply" }]
   });
 
-  engine.startStep(session, 0);
-  engine.completeStep(session, 0, { files: ["package.json"] });
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    snapshot: {
+      files: [{
+        path: "package.json",
+        oldPath: null,
+        status: "modified",
+        binary: false,
+        additions: 1,
+        deletions: 0
+      }]
+    }
+  });
 
   assert.equal(session.steps[0].status, "awaiting_review");
   assert.equal(session.status, "awaiting_review");
   assert.equal(session.cursor, 0);
-  assert.deepEqual(session.snapshots[0].files, ["package.json"]);
+  assert.equal(session.attempts[0].status, "awaiting_review");
+  assert.equal(session.attempts[0].result.restorable, false);
+  assert.deepEqual(session.snapshots[0].files, [{
+    path: "package.json",
+    oldPath: null,
+    status: "modified",
+    binary: false,
+    additions: 1,
+    deletions: 0
+  }]);
   assert.deepEqual(
     {
       type: session.events.at(-1).type,
@@ -412,13 +542,21 @@ test("accepting migration reviews advances readiness and completes the final ste
       { id: "apply", title: "Apply", dependsOn: ["prepare"] }
     ]
   });
+  prepareWorkspace(session);
 
-  engine.startStep(session, 0);
-  engine.completeStep(session, 0, { files: ["first"] });
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    resultOid: "b".repeat(40),
+    snapshot: { files: [] }
+  });
   engine.reviewStep(session, 0, "accept");
 
   assert.equal(session.steps[0].status, "completed");
   assert.equal(session.steps[0].review.decision, "accept");
+  assert.equal(session.attempts[0].status, "completed");
+  assert.equal(session.attempts[0].result.restorable, true);
+  assert.equal(session.workspace.currentCheckpointId, "attempt-1");
   assert.equal(session.status, "ready");
   assert.equal(engine.nextRunnable(session), 1);
   assert.deepEqual(
@@ -431,15 +569,20 @@ test("accepting migration reviews advances readiness and completes the final ste
     { type: "step.review.accepted", stepIndex: 0, stepId: "prepare", attempt: 1 }
   );
 
-  engine.startStep(session, 1);
-  engine.completeStep(session, 1, { files: ["second"] });
+  startMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", baselineOid: "b".repeat(40) });
+  completeMigrationAttempt(engine, session, 1, {
+    attemptId: "attempt-2",
+    resultOid: "c".repeat(40),
+    snapshot: { files: [] }
+  });
   engine.reviewStep(session, 1, "accept");
 
   assert.equal(session.steps[1].status, "completed");
+  assert.equal(session.workspace.currentCheckpointId, "attempt-2");
   assert.equal(session.status, "completed");
 });
 
-test("rejecting a migration review allows a clean retry with a higher attempt", () => {
+test("rejecting and retrying migration reviews preserve immutable prior attempts", () => {
   const engine = new SessionEngine();
   const session = engine.create({
     title: "Migration",
@@ -447,13 +590,20 @@ test("rejecting a migration review allows a clean retry with a higher attempt", 
     projectRoot: "/tmp/example",
     steps: [{ id: "apply", title: "Apply" }]
   });
+  prepareWorkspace(session);
 
-  engine.startStep(session, 0);
-  engine.completeStep(session, 0, { revision: 1 });
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    resultOid: "b".repeat(40),
+    snapshot: { files: [] }
+  });
   engine.reviewStep(session, 0, "reject");
 
   assert.equal(session.steps[0].status, "failed");
   assert.equal(session.steps[0].review.decision, "reject");
+  assert.equal(session.attempts[0].status, "failed");
+  assert.equal(session.attempts[0].result.restorable, false);
   assert.equal(session.status, "failed");
   assert.equal(engine.nextRunnable(session), 0);
   assert.deepEqual(
@@ -466,11 +616,14 @@ test("rejecting a migration review allows a clean retry with a higher attempt", 
     { type: "step.review.rejected", stepIndex: 0, stepId: "apply", attempt: 1 }
   );
 
-  engine.startStep(session, 0);
+  const firstAttempt = structuredClone(session.attempts[0]);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-2", baselineOid: "a".repeat(40) });
 
   assert.equal(session.steps[0].attempt, 2);
   assert.equal(session.steps[0].review, null);
   assert.equal(session.steps[0].error, null);
+  assert.equal(session.attempts.length, 2);
+  assert.deepEqual(session.attempts[0], firstAttempt);
 });
 
 test("running and awaiting-review steps globally block migration readiness", () => {
@@ -485,16 +638,16 @@ test("running and awaiting-review steps globally block migration readiness", () 
     ]
   });
 
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   assert.equal(engine.nextRunnable(session), -1);
   const running = structuredClone(session);
-  assert.throws(() => engine.startStep(session, 1), /running|blocked/i);
+  assert.throws(() => startMigrationAttempt(engine, session, 1, { attemptId: "attempt-2" }), /running|blocked/i);
   assert.deepEqual(session, running);
 
-  engine.completeStep(session, 0, {});
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", snapshot: { files: [] } });
   assert.equal(engine.nextRunnable(session), -1);
   const awaitingReview = structuredClone(session);
-  assert.throws(() => engine.startStep(session, 1), /review|blocked/i);
+  assert.throws(() => startMigrationAttempt(engine, session, 1, { attemptId: "attempt-2" }), /review|blocked/i);
   assert.deepEqual(session, awaitingReview);
 });
 
@@ -525,8 +678,9 @@ test("failed migration transitions leave the session unchanged", () => {
   });
 
   for (const transition of [
-    () => engine.completeStep(session, 0, {}),
-    () => engine.failStep(session, 0, new Error("not running")),
+    () => engine.completeStep(session, 0, { files: [] }, checkpoint(session.id, "attempt-1", "result", "b".repeat(40))),
+    () => engine.failStep(session, 0, new Error("not running"), { files: [] }, checkpoint(session.id, "attempt-1", "result", "b".repeat(40))),
+    () => engine.cancelStep(session, 0, 1, { files: [] }, checkpoint(session.id, "attempt-1", "result", "b".repeat(40))),
     () => engine.reviewStep(session, 0, "accept"),
     () => engine.reviewStep(session, 0, "maybe")
   ]) {
@@ -560,12 +714,14 @@ test("legacy persisted migration steps are read without mutation and hydrated wh
   delete session.steps[0].dependsOn;
   delete session.steps[0].attempt;
   delete session.steps[0].review;
+  delete session.attempts;
+  delete session.workspace;
   const beforeReadiness = structuredClone(session);
 
   assert.equal(engine.nextRunnable(session), 0);
   assert.deepEqual(session, beforeReadiness);
 
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   assert.deepEqual(
     {
       risk: session.steps[0].risk,
@@ -583,12 +739,93 @@ test("legacy persisted migration steps are read without mutation and hydrated wh
     },
     { type: "step.started", stepId: "legacy-step", attempt: 1 }
   );
+  assert.equal(session.workspace, null);
+  assert.equal(session.attempts[0].id, "attempt-1");
 
-  engine.failStep(session, 0, new Error("legacy command failed"));
+  failMigrationAttempt(engine, session, 0, new Error("legacy command failed"), { attemptId: "attempt-1" });
   assert.equal(session.events.at(-1).attempt, 1);
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-2" });
   assert.equal(session.steps[0].attempt, 2);
   assert.equal(session.events.at(-1).attempt, 2);
+});
+
+test("restore resets only projections after the chosen accepted boundary and preserves history", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [
+      { id: "prepare", title: "Prepare" },
+      { id: "apply", title: "Apply", dependsOn: ["prepare"] },
+      { id: "verify", title: "Verify", dependsOn: ["apply"] }
+    ]
+  });
+  prepareWorkspace(session);
+
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", baselineOid: "a".repeat(40) });
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", resultOid: "b".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 0, "accept");
+  startMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", baselineOid: "b".repeat(40) });
+  completeMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", resultOid: "c".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 1, "accept");
+  startMigrationAttempt(engine, session, 2, { attemptId: "attempt-3", baselineOid: "c".repeat(40) });
+  failMigrationAttempt(engine, session, 2, new Error("verification failed"), {
+    attemptId: "attempt-3",
+    resultOid: "d".repeat(40),
+    snapshot: { files: [] }
+  });
+  const attemptsBeforeRestore = structuredClone(session.attempts);
+
+  engine.restore(session, "attempt-1");
+
+  assert.equal(session.workspace.currentCheckpointId, "attempt-1");
+  assert.equal(session.cursor, 0);
+  assert.equal(session.status, "ready");
+  assert.equal(session.steps[0].status, "completed");
+  assert.equal(session.steps[1].status, "pending");
+  assert.equal(session.steps[1].attempt, 0);
+  assert.equal(session.steps[1].review, null);
+  assert.equal(session.steps[2].status, "pending");
+  assert.equal(session.steps[2].attempt, 0);
+  assert.equal(session.snapshots[1], undefined);
+  assert.equal(session.snapshots[2], undefined);
+  assert.deepEqual(session.attempts, attemptsBeforeRestore);
+  assert.equal(engine.nextRunnable(session), 1);
+  assert.deepEqual(
+    {
+      type: session.events.at(-1).type,
+      checkpointId: session.events.at(-1).checkpointId,
+      stepIndex: session.events.at(-1).stepIndex
+    },
+    { type: "workspace.restored", checkpointId: "attempt-1", stepIndex: 0 }
+  );
+});
+
+test("restore to the initial boundary resets all migration projections without mutating history", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", snapshot: { files: [] } });
+  engine.reviewStep(session, 0, "accept");
+  const attemptsBeforeRestore = structuredClone(session.attempts);
+
+  engine.restore(session, "initial");
+
+  assert.equal(session.workspace.currentCheckpointId, "initial");
+  assert.equal(session.cursor, -1);
+  assert.equal(session.status, "ready");
+  assert.equal(session.steps[0].status, "pending");
+  assert.equal(session.steps[0].attempt, 0);
+  assert.equal(session.snapshots[0], undefined);
+  assert.deepEqual(session.attempts, attemptsBeforeRestore);
+  assert.equal(engine.nextRunnable(session), 0);
 });
 
 test("completeStep is atomic when reading the snapshot throws", () => {
@@ -599,11 +836,13 @@ test("completeStep is atomic when reading the snapshot throws", () => {
     projectRoot: "/tmp/example",
     steps: [{ id: "apply", title: "Apply" }]
   });
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   const refs = {
     steps: session.steps,
     step: session.steps[0],
     snapshots: session.snapshots,
+    attempts: session.attempts,
+    attempt: session.attempts[0],
     events: session.events,
     review: session.steps[0].review
   };
@@ -616,15 +855,20 @@ test("completeStep is atomic when reading the snapshot throws", () => {
     }
   });
 
-  assert.throws(() => engine.completeStep(session, 0, snapshot), /snapshot getter failed/);
+  assert.throws(
+    () => engine.completeStep(session, 0, snapshot, checkpoint(session.id, "attempt-1", "result", "b".repeat(40))),
+    /snapshot getter failed/
+  );
   assert.deepEqual(session, before);
   assert.strictEqual(session.steps, refs.steps);
   assert.strictEqual(session.steps[0], refs.step);
   assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.attempts, refs.attempts);
+  assert.strictEqual(session.attempts[0], refs.attempt);
   assert.strictEqual(session.events, refs.events);
   assert.strictEqual(session.steps[0].review, refs.review);
 
-  engine.failStep(session, 0, new Error("snapshot capture failed"));
+  failMigrationAttempt(engine, session, 0, new Error("snapshot capture failed"), { attemptId: "attempt-1" });
   assert.equal(session.steps[0].status, "failed");
 });
 
@@ -636,11 +880,13 @@ test("failStep is atomic when reading the snapshot throws", () => {
     projectRoot: "/tmp/example",
     steps: [{ id: "apply", title: "Apply" }]
   });
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   const refs = {
     steps: session.steps,
     step: session.steps[0],
     snapshots: session.snapshots,
+    attempts: session.attempts,
+    attempt: session.attempts[0],
     events: session.events
   };
   const before = structuredClone(session);
@@ -653,31 +899,40 @@ test("failStep is atomic when reading the snapshot throws", () => {
   });
 
   assert.throws(
-    () => engine.failStep(session, 0, new Error("command failed"), snapshot),
+    () => engine.failStep(
+      session,
+      0,
+      new Error("command failed"),
+      snapshot,
+      checkpoint(session.id, "attempt-1", "result", "b".repeat(40))
+    ),
     /snapshot getter failed/
   );
   assert.deepEqual(session, before);
   assert.strictEqual(session.steps, refs.steps);
   assert.strictEqual(session.steps[0], refs.step);
   assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.attempts, refs.attempts);
+  assert.strictEqual(session.attempts[0], refs.attempt);
   assert.strictEqual(session.events, refs.events);
 });
 
 test("completeStep is atomic when its public result cannot be cloned", () => {
   const engine = new SessionEngine();
-  const metadata = { callback() {} };
   const session = engine.create({
     title: "Migration",
     workbench: "migration",
     projectRoot: "/tmp/example",
-    metadata,
     steps: [{ id: "apply", title: "Apply" }]
   });
-  engine.startStep(session, 0);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  session.metadata = { callback() {} };
   const refs = {
     steps: session.steps,
     step: session.steps[0],
     snapshots: session.snapshots,
+    attempts: session.attempts,
+    attempt: session.attempts[0],
     events: session.events,
     metadata: session.metadata,
     review: session.steps[0].review
@@ -691,7 +946,15 @@ test("completeStep is atomic when its public result cannot be cloned", () => {
     updatedAt: session.updatedAt
   };
 
-  assert.throws(() => engine.completeStep(session, 0, { files: ["package.json"] }), /clone/i);
+  assert.throws(
+    () => engine.completeStep(
+      session,
+      0,
+      { files: [{ path: "package.json", oldPath: null, status: "modified", binary: false, additions: 1, deletions: 0 }] },
+      checkpoint(session.id, "attempt-1", "result", "b".repeat(40))
+    ),
+    /clone/i
+  );
   assert.deepEqual(session.steps[0], before.step);
   assert.deepEqual(session.snapshots, before.snapshots);
   assert.deepEqual(session.events, before.events);
@@ -701,6 +964,8 @@ test("completeStep is atomic when its public result cannot be cloned", () => {
   assert.strictEqual(session.steps, refs.steps);
   assert.strictEqual(session.steps[0], refs.step);
   assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.attempts, refs.attempts);
+  assert.strictEqual(session.attempts[0], refs.attempt);
   assert.strictEqual(session.events, refs.events);
   assert.strictEqual(session.metadata, refs.metadata);
   assert.strictEqual(session.steps[0].review, refs.review);
@@ -714,14 +979,21 @@ test("reviewStep is atomic when its public result cannot be cloned", () => {
     projectRoot: "/tmp/example",
     steps: [{ id: "apply", title: "Apply" }]
   });
-  engine.startStep(session, 0);
-  engine.completeStep(session, 0, { files: ["package.json"] });
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    snapshot: {
+      files: [{ path: "package.json", oldPath: null, status: "modified", binary: false, additions: 1, deletions: 0 }]
+    }
+  });
   session.metadata = { callback() {} };
   const refs = {
     steps: session.steps,
     step: session.steps[0],
     snapshots: session.snapshots,
     snapshot: session.snapshots[0],
+    attempts: session.attempts,
+    attempt: session.attempts[0],
     events: session.events,
     metadata: session.metadata,
     review: session.steps[0].review
@@ -746,26 +1018,72 @@ test("reviewStep is atomic when its public result cannot be cloned", () => {
   assert.strictEqual(session.steps[0], refs.step);
   assert.strictEqual(session.snapshots, refs.snapshots);
   assert.strictEqual(session.snapshots[0], refs.snapshot);
+  assert.strictEqual(session.attempts, refs.attempts);
+  assert.strictEqual(session.attempts[0], refs.attempt);
   assert.strictEqual(session.events, refs.events);
   assert.strictEqual(session.metadata, refs.metadata);
   assert.strictEqual(session.steps[0].review, refs.review);
 });
 
-test("failStep is atomic when its public result cannot be cloned", () => {
+test("startStep is atomic when its public result cannot be cloned", () => {
   const engine = new SessionEngine();
-  const metadata = { callback() {} };
   const session = engine.create({
     title: "Migration",
     workbench: "migration",
     projectRoot: "/tmp/example",
-    metadata,
     steps: [{ id: "apply", title: "Apply" }]
   });
-  engine.startStep(session, 0);
+  session.metadata = { callback() {} };
   const refs = {
     steps: session.steps,
     step: session.steps[0],
     snapshots: session.snapshots,
+    events: session.events,
+    metadata: session.metadata,
+    attempts: session.attempts
+  };
+  const before = structuredClone({
+    step: session.steps[0],
+    snapshots: session.snapshots,
+    events: session.events,
+    status: session.status,
+    cursor: session.cursor,
+    updatedAt: session.updatedAt,
+    attempts: session.attempts
+  });
+
+  assert.throws(() => startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" }), /clone/i);
+  assert.deepEqual(session.steps[0], before.step);
+  assert.deepEqual(session.snapshots, before.snapshots);
+  assert.deepEqual(session.events, before.events);
+  assert.equal(session.status, before.status);
+  assert.equal(session.cursor, before.cursor);
+  assert.equal(session.updatedAt, before.updatedAt);
+  assert.deepEqual(session.attempts, before.attempts);
+  assert.strictEqual(session.steps, refs.steps);
+  assert.strictEqual(session.steps[0], refs.step);
+  assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.events, refs.events);
+  assert.strictEqual(session.metadata, refs.metadata);
+  assert.strictEqual(session.attempts, refs.attempts);
+});
+
+test("failStep is atomic when its public result cannot be cloned", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  session.metadata = { callback() {} };
+  const refs = {
+    steps: session.steps,
+    step: session.steps[0],
+    snapshots: session.snapshots,
+    attempts: session.attempts,
+    attempt: session.attempts[0],
     events: session.events,
     metadata: session.metadata
   };
@@ -783,7 +1101,8 @@ test("failStep is atomic when its public result cannot be cloned", () => {
       session,
       0,
       new Error("command failed"),
-      { command: ["npm", "install", "example"], cwd: "/tmp/example" }
+      { files: [], command: { command: ["npm", "install", "example"], cwd: "/tmp/example" } },
+      checkpoint(session.id, "attempt-1", "result", "b".repeat(40))
     ),
     /clone/i
   );
@@ -796,6 +1115,8 @@ test("failStep is atomic when its public result cannot be cloned", () => {
   assert.strictEqual(session.steps, refs.steps);
   assert.strictEqual(session.steps[0], refs.step);
   assert.strictEqual(session.snapshots, refs.snapshots);
+  assert.strictEqual(session.attempts, refs.attempts);
+  assert.strictEqual(session.attempts[0], refs.attempt);
   assert.strictEqual(session.events, refs.events);
   assert.strictEqual(session.metadata, refs.metadata);
 });
