@@ -136,6 +136,7 @@ test("failed migration steps retain immutable attempt evidence and the latest st
     projectRoot: "/tmp/example",
     steps: [{ id: "install", title: "Install dependency" }]
   });
+  prepareWorkspace(session);
   const identity = startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   const beforeFailure = new Date().toISOString();
 
@@ -172,6 +173,7 @@ test("cancelStep requires exact attempt ownership and keeps rerunnable evidence"
     projectRoot: "/tmp/example",
     steps: [{ id: "install", title: "Install dependency" }]
   });
+  prepareWorkspace(session);
   const identity = startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   const before = structuredClone(session);
 
@@ -463,6 +465,7 @@ test("migration start enforces dependencies before incrementing attempt", () => 
       { id: "apply", title: "Apply", dependsOn: ["prepare"] }
     ]
   });
+  prepareWorkspace(session);
   const before = structuredClone(session);
 
   assert.throws(() => startMigrationAttempt(engine, session, 1, { attemptId: "attempt-1" }), /depend/i);
@@ -491,6 +494,7 @@ test("migration completion records a snapshot and waits for review", () => {
     projectRoot: "/tmp/example",
     steps: [{ id: "apply", title: "Apply" }]
   });
+  prepareWorkspace(session);
 
   startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   completeMigrationAttempt(engine, session, 0, {
@@ -721,7 +725,7 @@ test("legacy persisted migration steps are read without mutation and hydrated wh
   assert.equal(engine.nextRunnable(session), 0);
   assert.deepEqual(session, beforeReadiness);
 
-  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  engine.startStep(session, 0);
   assert.deepEqual(
     {
       risk: session.steps[0].risk,
@@ -739,17 +743,56 @@ test("legacy persisted migration steps are read without mutation and hydrated wh
     },
     { type: "step.started", stepId: "legacy-step", attempt: 1 }
   );
-  assert.equal(session.workspace, null);
-  assert.equal(session.attempts[0].id, "attempt-1");
+  assert.equal(session.workspace, undefined);
+  assert.equal(session.attempts, undefined);
 
-  failMigrationAttempt(engine, session, 0, new Error("legacy command failed"), { attemptId: "attempt-1" });
+  engine.failStep(session, 0, new Error("legacy command failed"), { files: [] });
   assert.equal(session.events.at(-1).attempt, 1);
-  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-2" });
+  engine.startStep(session, 0);
   assert.equal(session.steps[0].attempt, 2);
   assert.equal(session.events.at(-1).attempt, 2);
 });
 
-test("restore resets only projections after the chosen accepted boundary and preserves history", () => {
+test("legacy migration sessions remain compatible with old start-complete-review and start-fail signatures", () => {
+  const engine = new SessionEngine();
+  const accepted = engine.create({
+    title: "Legacy Accepted",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+
+  engine.startStep(accepted, 0);
+  engine.completeStep(accepted, 0, { files: [] });
+  engine.reviewStep(accepted, 0, "accept");
+
+  assert.equal(accepted.workspace, null);
+  assert.deepEqual(accepted.attempts, []);
+  assert.equal(accepted.steps[0].status, "completed");
+  assert.equal(accepted.steps[0].attempt, 1);
+  assert.equal(accepted.steps[0].review.decision, "accept");
+  assert.ok(accepted.steps[0].review.reviewedAt >= accepted.steps[0].completedAt);
+  assert.equal(accepted.status, "completed");
+
+  const failed = engine.create({
+    title: "Legacy Failed",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+
+  engine.startStep(failed, 0);
+  engine.failStep(failed, 0, new Error("legacy failure"), { files: [] });
+
+  assert.equal(failed.workspace, null);
+  assert.deepEqual(failed.attempts, []);
+  assert.equal(failed.steps[0].status, "failed");
+  assert.equal(failed.steps[0].attempt, 1);
+  assert.deepEqual(failed.steps[0].error, { name: "Error", message: "legacy failure" });
+  assert.equal(failed.status, "failed");
+});
+
+test("restore preserves historical snapshots while resetting only downstream projections", () => {
   const engine = new SessionEngine();
   const session = engine.create({
     title: "Migration",
@@ -775,6 +818,7 @@ test("restore resets only projections after the chosen accepted boundary and pre
     resultOid: "d".repeat(40),
     snapshot: { files: [] }
   });
+  const snapshotsBeforeRestore = structuredClone(session.snapshots);
   const attemptsBeforeRestore = structuredClone(session.attempts);
 
   engine.restore(session, "attempt-1");
@@ -784,12 +828,11 @@ test("restore resets only projections after the chosen accepted boundary and pre
   assert.equal(session.status, "ready");
   assert.equal(session.steps[0].status, "completed");
   assert.equal(session.steps[1].status, "pending");
-  assert.equal(session.steps[1].attempt, 0);
+  assert.equal(session.steps[1].attempt, 1);
   assert.equal(session.steps[1].review, null);
   assert.equal(session.steps[2].status, "pending");
-  assert.equal(session.steps[2].attempt, 0);
-  assert.equal(session.snapshots[1], undefined);
-  assert.equal(session.snapshots[2], undefined);
+  assert.equal(session.steps[2].attempt, 1);
+  assert.deepEqual(session.snapshots, snapshotsBeforeRestore);
   assert.deepEqual(session.attempts, attemptsBeforeRestore);
   assert.equal(engine.nextRunnable(session), 1);
   assert.deepEqual(
@@ -802,7 +845,112 @@ test("restore resets only projections after the chosen accepted boundary and pre
   );
 });
 
-test("restore to the initial boundary resets all migration projections without mutating history", () => {
+test("restore can rebuild accepted projections after moving backward and then forward", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [
+      { id: "prepare", title: "Prepare" },
+      { id: "apply", title: "Apply", dependsOn: ["prepare"] }
+    ]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", baselineOid: "a".repeat(40) });
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", resultOid: "b".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 0, "accept");
+  const firstReview = session.steps[0].review.reviewedAt;
+  const firstStartedAt = session.steps[0].startedAt;
+  const firstCompletedAt = session.steps[0].completedAt;
+
+  startMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", baselineOid: "b".repeat(40) });
+  completeMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", resultOid: "c".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 1, "accept");
+  const secondReview = session.steps[1].review.reviewedAt;
+  const secondStartedAt = session.steps[1].startedAt;
+  const secondCompletedAt = session.steps[1].completedAt;
+
+  engine.restore(session, "attempt-1");
+  assert.equal(session.steps[1].status, "pending");
+  assert.equal(session.steps[1].review, null);
+
+  engine.restore(session, "attempt-2");
+
+  assert.equal(session.cursor, 1);
+  assert.equal(session.status, "completed");
+  assert.equal(session.workspace.currentCheckpointId, "attempt-2");
+  assert.deepEqual(
+    {
+      status: session.steps[0].status,
+      attempt: session.steps[0].attempt,
+      startedAt: session.steps[0].startedAt,
+      completedAt: session.steps[0].completedAt,
+      review: session.steps[0].review.reviewedAt
+    },
+    {
+      status: "completed",
+      attempt: 1,
+      startedAt: firstStartedAt,
+      completedAt: firstCompletedAt,
+      review: firstReview
+    }
+  );
+  assert.deepEqual(
+    {
+      status: session.steps[1].status,
+      attempt: session.steps[1].attempt,
+      startedAt: session.steps[1].startedAt,
+      completedAt: session.steps[1].completedAt,
+      review: session.steps[1].review.reviewedAt
+    },
+    {
+      status: "completed",
+      attempt: 1,
+      startedAt: secondStartedAt,
+      completedAt: secondCompletedAt,
+      review: secondReview
+    }
+  );
+});
+
+test("restore preserves max historical attempt count so reruns stay monotonic", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(session);
+
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", baselineOid: "a".repeat(40) });
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", resultOid: "b".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 0, "reject");
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-2", baselineOid: "a".repeat(40) });
+  completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-2", resultOid: "c".repeat(40), snapshot: { files: [] } });
+  engine.reviewStep(session, 0, "accept");
+
+  engine.restore(session, "initial");
+
+  assert.equal(session.steps[0].status, "pending");
+  assert.equal(session.steps[0].attempt, 2);
+
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-3", baselineOid: "a".repeat(40) });
+
+  assert.equal(session.steps[0].attempt, 3);
+  assert.equal(session.attempts.length, 3);
+  assert.deepEqual(
+    session.attempts.map(({ stepIndex, attempt, id }) => ({ stepIndex, attempt, id })),
+    [
+      { stepIndex: 0, attempt: 1, id: "attempt-1" },
+      { stepIndex: 0, attempt: 2, id: "attempt-2" },
+      { stepIndex: 0, attempt: 3, id: "attempt-3" }
+    ]
+  );
+});
+
+test("restore to the initial boundary resets projections without mutating history", () => {
   const engine = new SessionEngine();
   const session = engine.create({
     title: "Migration",
@@ -814,6 +962,7 @@ test("restore to the initial boundary resets all migration projections without m
   startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
   completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", snapshot: { files: [] } });
   engine.reviewStep(session, 0, "accept");
+  const snapshotsBeforeRestore = structuredClone(session.snapshots);
   const attemptsBeforeRestore = structuredClone(session.attempts);
 
   engine.restore(session, "initial");
@@ -822,8 +971,8 @@ test("restore to the initial boundary resets all migration projections without m
   assert.equal(session.cursor, -1);
   assert.equal(session.status, "ready");
   assert.equal(session.steps[0].status, "pending");
-  assert.equal(session.steps[0].attempt, 0);
-  assert.equal(session.snapshots[0], undefined);
+  assert.equal(session.steps[0].attempt, 1);
+  assert.deepEqual(session.snapshots, snapshotsBeforeRestore);
   assert.deepEqual(session.attempts, attemptsBeforeRestore);
   assert.equal(engine.nextRunnable(session), 0);
 });

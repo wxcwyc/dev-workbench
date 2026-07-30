@@ -38,6 +38,10 @@ function isMigration(session) {
   return session.workbench === "migration";
 }
 
+function hasPreparedWorkspace(session) {
+  return isMigration(session) && migrationRuntime(session).workspace != null;
+}
+
 function migrationRuntime(session) {
   return {
     attempts: session.attempts ?? [],
@@ -74,7 +78,52 @@ function updatedWorkspace(workspace, currentCheckpointId) {
   });
 }
 
-function pendingProjection(step) {
+function maxHistoricalAttempt(attempts, stepIndex) {
+  let max = 0;
+  for (const attempt of attempts) {
+    if (attempt.stepIndex === stepIndex && attempt.attempt > max) max = attempt.attempt;
+  }
+  return max;
+}
+
+function acceptedReviewAt(events, stepIndex, attempt) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const entry = events[index];
+    if (
+      entry.type === "step.review.accepted"
+      && entry.stepIndex === stepIndex
+      && entry.attempt === attempt
+    ) {
+      return entry.at;
+    }
+  }
+  return null;
+}
+
+function restoredAcceptedAttempt(attempts, stepIndex, boundaryAttemptIndex) {
+  for (let index = boundaryAttemptIndex; index >= 0; index -= 1) {
+    const attempt = attempts[index];
+    if (attempt.stepIndex === stepIndex && attempt.status === "completed") return attempt;
+  }
+  return null;
+}
+
+function completedProjection(step, attempt, reviewedAt) {
+  const runtime = runtimeStepFields(step);
+  return {
+    ...step,
+    risk: runtime.risk,
+    dependsOn: structuredClone(runtime.dependsOn),
+    status: "completed",
+    startedAt: attempt.startedAt,
+    completedAt: attempt.completedAt,
+    error: null,
+    review: { decision: "accept", reviewedAt },
+    attempt: attempt.attempt
+  };
+}
+
+function pendingProjection(step, attempt = 0) {
   const runtime = runtimeStepFields(step);
   return {
     ...step,
@@ -85,7 +134,7 @@ function pendingProjection(step) {
     completedAt: null,
     error: null,
     review: null,
-    attempt: 0
+    attempt
   };
 }
 
@@ -234,7 +283,7 @@ export class SessionEngine {
     const events = [...session.events, event("step.started", { stepIndex: index, stepId: step.id, attempt })];
     const updatedAt = timestamp();
 
-    if (!isMigration(session)) {
+    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
       const candidate = {
         ...session,
         steps,
@@ -288,18 +337,28 @@ export class SessionEngine {
     const snapshots = session.snapshots.slice();
     snapshots[index] = capturedSnapshot;
 
-    if (!isMigration(session)) {
-      const candidateStep = { ...step, status: "completed", completedAt };
+    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
+      const requiresReview = isMigration(session);
+      const candidateStep = {
+        ...step,
+        status: requiresReview ? "awaiting_review" : "completed",
+        completedAt
+      };
       steps[index] = candidateStep;
       const candidate = {
         ...session,
         steps,
         snapshots,
         cursor: index,
-        status: steps.every((item) => ["completed", "skipped"].includes(item.status)) ? "completed" : "ready",
+        status: requiresReview
+          ? "awaiting_review"
+          : (steps.every((item) => ["completed", "skipped"].includes(item.status)) ? "completed" : "ready"),
         events: [
           ...session.events,
-          event("step.completed", { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt })
+          event(
+            requiresReview ? "step.awaiting_review" : "step.completed",
+            { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+          )
         ],
         updatedAt: timestamp()
       };
@@ -352,7 +411,7 @@ export class SessionEngine {
     const steps = session.steps.slice();
     steps[index] = candidateStep;
 
-    if (!isMigration(session)) {
+    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
       let snapshots;
       if (snapshot !== null) {
         snapshots = session.snapshots.slice();
@@ -475,6 +534,42 @@ export class SessionEngine {
     if (!["accept", "reject"].includes(decision)) throw new Error(`Unsupported review decision: ${decision}`);
     if (step.status !== "awaiting_review") throw new Error(`Step ${index + 1} is not awaiting review`);
 
+    if (!hasPreparedWorkspace(session)) {
+      const reviewedAt = timestamp();
+      const candidateStep = { ...step, review: { decision, reviewedAt } };
+      const steps = session.steps.slice();
+      steps[index] = candidateStep;
+      let status;
+      if (decision === "accept") {
+        candidateStep.status = "completed";
+        status = steps.every((item) => ["completed", "skipped"].includes(item.status))
+          ? "completed"
+          : "ready";
+      } else {
+        candidateStep.status = "failed";
+        status = "failed";
+      }
+      const candidate = {
+        ...session,
+        steps,
+        status,
+        events: [
+          ...session.events,
+          event(
+            decision === "accept" ? "step.review.accepted" : "step.review.rejected",
+            { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+          )
+        ],
+        updatedAt: timestamp()
+      };
+      const publicClone = publicSession(candidate);
+      session.steps = candidate.steps;
+      session.status = candidate.status;
+      session.events = candidate.events;
+      session.updatedAt = candidate.updatedAt;
+      return publicClone;
+    }
+
     const { attempt, attemptIndex, attempts, workspace } = this.requireAttempt(session, index, ["awaiting_review"]);
     const reviewedAt = timestamp();
     const candidateStep = { ...step, review: { decision, reviewedAt } };
@@ -534,6 +629,7 @@ export class SessionEngine {
     if (workspace == null) throw new Error("Workspace restore requires a prepared workspace");
 
     let boundaryIndex = -1;
+    let boundaryAttemptIndex = -1;
     if (checkpointId !== "initial") {
       const boundaryAttempt = attempts.find((attempt) => (
         attempt.id === checkpointId
@@ -542,20 +638,32 @@ export class SessionEngine {
       ));
       if (!boundaryAttempt) throw new Error(`Unknown restorable checkpoint: ${checkpointId}`);
       boundaryIndex = boundaryAttempt.stepIndex;
+      boundaryAttemptIndex = attempts.indexOf(boundaryAttempt);
     }
 
-    const steps = session.steps.map((step, stepIndex) => (
-      stepIndex > boundaryIndex ? pendingProjection(step) : step
-    ));
-    const snapshots = session.snapshots.slice(0, Math.max(boundaryIndex + 1, 0));
+    const steps = session.steps.map((step, stepIndex) => {
+      const historicalAttempt = maxHistoricalAttempt(attempts, stepIndex);
+      if (boundaryIndex === -1 || stepIndex > boundaryIndex) {
+        return pendingProjection(step, historicalAttempt);
+      }
+
+      const acceptedAttempt = restoredAcceptedAttempt(attempts, stepIndex, boundaryAttemptIndex);
+      if (!acceptedAttempt) return pendingProjection(step, historicalAttempt);
+      return completedProjection(
+        step,
+        acceptedAttempt,
+        acceptedReviewAt(session.events, stepIndex, acceptedAttempt.attempt) ?? acceptedAttempt.completedAt
+      );
+    });
+    const status = steps.every((step) => ["completed", "skipped"].includes(step.status)) ? "completed" : "ready";
     const candidate = {
       ...session,
       steps,
-      snapshots,
+      snapshots: session.snapshots.slice(),
       attempts,
       workspace: updatedWorkspace(workspace, checkpointId),
       cursor: boundaryIndex,
-      status: "ready",
+      status,
       events: [...session.events, event("workspace.restored", { checkpointId, stepIndex: boundaryIndex })],
       updatedAt: timestamp()
     };
