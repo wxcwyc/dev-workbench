@@ -792,6 +792,45 @@ test("legacy migration sessions remain compatible with old start-complete-review
   assert.equal(failed.status, "failed");
 });
 
+test("prepared migration workspaces still support old signatures without recoverable attempts", () => {
+  const engine = new SessionEngine();
+  const accepted = engine.create({
+    title: "Prepared Legacy Accepted",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(accepted);
+
+  engine.startStep(accepted, 0);
+  engine.completeStep(accepted, 0, { files: [] });
+  engine.reviewStep(accepted, 0, "accept");
+
+  assert.deepEqual(accepted.attempts, []);
+  assert.equal(accepted.workspace.currentCheckpointId, "initial");
+  assert.equal(accepted.steps[0].status, "completed");
+  assert.equal(accepted.steps[0].attempt, 1);
+  assert.equal(accepted.status, "completed");
+
+  const failed = engine.create({
+    title: "Prepared Legacy Failed",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(failed);
+
+  engine.startStep(failed, 0);
+  engine.failStep(failed, 0, new Error("prepared legacy failure"), { files: [] });
+
+  assert.deepEqual(failed.attempts, []);
+  assert.equal(failed.workspace.currentCheckpointId, "initial");
+  assert.equal(failed.steps[0].status, "failed");
+  assert.equal(failed.steps[0].attempt, 1);
+  assert.deepEqual(failed.steps[0].error, { name: "Error", message: "prepared legacy failure" });
+  assert.equal(failed.status, "failed");
+});
+
 test("restore preserves historical snapshots while resetting only downstream projections", () => {
   const engine = new SessionEngine();
   const session = engine.create({

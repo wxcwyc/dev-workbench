@@ -42,6 +42,10 @@ function hasPreparedWorkspace(session) {
   return isMigration(session) && migrationRuntime(session).workspace != null;
 }
 
+function hasRecoverableStart(session, attemptIdentity) {
+  return hasPreparedWorkspace(session) && attemptIdentity != null;
+}
+
 function migrationRuntime(session) {
   return {
     attempts: session.attempts ?? [],
@@ -136,6 +140,20 @@ function pendingProjection(step, attempt = 0) {
     review: null,
     attempt
   };
+}
+
+function findMatchingAttempt(session, index) {
+  if (!hasPreparedWorkspace(session)) return null;
+  const step = session.steps[index];
+  if (!step) return null;
+  const { attempts, workspace } = migrationRuntime(session);
+  for (let attemptIndex = attempts.length - 1; attemptIndex >= 0; attemptIndex -= 1) {
+    const attempt = attempts[attemptIndex];
+    if (attempt.stepIndex === index && attempt.attempt === step.attempt) {
+      return { attempt, attemptIndex, attempts, workspace };
+    }
+  }
+  return null;
 }
 
 export class SessionEngine {
@@ -283,7 +301,7 @@ export class SessionEngine {
     const events = [...session.events, event("step.started", { stepIndex: index, stepId: step.id, attempt })];
     const updatedAt = timestamp();
 
-    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
+    if (!isMigration(session) || !hasRecoverableStart(session, attemptIdentity)) {
       const candidate = {
         ...session,
         steps,
@@ -300,7 +318,6 @@ export class SessionEngine {
     }
 
     const runtimeState = migrationRuntime(session);
-    if (!attemptIdentity) throw new Error("Migration step start requires exact attempt identity");
     const candidateAttempt = assertAttempt({
       id: attemptIdentity.id,
       stepIndex: index,
@@ -337,7 +354,8 @@ export class SessionEngine {
     const snapshots = session.snapshots.slice();
     snapshots[index] = capturedSnapshot;
 
-    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
+    const recoverableAttempt = resultIdentity == null ? null : findMatchingAttempt(session, index);
+    if (!isMigration(session) || recoverableAttempt == null) {
       const requiresReview = isMigration(session);
       const candidateStep = {
         ...step,
@@ -411,7 +429,8 @@ export class SessionEngine {
     const steps = session.steps.slice();
     steps[index] = candidateStep;
 
-    if (!isMigration(session) || !hasPreparedWorkspace(session)) {
+    const recoverableAttempt = resultIdentity == null ? null : findMatchingAttempt(session, index);
+    if (!isMigration(session) || recoverableAttempt == null) {
       let snapshots;
       if (snapshot !== null) {
         snapshots = session.snapshots.slice();
@@ -534,7 +553,7 @@ export class SessionEngine {
     if (!["accept", "reject"].includes(decision)) throw new Error(`Unsupported review decision: ${decision}`);
     if (step.status !== "awaiting_review") throw new Error(`Step ${index + 1} is not awaiting review`);
 
-    if (!hasPreparedWorkspace(session)) {
+    if (findMatchingAttempt(session, index) == null) {
       const reviewedAt = timestamp();
       const candidateStep = { ...step, review: { decision, reviewedAt } };
       const steps = session.steps.slice();
