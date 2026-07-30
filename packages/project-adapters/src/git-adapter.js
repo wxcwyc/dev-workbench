@@ -202,13 +202,28 @@ async function assertOwnedWorkspace(workspace) {
   const expected = {
     sessionId: workspace.sessionId,
     ownershipToken: workspace.ownershipToken,
+    projectRoot: workspace.projectRoot,
     repositoryRoot: workspace.repositoryRoot,
+    projectRelativePath: workspace.projectRelativePath,
+    commonGitDir: workspace.commonGitDir,
     worktreeRoot: workspace.worktreeRoot,
     executionRoot: workspace.executionRoot,
+    baseOid: workspace.baseOid,
   };
   for (const [key, value] of Object.entries(expected)) {
     if (owner[key] !== value) {
       throw new GitWorkspaceError("ownership_mismatch", `Managed worktree ${key} does not match`);
+    }
+  }
+  for (const key of [
+    "projectRoot",
+    "repositoryRoot",
+    "commonGitDir",
+    "worktreeRoot",
+  ]) {
+    const canonicalPath = await fs.realpath(workspace[key]).catch(() => null);
+    if (canonicalPath !== workspace[key]) {
+      throw new GitWorkspaceError("ownership_mismatch", `Managed worktree ${key} is not canonical`);
     }
   }
   const relative = workspace.projectRelativePath === "." ? "" : workspace.projectRelativePath;
@@ -246,6 +261,12 @@ export async function prepareManagedWorkspace({
   }
   await fs.mkdir(requestedWorkspaceRoot, { recursive: true });
   const canonicalWorkspaceRoot = await fs.realpath(requestedWorkspaceRoot);
+  if (
+    isSameOrInside(inspection.repositoryRoot, canonicalWorkspaceRoot)
+    || isSameOrInside(canonicalWorkspaceRoot, inspection.repositoryRoot)
+  ) {
+    throw new GitWorkspaceError("workspace_overlap", "Managed workspace root overlaps source repository");
+  }
   const worktreeRoot = path.join(canonicalWorkspaceRoot, sessionId);
   try {
     await fs.lstat(worktreeRoot);
@@ -290,13 +311,26 @@ export async function prepareManagedWorkspace({
 
 async function assertCleanWorkspace(workspace) {
   await assertOwnedWorkspace(workspace);
-  const dirty = parseDirtyStatus(await runGit(workspace.worktreeRoot, [
-    "status",
-    "--porcelain=v2",
-    "-z",
-    "--untracked-files=all",
-    "--ignore-submodules=none",
-  ], { trim: false }));
+  const [status, gitDirOutput, commonGitDirOutput] = await Promise.all([
+    runGit(workspace.worktreeRoot, [
+      "status",
+      "--porcelain=v2",
+      "-z",
+      "--untracked-files=all",
+      "--ignore-submodules=none",
+    ], { trim: false }),
+    runGit(workspace.worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-dir"]),
+    runGit(workspace.worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  ]);
+  const gitDir = await fs.realpath(gitDirOutput);
+  const commonGitDir = await fs.realpath(commonGitDirOutput);
+  if (commonGitDir !== workspace.commonGitDir) {
+    throw new GitWorkspaceError("ownership_mismatch", "Managed worktree common Git directory does not match");
+  }
+  const dirty = [
+    ...parseDirtyStatus(status),
+    ...await findInProgressState(commonGitDir, gitDir),
+  ];
   if (dirty.length > 0) {
     throw new GitWorkspaceError("workspace_dirty", "Managed worktree must be clean", dirty);
   }
@@ -436,6 +470,7 @@ export async function createResultCheckpoint(workspace, {
     await createRef(workspace.repositoryRoot, resultRef, resultOid);
     const files = await buildManifest(workspace.repositoryRoot, baseline.oid, resultOid);
     await runGit(workspace.worktreeRoot, ["reset", "--hard", resultOid]);
+    await runGit(workspace.worktreeRoot, ["clean", "-dffx"]);
     const remainingStatus = await runGit(workspace.worktreeRoot, [
       "status",
       "--porcelain",
@@ -477,7 +512,10 @@ export async function restoreCheckpoint(workspace, checkpoint) {
   if (observedOid !== checkpoint.oid) {
     throw new GitWorkspaceError("checkpoint_mismatch", "Restore checkpoint ref does not match its OID");
   }
+  await runGit(workspace.worktreeRoot, ["clean", "-dffx"]);
   await runGit(workspace.worktreeRoot, ["checkout", "--detach", checkpoint.oid]);
+  await runGit(workspace.worktreeRoot, ["reset", "--hard", checkpoint.oid]);
+  await runGit(workspace.worktreeRoot, ["clean", "-dffx"]);
   const materializedOid = await runGit(workspace.worktreeRoot, ["rev-parse", "HEAD"]);
   if (materializedOid !== checkpoint.oid) {
     throw new GitWorkspaceError("restore_failed", "Managed worktree did not reach the requested checkpoint");

@@ -253,6 +253,29 @@ test("preparation rejects containment, path collisions, and unsafe identities", 
   );
 });
 
+test("preparation rejects a workspace symlink that canonically overlaps the source", async (context) => {
+  const root = await makeRepository(context);
+  const managedTarget = path.join(root, ".git", "managed-root");
+  const linkParent = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-link-"));
+  const workspaceLink = path.join(linkParent, "workspaces");
+  context.after(() => fs.rm(linkParent, { recursive: true, force: true }));
+  await fs.mkdir(managedTarget);
+  await fs.symlink(managedTarget, workspaceLink, "dir");
+  const before = await sourceFingerprint(root);
+
+  await assert.rejects(
+    prepareManagedWorkspace({
+      projectRoot: root,
+      workspaceRoot: workspaceLink,
+      sessionId: "session-1",
+      ownershipToken: "owner-1",
+    }),
+    (error) => error.code === "workspace_overlap",
+  );
+  assert.deepEqual(await sourceFingerprint(root), before);
+  assert.deepEqual(await fs.readdir(managedTarget), []);
+});
+
 test("creates immutable baseline and exact result checkpoints then normalizes the owned worktree", async (context) => {
   const root = await makeRepository(context);
   const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
@@ -330,7 +353,16 @@ test("creates immutable baseline and exact result checkpoints then normalizes th
     },
   ].sort((left, right) => left.path.localeCompare(right.path)));
   assert.deepEqual(result.files, [...result.files].sort((left, right) => left.path.localeCompare(right.path)));
-  assert.equal(await fs.readFile(path.join(workspace.worktreeRoot, "ignored.txt"), "utf8"), "ignored\n");
+  await assert.rejects(
+    fs.readFile(path.join(workspace.worktreeRoot, "ignored.txt"), "utf8"),
+    (error) => error.code === "ENOENT",
+  );
+  assert.deepEqual(await captureGitState(root), {
+    available: true,
+    head: workspace.baseOid.slice(0, 7),
+    status: "",
+    diff: "",
+  });
 });
 
 test("checkpoint mutations reject ref collisions and ownership mismatch", async (context) => {
@@ -393,8 +425,13 @@ test("restore validates accepted identity and materializes only a clean owned wo
     attemptId: "attempt-1",
     baseline,
   });
+  await fs.writeFile(path.join(workspace.worktreeRoot, "ignored.txt"), "ignored residue\n");
   await restoreCheckpoint(workspace, { ...baseline, accepted: true });
   assert.equal(await fs.readFile(path.join(workspace.executionRoot, "keep.txt"), "utf8"), "before\n");
+  await assert.rejects(
+    fs.readFile(path.join(workspace.worktreeRoot, "ignored.txt"), "utf8"),
+    (error) => error.code === "ENOENT",
+  );
 
   const foreignRoleRef = "refs/dev-workbench/checkpoints/session-1/attempt-1/foreign";
   await git(root, "update-ref", foreignRoleRef, result.oid);
@@ -418,5 +455,51 @@ test("restore validates accepted identity and materializes only a clean owned wo
   await assert.rejects(
     restoreCheckpoint(workspace, { ...result, accepted: true }),
     (error) => error.code === "workspace_dirty",
+  );
+});
+
+test("baseline and restore reject managed Git operations in progress", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: root,
+    workspaceRoot: managedRoot,
+    sessionId: "session-1",
+    ownershipToken: "owner-1",
+  });
+  const gitDir = await git(workspace.worktreeRoot, "rev-parse", "--path-format=absolute", "--git-dir");
+  const operations = [
+    ["MERGE_HEAD", "merge", "file"],
+    ["CHERRY_PICK_HEAD", "cherry-pick", "file"],
+    ["REVERT_HEAD", "revert", "file"],
+    ["rebase-merge", "rebase", "directory"],
+    ["BISECT_LOG", "bisect", "file"],
+    ["sequencer", "sequencer", "directory"],
+  ];
+  for (const [entry, operation, type] of operations) {
+    const marker = path.join(gitDir, entry);
+    if (type === "directory") await fs.mkdir(marker);
+    else await fs.writeFile(marker, workspace.baseOid);
+    await assert.rejects(
+      createBaselineCheckpoint(workspace, {
+        sessionId: "session-1",
+        attemptId: `attempt-${operation}`,
+      }),
+      (error) => error.code === "workspace_dirty"
+        && error.diagnostics.some((item) => item.kind === "in_progress" && item.operation === operation),
+    );
+    await fs.rm(marker, { recursive: true });
+  }
+
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-1",
+    attemptId: "attempt-1",
+  });
+  await fs.mkdir(path.join(gitDir, "rebase-merge"));
+  await assert.rejects(
+    restoreCheckpoint(workspace, { ...baseline, accepted: true }),
+    (error) => error.code === "workspace_dirty"
+      && error.diagnostics.some((item) => item.kind === "in_progress" && item.operation === "rebase"),
   );
 });
