@@ -234,6 +234,21 @@ test("attempt and file manifest validators reject unknown, unsafe, and oversized
     [{ ...base, attempt: 0 }, "/attempt"],
     [{ ...base, status: "pending" }, "/status"],
     [{ ...base, completedAt: "yesterday" }, "/completedAt"],
+    [{
+      ...base,
+      baseline: {
+        oid: "a".repeat(40),
+        ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/result"
+      }
+    }, "/baseline/ref"],
+    [{
+      ...base,
+      result: {
+        oid: "b".repeat(40),
+        ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/baseline",
+        restorable: false
+      }
+    }, "/result/ref"],
     [{ ...base, result: { oid: "b".repeat(40), ref: "refs/heads/main", restorable: false } }, "/result/ref"],
     [{ ...base, extra: true }, "/extra"]
   ];
@@ -290,6 +305,7 @@ test("expanded annotation validator rejects unsafe targets, invalid lines, and o
     [{ ...base, target: { type: "diff", path: "src/app.js", stream: "stdout" } }, "/target/stream"],
     [{ ...base, target: { type: "command", stream: "stdin" } }, "/target/stream"],
     [{ ...base, target: { type: "command", stream: "stdout", line: 0 } }, "/target/line"],
+    [{ ...base, target: { type: "file", path: "src/app.js" } }, "/attemptId"],
     [{ ...base, unknown: true }, "/unknown"]
   ];
   for (const [value, expectedPath] of cases) {

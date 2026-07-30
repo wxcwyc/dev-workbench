@@ -105,7 +105,7 @@ function validateTimestamp(value, path, issues) {
   }
 }
 
-function validateCheckpointIdentity(value, path, issues, { allowRestorable = true } = {}) {
+function validateCheckpointIdentity(value, path, issues, { allowRestorable = true, role } = {}) {
   if (!requireObject(value, path, issues)) return;
   allowedKeys(value, allowRestorable ? ["oid", "ref", "restorable"] : ["oid", "ref"], path, issues);
   validateObjectId(value.oid, pointerChild(path, "oid"), issues);
@@ -114,6 +114,8 @@ function validateCheckpointIdentity(value, path, issues, { allowRestorable = tru
     : null;
   if (!refMatch || refMatch.slice(1).some((segment) => segment === "." || segment === "..")) {
     issue(issues, pointerChild(path, "ref"), "must be a namespaced dev-workbench checkpoint ref");
+  } else if (role !== undefined && !value.ref.endsWith(`/${role}`)) {
+    issue(issues, pointerChild(path, "ref"), `must identify a ${role} checkpoint`);
   }
   if (allowRestorable && value.restorable !== undefined && typeof value.restorable !== "boolean") {
     issue(issues, pointerChild(path, "restorable"), "must be a boolean");
@@ -338,9 +340,9 @@ export function assertAttempt(attempt) {
   }
   validateTimestamp(attempt.startedAt, "/startedAt", issues);
   if (attempt.completedAt !== undefined) validateTimestamp(attempt.completedAt, "/completedAt", issues);
-  validateCheckpointIdentity(attempt.baseline, "/baseline", issues, { allowRestorable: false });
+  validateCheckpointIdentity(attempt.baseline, "/baseline", issues, { allowRestorable: false, role: "baseline" });
   if (attempt.result !== undefined && attempt.result !== null) {
-    validateCheckpointIdentity(attempt.result, "/result", issues);
+    validateCheckpointIdentity(attempt.result, "/result", issues, { role: "result" });
   }
   if (attempt.snapshot !== undefined && attempt.snapshot !== null) {
     if (requireObject(attempt.snapshot, "/snapshot", issues)) {
@@ -389,6 +391,13 @@ export function assertAnnotation(annotation) {
   }
   if (annotation.target !== undefined && annotation.target !== null) {
     validateAnnotationTarget(annotation.target, "/target", issues);
+    if (
+      isObject(annotation.target)
+      && TARGET_TYPES.includes(annotation.target.type)
+      && annotation.attemptId === undefined
+    ) {
+      issue(issues, "/attemptId", "is required when target is present");
+    }
   }
   if (annotation.createdAt !== undefined) validateTimestamp(annotation.createdAt, "/createdAt", issues);
   throwIssues("annotation", issues);
