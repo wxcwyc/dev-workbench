@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dev-workbench.local/schemas/v1/session.schema.json",
   "title": "Dev Workbench Session Input v1",
+  "$comment": "workspace and attempts are runtime-owned evidence and are not accepted as imported session input",
   "type": "object",
   "required": ["title", "workbench", "projectRoot"],
   "properties": {

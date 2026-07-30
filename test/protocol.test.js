@@ -3,7 +3,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { defineAdapter, createTraceEvent, decodeNdjson, encodeNdjson } from "../packages/adapter-sdk/src/index.js";
-import { EVENT_TYPES, PROTOCOL_VERSION, ProtocolValidationError, assertPlanInput, assertSessionInput } from "../packages/protocol/src/index.js";
+import {
+  EVENT_TYPES,
+  PROTOCOL_VERSION,
+  STEP_STATUSES,
+  ProtocolValidationError,
+  assertAnnotation,
+  assertAttempt,
+  assertCheckpointIdentity,
+  assertFileManifest,
+  assertPlanInput,
+  assertSessionInput,
+  assertWorkspace
+} from "../packages/protocol/src/index.js";
 
 const manifest = {
   id: "dev-workbench.test",
@@ -43,6 +55,251 @@ test("step schema matches the editable plan field contract", async () => {
     uniqueItems: true
   });
   assert.equal(schema.additionalProperties, false);
+});
+
+test("recoverable migration constants retain existing values and expose lifecycle additions", () => {
+  for (const status of ["pending", "running", "awaiting_review", "completed", "failed", "skipped", "cancelled"]) {
+    assert.ok(STEP_STATUSES.includes(status), status);
+  }
+  for (const eventType of [
+    "session.created", "plan.updated", "step.started", "step.completed", "step.failed",
+    "step.awaiting_review", "step.review.accepted", "step.review.rejected", "cursor.moved",
+    "annotation.added", "workspace.prepared", "checkpoint.created", "workspace.restored",
+    "step.cancelled"
+  ]) {
+    assert.ok(EVENT_TYPES.includes(eventType), eventType);
+  }
+});
+
+test("snapshot schema documents canonical runtime fields and legacy aliases", async () => {
+  const schema = JSON.parse(await fs.readFile(path.resolve("packages/protocol/schemas/v1/snapshot.schema.json"), "utf8"));
+
+  assert.deepEqual(schema.properties.tree, { type: "array" });
+  assert.deepEqual(schema.properties.treeChanges, { type: "array" });
+  assert.deepEqual(schema.properties.files, { type: "array", deprecated: true });
+  assert.deepEqual(schema.properties.changes, { type: "array", deprecated: true });
+});
+
+test("session input schema and validator reject runtime-owned evidence", async () => {
+  const schema = JSON.parse(await fs.readFile(path.resolve("packages/protocol/schemas/v1/session.schema.json"), "utf8"));
+  assert.equal(schema.properties.workspace, undefined);
+  assert.equal(schema.properties.attempts, undefined);
+  assert.equal(schema.additionalProperties, false);
+
+  const base = { title: "Migration", workbench: "migration", projectRoot: "/source", steps: [] };
+  for (const [key, value] of [["workspace", {}], ["attempts", []]]) {
+    assert.throws(
+      () => assertSessionInput({ ...base, [key]: value }),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "session"
+        && error.issues.some((item) => item.path === `/${key}` && item.message === "is not allowed")
+    );
+  }
+});
+
+test("checkpoint and workspace validators accept separated source and execution identity", () => {
+  const baseline = {
+    oid: "a".repeat(40),
+    ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/baseline"
+  };
+  const workspace = {
+    projectRoot: "/source/repository/app",
+    repositoryRoot: "/source/repository",
+    projectRelativePath: "app",
+    commonGitDir: "/source/repository/.git",
+    worktreeRoot: "/managed/session-1",
+    executionRoot: "/managed/session-1/app",
+    baseOid: "b".repeat(64),
+    ownershipToken: "owner-1",
+    currentCheckpointId: "attempt-1"
+  };
+
+  assert.equal(assertCheckpointIdentity(baseline), baseline);
+  assert.equal(assertWorkspace(workspace), workspace);
+});
+
+test("checkpoint and workspace validators reject unsafe identities at precise paths", () => {
+  const checkpointCases = [
+    [{ oid: "abc", ref: "refs/dev-workbench/checkpoints/s/a/baseline" }, "/oid"],
+    [{ oid: "a".repeat(40), ref: "refs/heads/main" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/s/../baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/s/a/baseline", extra: true }, "/extra"]
+  ];
+  for (const [value, expectedPath] of checkpointCases) {
+    assert.throws(
+      () => assertCheckpointIdentity(value),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "checkpoint identity"
+        && error.issues.some((item) => item.path === expectedPath)
+    );
+  }
+
+  const valid = {
+    projectRoot: "/source/repository/app",
+    repositoryRoot: "/source/repository",
+    projectRelativePath: "app",
+    commonGitDir: "/source/repository/.git",
+    worktreeRoot: "/managed/session-1",
+    executionRoot: "/managed/session-1/app",
+    baseOid: "a".repeat(40),
+    ownershipToken: "owner-1"
+  };
+  const workspaceCases = [
+    [{ ...valid, projectRelativePath: "../app" }, "/projectRelativePath"],
+    [{ ...valid, executionRoot: "relative/app" }, "/executionRoot"],
+    [{ ...valid, executionRoot: valid.projectRoot }, "/executionRoot"],
+    [{ ...valid, worktreeRoot: valid.repositoryRoot }, "/worktreeRoot"],
+    [{ ...valid, surprise: true }, "/surprise"]
+  ];
+  for (const [value, expectedPath] of workspaceCases) {
+    assert.throws(
+      () => assertWorkspace(value),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "workspace"
+        && error.issues.some((item) => item.path === expectedPath)
+    );
+  }
+});
+
+test("attempt and file manifest validators accept bounded immutable evidence", () => {
+  const files = [{
+    path: "src/app.js",
+    oldPath: null,
+    status: "modified",
+    binary: false,
+    additions: 8,
+    deletions: 3
+  }];
+  const attempt = {
+    id: "attempt-1",
+    stepIndex: 1,
+    attempt: 2,
+    status: "failed",
+    startedAt: "2026-07-30T08:00:00.000Z",
+    completedAt: "2026-07-30T08:00:03.000Z",
+    baseline: {
+      oid: "a".repeat(40),
+      ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/baseline"
+    },
+    result: {
+      oid: "b".repeat(40),
+      ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/result",
+      restorable: false
+    },
+    snapshot: { files, command: {} }
+  };
+
+  assert.equal(assertFileManifest(files), files);
+  assert.equal(assertAttempt(attempt), attempt);
+});
+
+test("attempt and file manifest validators reject unknown, unsafe, and oversized evidence", () => {
+  const validFile = {
+    path: "src/app.js",
+    oldPath: null,
+    status: "modified",
+    binary: false,
+    additions: 1,
+    deletions: 0
+  };
+  const invalidManifests = [
+    [[{ ...validFile, path: "../secret" }], "/0/path"],
+    [[{ ...validFile, status: "unknown" }], "/0/status"],
+    [[{ ...validFile, additions: -1 }], "/0/additions"],
+    [[{ ...validFile, extra: true }], "/0/extra"],
+    [Array.from({ length: 1001 }, () => validFile), "/"]
+  ];
+  for (const [value, expectedPath] of invalidManifests) {
+    assert.throws(
+      () => assertFileManifest(value),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "file manifest"
+        && error.issues.some((item) => item.path === expectedPath)
+    );
+  }
+
+  const base = {
+    id: "attempt-1",
+    stepIndex: 0,
+    attempt: 1,
+    status: "running",
+    startedAt: "2026-07-30T08:00:00.000Z",
+    baseline: {
+      oid: "a".repeat(40),
+      ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/baseline"
+    }
+  };
+  const invalidAttempts = [
+    [{ ...base, stepIndex: -1 }, "/stepIndex"],
+    [{ ...base, attempt: 0 }, "/attempt"],
+    [{ ...base, status: "pending" }, "/status"],
+    [{ ...base, completedAt: "yesterday" }, "/completedAt"],
+    [{ ...base, result: { oid: "b".repeat(40), ref: "refs/heads/main", restorable: false } }, "/result/ref"],
+    [{ ...base, extra: true }, "/extra"]
+  ];
+  for (const [value, expectedPath] of invalidAttempts) {
+    assert.throws(
+      () => assertAttempt(value),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "attempt"
+        && error.issues.some((item) => item.path === expectedPath)
+    );
+  }
+});
+
+test("expanded annotation validator accepts legacy notes and durable evidence targets", () => {
+  const legacy = {
+    id: "note-1",
+    stepIndex: 0,
+    text: "Keep this",
+    createdAt: "2026-07-30T08:05:00.000Z"
+  };
+  const annotations = [
+    legacy,
+    { ...legacy, kind: "note", tags: ["content", "migration"] },
+    {
+      ...legacy,
+      attemptId: "attempt-1",
+      kind: "bookmark",
+      target: { type: "diff", path: "target/index.html", line: 12 }
+    },
+    {
+      ...legacy,
+      attemptId: "attempt-1",
+      kind: "bookmark",
+      target: { type: "command", stream: "stderr", line: 2 }
+    }
+  ];
+
+  for (const annotation of annotations) assert.equal(assertAnnotation(annotation), annotation);
+});
+
+test("expanded annotation validator rejects unsafe targets, invalid lines, and oversized collections", () => {
+  const base = {
+    id: "note-1",
+    stepIndex: 0,
+    text: "Keep this",
+    createdAt: "2026-07-30T08:05:00.000Z"
+  };
+  const cases = [
+    [{ ...base, kind: "flag" }, "/kind"],
+    [{ ...base, tags: ["same", "same"] }, "/tags/1"],
+    [{ ...base, tags: Array.from({ length: 17 }, (_, index) => `tag-${index}`) }, "/tags"],
+    [{ ...base, target: { type: "preview", sequence: 2 } }, "/target/type"],
+    [{ ...base, target: { type: "diff", path: "../secret" } }, "/target/path"],
+    [{ ...base, target: { type: "diff", path: "src/app.js", stream: "stdout" } }, "/target/stream"],
+    [{ ...base, target: { type: "command", stream: "stdin" } }, "/target/stream"],
+    [{ ...base, target: { type: "command", stream: "stdout", line: 0 } }, "/target/line"],
+    [{ ...base, unknown: true }, "/unknown"]
+  ];
+  for (const [value, expectedPath] of cases) {
+    assert.throws(
+      () => assertAnnotation(value),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "annotation"
+        && error.issues.some((item) => item.path === expectedPath)
+    );
+  }
 });
 
 test("plan validation accepts steps and exposes the plan update event", () => {

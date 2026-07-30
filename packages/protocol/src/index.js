@@ -1,14 +1,24 @@
 export const WORKBENCH_TYPES = Object.freeze(["execution", "migration"]);
-export const STEP_STATUSES = Object.freeze(["pending", "running", "awaiting_review", "completed", "failed", "skipped"]);
+export const STEP_STATUSES = Object.freeze(["pending", "running", "awaiting_review", "completed", "failed", "cancelled", "skipped"]);
 export const EVENT_TYPES = Object.freeze([
   "session.created", "plan.updated", "step.started", "step.completed", "step.failed", "step.awaiting_review",
-  "step.review.accepted", "step.review.rejected", "cursor.moved", "annotation.added",
+  "step.review.accepted", "step.review.rejected", "step.cancelled", "cursor.moved", "annotation.added",
+  "workspace.prepared", "checkpoint.created", "workspace.restored",
   "trace.stream.started", "trace.event.appended", "trace.stream.completed", "trace.stream.failed"
 ]);
 export const PROTOCOL_VERSION = "1.0";
 export const TRACE_EVENT_KINDS = Object.freeze(["evaluation", "branch", "failure", "backtrack", "solution"]);
 export const ADAPTER_CAPABILITIES = Object.freeze(["trace", "artifacts", "source-locations"]);
 const STEP_RISKS = ["low", "medium", "high"];
+const ATTEMPT_STATUSES = ["running", "awaiting_review", "completed", "failed", "cancelled"];
+const FILE_STATUSES = ["added", "modified", "deleted", "renamed", "copied", "type-changed", "unmerged"];
+const ANNOTATION_KINDS = ["note", "bookmark"];
+const TARGET_TYPES = ["file", "diff", "command"];
+const MAX_FILE_MANIFEST_ENTRIES = 1000;
+const MAX_ANNOTATION_TAGS = 16;
+const MAX_PATH_LENGTH = 4096;
+const MAX_TAG_LENGTH = 64;
+const MAX_ANNOTATION_TEXT_LENGTH = 10000;
 
 export class ProtocolValidationError extends Error {
   constructor(documentType, issues) {
@@ -23,6 +33,7 @@ export class ProtocolValidationError extends Error {
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const issue = (issues, path, message) => issues.push({ path, message });
 const escapePointerSegment = (value) => value.replaceAll("~", "~0").replaceAll("/", "~1");
+const pointerChild = (path, key) => `${path === "/" ? "" : path}/${key}`;
 const allowedKeys = (value, keys, path, issues) => {
   if (!isObject(value)) return;
   for (const key of Object.keys(value)) {
@@ -40,6 +51,123 @@ function requireString(value, path, issues) {
   if (typeof value === "string" && value.trim()) return true;
   issue(issues, path, "must be a non-empty string");
   return false;
+}
+
+function requireBoundedString(value, path, issues, maxLength) {
+  if (!requireString(value, path, issues)) return false;
+  if (value.length > maxLength) {
+    issue(issues, path, `must be at most ${maxLength} characters`);
+    return false;
+  }
+  return true;
+}
+
+function validateIdentifier(value, path, issues) {
+  if (!requireBoundedString(value, path, issues, 128)) return;
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})$/.test(value)) {
+    issue(issues, path, "must use letters, numbers, dots, underscores, or dashes");
+  }
+}
+
+function validateObjectId(value, path, issues) {
+  if (typeof value !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+    issue(issues, path, "must be a full 40- or 64-character lowercase hexadecimal object ID");
+  }
+}
+
+function validateAbsolutePath(value, path, issues) {
+  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return;
+  if (!value.startsWith("/") || value.includes("\0")) issue(issues, path, "must be an absolute path");
+}
+
+function validateRelativePath(value, path, issues, { allowDot = false } = {}) {
+  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return;
+  const segments = value.split("/");
+  if (
+    value.startsWith("/")
+    || value.includes("\0")
+    || (!allowDot && value === ".")
+    || segments.some((segment) => segment === "" || segment === ".." || (segment === "." && value !== "."))
+  ) {
+    issue(issues, path, "must be a safe relative path");
+  }
+}
+
+function sameOrNestedPath(value, parent) {
+  const normalizedValue = value.replace(/\/+$/, "");
+  const normalizedParent = parent.replace(/\/+$/, "");
+  return normalizedValue === normalizedParent || normalizedValue.startsWith(`${normalizedParent}/`);
+}
+
+function validateTimestamp(value, path, issues) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    issue(issues, path, "must be a valid timestamp");
+  }
+}
+
+function validateCheckpointIdentity(value, path, issues, { allowRestorable = true } = {}) {
+  if (!requireObject(value, path, issues)) return;
+  allowedKeys(value, allowRestorable ? ["oid", "ref", "restorable"] : ["oid", "ref"], path, issues);
+  validateObjectId(value.oid, pointerChild(path, "oid"), issues);
+  const refMatch = typeof value.ref === "string"
+    ? value.ref.match(/^refs\/dev-workbench\/checkpoints\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:baseline|result)$/)
+    : null;
+  if (!refMatch || refMatch.slice(1).some((segment) => segment === "." || segment === "..")) {
+    issue(issues, pointerChild(path, "ref"), "must be a namespaced dev-workbench checkpoint ref");
+  }
+  if (allowRestorable && value.restorable !== undefined && typeof value.restorable !== "boolean") {
+    issue(issues, pointerChild(path, "restorable"), "must be a boolean");
+  }
+}
+
+function validateFileManifest(value, path, issues) {
+  if (!Array.isArray(value)) {
+    issue(issues, path, "must be an array");
+    return;
+  }
+  if (value.length > MAX_FILE_MANIFEST_ENTRIES) {
+    issue(issues, path, `must contain at most ${MAX_FILE_MANIFEST_ENTRIES} entries`);
+    return;
+  }
+  value.forEach((entry, index) => {
+    const entryPath = `${path === "/" ? "" : path}/${index}`;
+    if (!requireObject(entry, entryPath, issues)) return;
+    allowedKeys(entry, ["path", "oldPath", "status", "binary", "additions", "deletions"], entryPath, issues);
+    validateRelativePath(entry.path, `${entryPath}/path`, issues);
+    if (entry.oldPath !== null && entry.oldPath !== undefined) {
+      validateRelativePath(entry.oldPath, `${entryPath}/oldPath`, issues);
+    }
+    if (!FILE_STATUSES.includes(entry.status)) {
+      issue(issues, `${entryPath}/status`, `must be one of ${FILE_STATUSES.join(", ")}`);
+    }
+    if (typeof entry.binary !== "boolean") issue(issues, `${entryPath}/binary`, "must be a boolean");
+    for (const key of ["additions", "deletions"]) {
+      if (!Number.isInteger(entry[key]) || entry[key] < 0) {
+        issue(issues, `${entryPath}/${key}`, "must be a non-negative integer");
+      }
+    }
+  });
+}
+
+function validateAnnotationTarget(value, path, issues) {
+  if (!requireObject(value, path, issues)) return;
+  if (!TARGET_TYPES.includes(value.type)) {
+    allowedKeys(value, ["type"], path, issues);
+    issue(issues, `${path}/type`, `must be one of ${TARGET_TYPES.join(", ")}`);
+    return;
+  }
+  if (value.type === "command") {
+    allowedKeys(value, ["type", "stream", "line"], path, issues);
+    if (!["stdout", "stderr"].includes(value.stream)) {
+      issue(issues, `${path}/stream`, "must be one of stdout, stderr");
+    }
+  } else {
+    allowedKeys(value, ["type", "path", "line"], path, issues);
+    validateRelativePath(value.path, `${path}/path`, issues);
+  }
+  if (value.line !== undefined && (!Number.isInteger(value.line) || value.line < 1)) {
+    issue(issues, `${path}/line`, "must be a positive integer");
+  }
 }
 
 function validateAction(action, path, issues) {
@@ -127,6 +255,144 @@ function validateStepRelationships(steps, issues) {
 
 function throwIssues(documentType, issues) {
   if (issues.length) throw new ProtocolValidationError(documentType, issues);
+}
+
+export function assertCheckpointIdentity(checkpoint) {
+  const issues = [];
+  validateCheckpointIdentity(checkpoint, "/", issues);
+  throwIssues("checkpoint identity", issues);
+  return checkpoint;
+}
+
+export function assertWorkspace(workspace) {
+  const issues = [];
+  if (!requireObject(workspace, "/", issues)) throwIssues("workspace", issues);
+  allowedKeys(workspace, [
+    "projectRoot", "repositoryRoot", "projectRelativePath", "commonGitDir", "worktreeRoot",
+    "executionRoot", "baseOid", "ownershipToken", "currentCheckpointId"
+  ], "/", issues);
+  for (const key of ["projectRoot", "repositoryRoot", "commonGitDir", "worktreeRoot", "executionRoot"]) {
+    validateAbsolutePath(workspace[key], `/${key}`, issues);
+  }
+  validateRelativePath(workspace.projectRelativePath, "/projectRelativePath", issues, { allowDot: true });
+  validateObjectId(workspace.baseOid, "/baseOid", issues);
+  validateIdentifier(workspace.ownershipToken, "/ownershipToken", issues);
+  if (workspace.currentCheckpointId !== undefined && workspace.currentCheckpointId !== null) {
+    validateIdentifier(workspace.currentCheckpointId, "/currentCheckpointId", issues);
+  }
+  if (
+    typeof workspace.projectRoot === "string"
+    && typeof workspace.repositoryRoot === "string"
+    && !sameOrNestedPath(workspace.projectRoot, workspace.repositoryRoot)
+  ) {
+    issue(issues, "/projectRoot", "must be inside repositoryRoot");
+  }
+  if (
+    typeof workspace.executionRoot === "string"
+    && typeof workspace.worktreeRoot === "string"
+    && !sameOrNestedPath(workspace.executionRoot, workspace.worktreeRoot)
+  ) {
+    issue(issues, "/executionRoot", "must be inside worktreeRoot");
+  }
+  if (
+    typeof workspace.executionRoot === "string"
+    && typeof workspace.projectRoot === "string"
+    && workspace.executionRoot === workspace.projectRoot
+  ) {
+    issue(issues, "/executionRoot", "must be separate from projectRoot");
+  }
+  if (
+    typeof workspace.worktreeRoot === "string"
+    && typeof workspace.repositoryRoot === "string"
+    && (sameOrNestedPath(workspace.worktreeRoot, workspace.repositoryRoot)
+      || sameOrNestedPath(workspace.repositoryRoot, workspace.worktreeRoot))
+  ) {
+    issue(issues, "/worktreeRoot", "must be separate from repositoryRoot");
+  }
+  throwIssues("workspace", issues);
+  return workspace;
+}
+
+export function assertFileManifest(files) {
+  const issues = [];
+  validateFileManifest(files, "/", issues);
+  throwIssues("file manifest", issues);
+  return files;
+}
+
+export function assertAttempt(attempt) {
+  const issues = [];
+  if (!requireObject(attempt, "/", issues)) throwIssues("attempt", issues);
+  allowedKeys(attempt, [
+    "id", "stepIndex", "attempt", "status", "startedAt", "completedAt", "baseline", "result", "snapshot"
+  ], "/", issues);
+  validateIdentifier(attempt.id, "/id", issues);
+  if (!Number.isInteger(attempt.stepIndex) || attempt.stepIndex < 0) {
+    issue(issues, "/stepIndex", "must be a non-negative integer");
+  }
+  if (!Number.isInteger(attempt.attempt) || attempt.attempt < 1) {
+    issue(issues, "/attempt", "must be a positive integer");
+  }
+  if (!ATTEMPT_STATUSES.includes(attempt.status)) {
+    issue(issues, "/status", `must be one of ${ATTEMPT_STATUSES.join(", ")}`);
+  }
+  validateTimestamp(attempt.startedAt, "/startedAt", issues);
+  if (attempt.completedAt !== undefined) validateTimestamp(attempt.completedAt, "/completedAt", issues);
+  validateCheckpointIdentity(attempt.baseline, "/baseline", issues, { allowRestorable: false });
+  if (attempt.result !== undefined && attempt.result !== null) {
+    validateCheckpointIdentity(attempt.result, "/result", issues);
+  }
+  if (attempt.snapshot !== undefined && attempt.snapshot !== null) {
+    if (requireObject(attempt.snapshot, "/snapshot", issues)) {
+      allowedKeys(attempt.snapshot, ["files", "command"], "/snapshot", issues);
+      validateFileManifest(attempt.snapshot.files, "/snapshot/files", issues);
+      if (
+        attempt.snapshot.command !== undefined
+        && attempt.snapshot.command !== null
+        && !isObject(attempt.snapshot.command)
+      ) {
+        issue(issues, "/snapshot/command", "must be an object or null");
+      }
+    }
+  }
+  throwIssues("attempt", issues);
+  return attempt;
+}
+
+export function assertAnnotation(annotation) {
+  const issues = [];
+  if (!requireObject(annotation, "/", issues)) throwIssues("annotation", issues);
+  allowedKeys(annotation, ["id", "stepIndex", "attemptId", "kind", "text", "tags", "target", "createdAt"], "/", issues);
+  validateIdentifier(annotation.id, "/id", issues);
+  if (!Number.isInteger(annotation.stepIndex) || annotation.stepIndex < 0) {
+    issue(issues, "/stepIndex", "must be a non-negative integer");
+  }
+  if (annotation.attemptId !== undefined) validateIdentifier(annotation.attemptId, "/attemptId", issues);
+  if (annotation.kind !== undefined && !ANNOTATION_KINDS.includes(annotation.kind)) {
+    issue(issues, "/kind", `must be one of ${ANNOTATION_KINDS.join(", ")}`);
+  }
+  requireBoundedString(annotation.text, "/text", issues, MAX_ANNOTATION_TEXT_LENGTH);
+  if (annotation.tags !== undefined) {
+    if (!Array.isArray(annotation.tags)) {
+      issue(issues, "/tags", "must be an array");
+    } else if (annotation.tags.length > MAX_ANNOTATION_TAGS) {
+      issue(issues, "/tags", `must contain at most ${MAX_ANNOTATION_TAGS} tags`);
+    } else {
+      const seen = new Set();
+      annotation.tags.forEach((tag, index) => {
+        const tagPath = `/tags/${index}`;
+        requireBoundedString(tag, tagPath, issues, MAX_TAG_LENGTH);
+        if (seen.has(tag)) issue(issues, tagPath, "must be unique");
+        seen.add(tag);
+      });
+    }
+  }
+  if (annotation.target !== undefined && annotation.target !== null) {
+    validateAnnotationTarget(annotation.target, "/target", issues);
+  }
+  if (annotation.createdAt !== undefined) validateTimestamp(annotation.createdAt, "/createdAt", issues);
+  throwIssues("annotation", issues);
+  return annotation;
 }
 
 export function assertSessionInput(input) {

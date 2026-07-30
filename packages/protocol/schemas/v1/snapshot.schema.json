@@ -5,8 +5,10 @@
   "type": "object",
   "properties": {
     "trace": { "type": "object" },
-    "files": { "type": "array" },
-    "changes": { "type": "array" },
+    "tree": { "type": "array" },
+    "treeChanges": { "type": "array" },
+    "files": { "type": "array", "deprecated": true },
+    "changes": { "type": "array", "deprecated": true },
     "git": { "type": ["object", "null"] },
     "command": { "type": ["object", "null"] },
     "artifacts": { "type": "array", "items": { "$ref": "artifact.schema.json" } }
