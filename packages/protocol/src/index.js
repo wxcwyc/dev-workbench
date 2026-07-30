@@ -76,27 +76,37 @@ function validateObjectId(value, path, issues) {
 }
 
 function validateAbsolutePath(value, path, issues) {
-  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return;
-  if (!value.startsWith("/") || value.includes("\0")) issue(issues, path, "must be an absolute path");
+  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return false;
+  const segments = value.slice(1).split("/");
+  const valid = value.startsWith("/")
+    && !value.includes("\0")
+    && (value === "/" || (!value.endsWith("/") && segments.every((segment) => segment && segment !== "." && segment !== "..")));
+  if (!valid) issue(issues, path, "must be a canonical absolute path");
+  return valid;
 }
 
 function validateRelativePath(value, path, issues, { allowDot = false } = {}) {
-  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return;
+  if (!requireBoundedString(value, path, issues, MAX_PATH_LENGTH)) return false;
   const segments = value.split("/");
-  if (
+  const valid = !(
     value.startsWith("/")
     || value.includes("\0")
     || (!allowDot && value === ".")
     || segments.some((segment) => segment === "" || segment === ".." || (segment === "." && value !== "."))
-  ) {
-    issue(issues, path, "must be a safe relative path");
-  }
+  );
+  if (!valid) issue(issues, path, "must be a safe relative path");
+  return valid;
 }
 
 function sameOrNestedPath(value, parent) {
   const normalizedValue = value.replace(/\/+$/, "");
   const normalizedParent = parent.replace(/\/+$/, "");
   return normalizedValue === normalizedParent || normalizedValue.startsWith(`${normalizedParent}/`);
+}
+
+function joinProjectPath(root, relativePath) {
+  if (relativePath === ".") return root;
+  return root === "/" ? `/${relativePath}` : `${root}/${relativePath}`;
 }
 
 function validateTimestamp(value, path, issues) {
@@ -112,7 +122,10 @@ function validateCheckpointIdentity(value, path, issues, { allowRestorable = tru
   const refMatch = typeof value.ref === "string"
     ? value.ref.match(/^refs\/dev-workbench\/checkpoints\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:baseline|result)$/)
     : null;
-  if (!refMatch || refMatch.slice(1).some((segment) => segment === "." || segment === "..")) {
+  if (
+    !refMatch
+    || refMatch.slice(1).some((segment) => segment.startsWith(".") || segment.endsWith(".") || segment.includes(".."))
+  ) {
     issue(issues, pointerChild(path, "ref"), "must be a namespaced dev-workbench checkpoint ref");
   } else if (role !== undefined && !value.ref.endsWith(`/${role}`)) {
     issue(issues, pointerChild(path, "ref"), `must identify a ${role} checkpoint`);
@@ -273,28 +286,32 @@ export function assertWorkspace(workspace) {
     "projectRoot", "repositoryRoot", "projectRelativePath", "commonGitDir", "worktreeRoot",
     "executionRoot", "baseOid", "ownershipToken", "currentCheckpointId"
   ], "/", issues);
+  const validPaths = {};
   for (const key of ["projectRoot", "repositoryRoot", "commonGitDir", "worktreeRoot", "executionRoot"]) {
-    validateAbsolutePath(workspace[key], `/${key}`, issues);
+    validPaths[key] = validateAbsolutePath(workspace[key], `/${key}`, issues);
   }
-  validateRelativePath(workspace.projectRelativePath, "/projectRelativePath", issues, { allowDot: true });
+  const validProjectRelativePath = validateRelativePath(
+    workspace.projectRelativePath,
+    "/projectRelativePath",
+    issues,
+    { allowDot: true }
+  );
   validateObjectId(workspace.baseOid, "/baseOid", issues);
   validateIdentifier(workspace.ownershipToken, "/ownershipToken", issues);
   if (workspace.currentCheckpointId !== undefined && workspace.currentCheckpointId !== null) {
     validateIdentifier(workspace.currentCheckpointId, "/currentCheckpointId", issues);
   }
-  if (
-    typeof workspace.projectRoot === "string"
-    && typeof workspace.repositoryRoot === "string"
-    && !sameOrNestedPath(workspace.projectRoot, workspace.repositoryRoot)
-  ) {
-    issue(issues, "/projectRoot", "must be inside repositoryRoot");
+  if (validPaths.projectRoot && validPaths.repositoryRoot && validProjectRelativePath) {
+    const expectedProjectRoot = joinProjectPath(workspace.repositoryRoot, workspace.projectRelativePath);
+    if (workspace.projectRoot !== expectedProjectRoot) {
+      issue(issues, "/projectRoot", "must equal repositoryRoot joined with projectRelativePath");
+    }
   }
-  if (
-    typeof workspace.executionRoot === "string"
-    && typeof workspace.worktreeRoot === "string"
-    && !sameOrNestedPath(workspace.executionRoot, workspace.worktreeRoot)
-  ) {
-    issue(issues, "/executionRoot", "must be inside worktreeRoot");
+  if (validPaths.executionRoot && validPaths.worktreeRoot && validProjectRelativePath) {
+    const expectedExecutionRoot = joinProjectPath(workspace.worktreeRoot, workspace.projectRelativePath);
+    if (workspace.executionRoot !== expectedExecutionRoot) {
+      issue(issues, "/executionRoot", "must equal worktreeRoot joined with projectRelativePath");
+    }
   }
   if (
     typeof workspace.executionRoot === "string"
@@ -354,6 +371,22 @@ export function assertAttempt(attempt) {
         && !isObject(attempt.snapshot.command)
       ) {
         issue(issues, "/snapshot/command", "must be an object or null");
+      }
+    }
+  }
+  if (attempt.status === "running") {
+    for (const key of ["completedAt", "result", "snapshot"]) {
+      if (Object.hasOwn(attempt, key)) issue(issues, `/${key}`, "is not allowed while running");
+    }
+  } else if (ATTEMPT_STATUSES.includes(attempt.status)) {
+    for (const key of ["completedAt", "result", "snapshot"]) {
+      if (attempt[key] === undefined || attempt[key] === null) issue(issues, `/${key}`, "is required after running");
+    }
+    if (isObject(attempt.result)) {
+      if (attempt.status === "completed" && attempt.result.restorable !== true) {
+        issue(issues, "/result/restorable", "must be true for a completed attempt");
+      } else if (attempt.status !== "completed" && attempt.result.restorable === true) {
+        issue(issues, "/result/restorable", `must not be true for a ${attempt.status} attempt`);
       }
     }
   }

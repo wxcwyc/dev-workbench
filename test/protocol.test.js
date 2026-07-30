@@ -116,6 +116,13 @@ test("checkpoint and workspace validators accept separated source and execution 
 
   assert.equal(assertCheckpointIdentity(baseline), baseline);
   assert.equal(assertWorkspace(workspace), workspace);
+  const rootProjectWorkspace = {
+    ...workspace,
+    projectRoot: "/source/repository",
+    projectRelativePath: ".",
+    executionRoot: "/managed/session-1"
+  };
+  assert.equal(assertWorkspace(rootProjectWorkspace), rootProjectWorkspace);
 });
 
 test("checkpoint and workspace validators reject unsafe identities at precise paths", () => {
@@ -123,6 +130,12 @@ test("checkpoint and workspace validators reject unsafe identities at precise pa
     [{ oid: "abc", ref: "refs/dev-workbench/checkpoints/s/a/baseline" }, "/oid"],
     [{ oid: "a".repeat(40), ref: "refs/heads/main" }, "/ref"],
     [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/s/../baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/.session/attempt/baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/session./attempt/baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/ses..sion/attempt/baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/session/.attempt/baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/session/attempt./baseline" }, "/ref"],
+    [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/session/att..empt/baseline" }, "/ref"],
     [{ oid: "a".repeat(40), ref: "refs/dev-workbench/checkpoints/s/a/baseline", extra: true }, "/extra"]
   ];
   for (const [value, expectedPath] of checkpointCases) {
@@ -147,6 +160,14 @@ test("checkpoint and workspace validators reject unsafe identities at precise pa
   const workspaceCases = [
     [{ ...valid, projectRelativePath: "../app" }, "/projectRelativePath"],
     [{ ...valid, executionRoot: "relative/app" }, "/executionRoot"],
+    [{ ...valid, projectRoot: "/source/repository/app/" }, "/projectRoot"],
+    [{ ...valid, repositoryRoot: "/source/./repository" }, "/repositoryRoot"],
+    [{ ...valid, commonGitDir: "/source/repository//.git" }, "/commonGitDir"],
+    [{ ...valid, worktreeRoot: "/managed/../session-1" }, "/worktreeRoot"],
+    [{ ...valid, executionRoot: "/managed/session-1/./app" }, "/executionRoot"],
+    [{ ...valid, projectRoot: "/source/repository/other" }, "/projectRoot"],
+    [{ ...valid, executionRoot: "/managed/session-1/other" }, "/executionRoot"],
+    [{ ...valid, projectRelativePath: "." }, "/projectRoot"],
     [{ ...valid, executionRoot: valid.projectRoot }, "/executionRoot"],
     [{ ...valid, worktreeRoot: valid.repositoryRoot }, "/worktreeRoot"],
     [{ ...valid, surprise: true }, "/surprise"]
@@ -191,6 +212,75 @@ test("attempt and file manifest validators accept bounded immutable evidence", (
 
   assert.equal(assertFileManifest(files), files);
   assert.equal(assertAttempt(attempt), attempt);
+});
+
+test("attempt validator enforces lifecycle evidence invariants", () => {
+  const running = {
+    id: "attempt-1",
+    stepIndex: 0,
+    attempt: 1,
+    status: "running",
+    startedAt: "2026-07-30T08:00:00.000Z",
+    baseline: {
+      oid: "a".repeat(40),
+      ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/baseline"
+    }
+  };
+  const completedEvidence = {
+    completedAt: "2026-07-30T08:00:03.000Z",
+    result: {
+      oid: "b".repeat(40),
+      ref: "refs/dev-workbench/checkpoints/session-1/attempt-1/result",
+      restorable: false
+    },
+    snapshot: { files: [], command: {} }
+  };
+
+  assert.equal(assertAttempt(running), running);
+  for (const status of ["awaiting_review", "failed", "cancelled"]) {
+    const attempt = { ...running, ...completedEvidence, status };
+    assert.equal(assertAttempt(attempt), attempt);
+  }
+  const completed = {
+    ...running,
+    ...completedEvidence,
+    status: "completed",
+    result: { ...completedEvidence.result, restorable: true }
+  };
+  assert.equal(assertAttempt(completed), completed);
+
+  const invalid = [
+    [{ ...running, completedAt: completedEvidence.completedAt }, "/completedAt"],
+    [{ ...running, result: completedEvidence.result }, "/result"],
+    [{ ...running, snapshot: completedEvidence.snapshot }, "/snapshot"],
+    ...["awaiting_review", "completed", "failed", "cancelled"].flatMap((status) => [
+      [{ ...running, status, result: completed.result, snapshot: completedEvidence.snapshot }, "/completedAt"],
+      [{ ...running, status, completedAt: completedEvidence.completedAt, snapshot: completedEvidence.snapshot }, "/result"],
+      [{ ...running, status, completedAt: completedEvidence.completedAt, result: completed.result }, "/snapshot"]
+    ]),
+    [{
+      ...running,
+      ...completedEvidence,
+      status: "completed",
+      result: { ...completedEvidence.result, restorable: false }
+    }, "/result/restorable"],
+    ...["awaiting_review", "failed", "cancelled"].map((status) => [{
+      ...running,
+      ...completedEvidence,
+      status,
+      result: { ...completedEvidence.result, restorable: true }
+    }, "/result/restorable"])
+  ];
+
+  for (const [attempt, expectedPath] of invalid) {
+    assert.throws(
+      () => assertAttempt(attempt),
+      (error) => error instanceof ProtocolValidationError
+        && error.documentType === "attempt"
+        && error.issues.some((item) => item.path === expectedPath),
+      `${attempt.status}: ${expectedPath}`
+    );
+  }
 });
 
 test("attempt and file manifest validators reject unknown, unsafe, and oversized evidence", () => {
