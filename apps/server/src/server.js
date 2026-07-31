@@ -627,6 +627,9 @@ export async function createApp(options = {}) {
 
       const cancelMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/cancel$/i);
       if (request.method === "POST" && cancelMatch) {
+        if (shuttingDown) {
+          throw structuredError("Command attempt is already finishing", 409, "finishing");
+        }
         const id = cancelMatch[1];
         const index = Number(cancelMatch[2]);
         const body = await readJson(request);

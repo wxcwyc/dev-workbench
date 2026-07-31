@@ -1938,6 +1938,291 @@ test("checkpointed run save failure reports result reconciliation after Git norm
   assert.equal(persisted.attempts[0].status, "running");
 });
 
+test("two accepted checkpoints restore both directions with append-only history and one mutation each", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let blockNextRestore = false;
+  let restoreClaimedResolve;
+  let releaseRestore;
+  const restoreClaimed = new Promise((resolve) => { restoreClaimedResolve = resolve; });
+  const restoreBlocked = new Promise((resolve) => { releaseRestore = resolve; });
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    afterSessionClaim: async ({ operation }) => {
+      if (operation !== "restore" || !blockNextRestore) return;
+      blockNextRestore = false;
+      restoreClaimedResolve();
+      await restoreBlocked;
+    },
+  });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Two restore boundaries",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [
+      {
+        id: "first",
+        title: "First",
+        action: {
+          command: [process.execPath, "-e", "require('node:fs').writeFileSync('first.txt','first\\n')"],
+        },
+      },
+      {
+        id: "second",
+        title: "Second",
+        dependsOn: ["first"],
+        action: {
+          command: [process.execPath, "-e", "require('node:fs').writeFileSync('second.txt','second\\n')"],
+        },
+      },
+    ],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const firstAccepted = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  await postJson(`${sessionUrl}/steps/1/run`, { confirmed: true });
+  const secondAccepted = await postJson(`${sessionUrl}/steps/1/review`, { decision: "accept" });
+  const attemptsBefore = structuredClone(secondAccepted.body.attempts);
+  const eventsBefore = structuredClone(secondAccepted.body.events);
+  const mutations = trackSessionMutations(t, created.body.id);
+
+  const initial = await postJson(`${sessionUrl}/checkpoints/initial/restore`, {
+    confirmed: true,
+    expectedOid: prepared.workspace.baseOid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(initial.response.status, 200);
+  assert.deepEqual(mutations.counts(), { saves: 1, emits: 1 });
+  assert.deepEqual(mutations.operations(), ["save", "emit"]);
+  assert.equal(initial.body.workspace.currentCheckpointId, "initial");
+  assert.deepEqual(initial.body.steps.map(({ status }) => status), ["pending", "pending"]);
+  assert.deepEqual(initial.body.attempts, attemptsBefore);
+  assert.deepEqual(initial.body.events.slice(0, eventsBefore.length), eventsBefore);
+
+  const firstAttempt = firstAccepted.body.attempts[0];
+  const first = await postJson(`${sessionUrl}/checkpoints/${firstAttempt.id}/restore`, {
+    confirmed: true,
+    expectedOid: firstAttempt.result.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(first.response.status, 200);
+  assert.deepEqual(mutations.counts(), { saves: 2, emits: 2 });
+  assert.equal(first.body.workspace.currentCheckpointId, firstAttempt.id);
+  assert.deepEqual(first.body.steps.map(({ status }) => status), ["completed", "pending"]);
+  assert.deepEqual(first.body.attempts, attemptsBefore);
+  assert.deepEqual(first.body.events.slice(0, eventsBefore.length), eventsBefore);
+  assert.deepEqual(
+    first.body.events.slice(eventsBefore.length).map(({ type, checkpointId }) => ({ type, checkpointId })),
+    [
+      { type: "workspace.restored", checkpointId: "initial" },
+      { type: "workspace.restored", checkpointId: firstAttempt.id },
+    ],
+  );
+  await assert.rejects(
+    fs.access(path.join(prepared.workspace.executionRoot, "second.txt")),
+    (error) => error.code === "ENOENT",
+  );
+
+  blockNextRestore = true;
+  const repeated = postJson(`${sessionUrl}/checkpoints/${firstAttempt.id}/restore`, {
+    confirmed: true,
+    expectedOid: firstAttempt.result.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  await withTimeout(restoreClaimed, "first concurrent restore claim");
+  const concurrent = await postJson(`${sessionUrl}/checkpoints/${firstAttempt.id}/restore`, {
+    confirmed: true,
+    expectedOid: firstAttempt.result.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(concurrent.response.status, 409);
+  releaseRestore();
+  const repeatedResult = await repeated;
+  assert.equal(repeatedResult.response.status, 200);
+  assert.deepEqual(mutations.counts(), { saves: 3, emits: 3 });
+  assert.deepEqual(repeatedResult.body.attempts, attemptsBefore);
+  assert.equal(repeatedResult.body.events.at(-1).type, "workspace.restored");
+  assert.equal(repeatedResult.body.events.at(-1).checkpointId, firstAttempt.id);
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+});
+
+test("retry rejects each missing confirmation field without spawning or appending an attempt", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandCalls = 0;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action) => {
+      commandCalls += 1;
+      const error = new Error("first attempt fails");
+      error.result = { command: action.command, cwd: root, stdout: "", stderr: "", exitCode: 1 };
+      throw error;
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Missing retry confirmation",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Retry", action: { command: ["fake-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const failed = await (await fetch(sessionUrl)).json();
+  const complete = {
+    confirmed: true,
+    confirmedRestore: true,
+    expectedAttemptId: failed.attempts[0].id,
+    expectedBaselineOid: failed.attempts[0].baseline.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  };
+
+  for (const missing of [
+    "confirmedRestore",
+    "expectedAttemptId",
+    "expectedBaselineOid",
+    "expectedExecutionRoot",
+  ]) {
+    const body = { ...complete };
+    delete body[missing];
+    const result = await postJson(`${sessionUrl}/steps/0/run`, body);
+    assert.equal(result.response.status, 409, missing);
+    assert.equal(result.body.code, "retry_confirmation_mismatch", missing);
+    const persisted = await (await fetch(sessionUrl)).json();
+    assert.equal(persisted.attempts.length, 1, missing);
+    assert.equal(persisted.steps[0].attempt, 1, missing);
+  }
+  assert.equal(commandCalls, 1);
+});
+
+test("a stale cancel cannot abort active retry attempt two", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandCalls = 0;
+  let retryStarted = false;
+  let retryAborted = false;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action, { signal }) => {
+      commandCalls += 1;
+      if (commandCalls === 1) {
+        const error = new Error("first attempt fails");
+        error.result = { command: action.command, cwd: root, stdout: "", stderr: "", exitCode: 1 };
+        throw error;
+      }
+      retryStarted = true;
+      await new Promise((_, reject) => {
+        signal.addEventListener("abort", () => {
+          retryAborted = true;
+          reject(Object.assign(new Error("Command aborted"), {
+            name: "AbortError",
+            result: { command: action.command, cwd: root, stdout: "", stderr: "", exitCode: null },
+          }));
+        }, { once: true });
+      });
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Cancel generation",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Retry", action: { command: ["fake-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const failed = await (await fetch(sessionUrl)).json();
+  const retry = postJson(`${sessionUrl}/steps/0/run`, {
+    confirmed: true,
+    confirmedRestore: true,
+    expectedAttemptId: failed.attempts[0].id,
+    expectedBaselineOid: failed.attempts[0].baseline.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  await waitForCondition(() => retryStarted, "retry attempt two start");
+
+  const stale = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.code, "attempt_not_active");
+  assert.equal(retryAborted, false);
+  const current = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 2 });
+  assert.equal(current.response.status, 202);
+  await retry;
+  const persisted = await (await fetch(sessionUrl)).json();
+  assert.equal(persisted.attempts[0].status, "failed");
+  assert.equal(persisted.attempts[1].status, "cancelled");
+});
+
+test("shutdown owns checkpointed abort finalization and rejects a late user cancel", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandStartedResolve;
+  let shutdownSignalledResolve;
+  let releaseCommand;
+  let releaseStopAll;
+  const commandStarted = new Promise((resolve) => { commandStartedResolve = resolve; });
+  const shutdownSignalled = new Promise((resolve) => { shutdownSignalledResolve = resolve; });
+  const commandBlocked = new Promise((resolve) => { releaseCommand = resolve; });
+  const stopAllBlocked = new Promise((resolve) => { releaseStopAll = resolve; });
+  const previews = new FakePreviewSupervisor();
+  previews.stopAll = async () => {
+    previews.stopAllCalls += 1;
+    await stopAllBlocked;
+  };
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    previews,
+    runCommand: async (root, action, { signal }) => {
+      commandStartedResolve();
+      await new Promise((resolve) => {
+        signal.addEventListener("abort", () => {
+          shutdownSignalledResolve();
+          resolve();
+        }, { once: true });
+      });
+      await commandBlocked;
+      throw Object.assign(new Error("Command aborted"), {
+        name: "AbortError",
+        result: { command: action.command, cwd: root, stdout: "", stderr: "", exitCode: null },
+      });
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Checkpoint shutdown",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Long", action: { command: ["fake-long-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  await prepareSessionWorkspace(app, created.body.id);
+  const run = postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  await withTimeout(commandStarted, "checkpointed shutdown command");
+  const closed = new Promise((resolve) => app.server.once("close", resolve));
+  app.server.close();
+  await withTimeout(shutdownSignalled, "checkpointed shutdown signal");
+
+  const lateCancel = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  assert.equal(lateCancel.response.status, 409);
+  assert.equal(lateCancel.body.code, "finishing");
+  releaseCommand();
+  assert.equal((await withTimeout(run, "checkpointed shutdown run")).response.status, 400);
+  const persisted = JSON.parse(await fs.readFile(
+    path.join(app.stateRoot, `${created.body.id}.json`),
+    "utf8",
+  ));
+  assert.equal(persisted.steps[0].status, "failed");
+  assert.equal(persisted.steps[0].error.message, "Command aborted by server shutdown");
+  assert.equal(persisted.attempts[0].status, "failed");
+  releaseStopAll();
+  await withTimeout(closed, "checkpointed shutdown close");
+});
+
 test("invalid review targets, state, media type, and workbench neither mutate nor publish", async (t) => {
   const app = await startTestApp(t);
   await makeSampleProject(app.allowedRoot);
