@@ -343,7 +343,8 @@ export function assertAttempt(attempt) {
   const issues = [];
   if (!requireObject(attempt, "/", issues)) throwIssues("attempt", issues);
   allowedKeys(attempt, [
-    "id", "stepIndex", "attempt", "status", "startedAt", "completedAt", "baseline", "result", "snapshot"
+    "id", "stepIndex", "attempt", "status", "startedAt", "completedAt", "baseline", "result", "snapshot",
+    "evidenceError"
   ], "/", issues);
   validateIdentifier(attempt.id, "/id", issues);
   if (!Number.isInteger(attempt.stepIndex) || attempt.stepIndex < 0) {
@@ -374,9 +375,33 @@ export function assertAttempt(attempt) {
       }
     }
   }
+  if (Object.hasOwn(attempt, "evidenceError")) {
+    if (requireObject(attempt.evidenceError, "/evidenceError", issues)) {
+      allowedKeys(attempt.evidenceError, ["name", "message", "code"], "/evidenceError", issues);
+      requireBoundedString(attempt.evidenceError.name, "/evidenceError/name", issues, 128);
+      requireBoundedString(attempt.evidenceError.message, "/evidenceError/message", issues, 4096);
+      if (attempt.evidenceError.code !== undefined) {
+        validateIdentifier(attempt.evidenceError.code, "/evidenceError/code", issues);
+      }
+    }
+    if (attempt.status !== "failed") {
+      issue(issues, "/evidenceError", "is allowed only for a failed attempt");
+    }
+  }
+  const evidenceFailure = attempt.status === "failed"
+    && Object.hasOwn(attempt, "evidenceError");
   if (attempt.status === "running") {
-    for (const key of ["completedAt", "result", "snapshot"]) {
+    for (const key of ["completedAt", "result", "snapshot", "evidenceError"]) {
       if (Object.hasOwn(attempt, key)) issue(issues, `/${key}`, "is not allowed while running");
+    }
+  } else if (evidenceFailure) {
+    if (attempt.completedAt === undefined || attempt.completedAt === null) {
+      issue(issues, "/completedAt", "is required after running");
+    }
+    for (const key of ["result", "snapshot"]) {
+      if (Object.hasOwn(attempt, key)) {
+        issue(issues, `/${key}`, "must be absent when evidence capture failed");
+      }
     }
   } else if (ATTEMPT_STATUSES.includes(attempt.status)) {
     for (const key of ["completedAt", "result", "snapshot"]) {

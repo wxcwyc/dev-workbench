@@ -416,9 +416,12 @@ export class SessionEngine {
     return publicClone;
   }
 
-  failStep(session, index, error, snapshot = null, resultIdentity = null) {
+  failStep(session, index, error, snapshot = null, resultIdentity = null, evidenceError = null) {
     const step = this.requireStep(session, index);
     if (step.status !== "running") throw new Error(`Step ${index + 1} is not running`);
+    if (evidenceError !== null && (snapshot !== null || resultIdentity !== null)) {
+      throw new Error("evidenceError is mutually exclusive with result and snapshot evidence");
+    }
     const completedAt = timestamp();
     const candidateStep = {
       ...step,
@@ -429,7 +432,43 @@ export class SessionEngine {
     const steps = session.steps.slice();
     steps[index] = candidateStep;
 
-    const recoverableAttempt = resultIdentity == null ? null : findMatchingAttempt(session, index);
+    const matchingAttempt = findMatchingAttempt(session, index);
+    if (evidenceError !== null) {
+      if (!isMigration(session) || matchingAttempt == null) {
+        throw new Error("evidenceError requires a running recoverable migration attempt");
+      }
+      const { attempt, attemptIndex, attempts, workspace } = this.requireAttempt(session, index, ["running"]);
+      const candidateAttempt = assertAttempt({
+        ...structuredClone(attempt),
+        status: "failed",
+        completedAt,
+        evidenceError: structuredClone(evidenceError)
+      });
+      const nextAttempts = attempts.slice();
+      nextAttempts[attemptIndex] = candidateAttempt;
+      const candidate = {
+        ...session,
+        steps,
+        attempts: nextAttempts,
+        workspace,
+        status: "failed",
+        events: [
+          ...session.events,
+          event("step.failed", {
+            stepIndex: index,
+            stepId: candidateStep.id,
+            attempt: candidateStep.attempt,
+            error: candidateStep.error
+          })
+        ],
+        updatedAt: timestamp()
+      };
+      const publicClone = publicSession(candidate);
+      applySessionState(session, candidate);
+      return publicClone;
+    }
+
+    const recoverableAttempt = resultIdentity == null ? null : matchingAttempt;
     if (!isMigration(session) || recoverableAttempt == null) {
       let snapshots;
       if (snapshot !== null) {

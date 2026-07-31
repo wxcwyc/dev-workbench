@@ -4,10 +4,26 @@ import { captureGitState } from "./git-adapter.js";
 function boundedTail(value, maxOutputBytes) {
   const bytes = Buffer.from(typeof value === "string" ? value : "", "utf8");
   if (bytes.length <= maxOutputBytes) return { text: bytes.toString("utf8"), truncated: false };
+  let start = bytes.length - maxOutputBytes;
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
   return {
-    text: bytes.subarray(bytes.length - maxOutputBytes).toString("utf8"),
+    text: bytes.subarray(start).toString("utf8"),
     truncated: true,
   };
+}
+
+function projectManifest(files, projectRelativePath) {
+  if (projectRelativePath === ".") return files.map((file) => ({ ...file }));
+  const prefix = `${projectRelativePath}/`;
+  const inside = (filePath) => typeof filePath === "string" && filePath.startsWith(prefix);
+  const relative = (filePath) => filePath.slice(prefix.length);
+  return files
+    .filter((file) => inside(file.path))
+    .map((file) => ({
+      ...file,
+      path: relative(file.path),
+      oldPath: inside(file.oldPath) ? relative(file.oldPath) : null,
+    }));
 }
 
 export function checkpointAttemptSnapshot(
@@ -15,17 +31,7 @@ export function checkpointAttemptSnapshot(
   commandResult,
   { maxOutputBytes = 64 * 1024, projectRelativePath = "." } = {},
 ) {
-  const prefix = projectRelativePath === "." ? "" : `${projectRelativePath}/`;
-  const projectFiles = files.map((file) => {
-    const normalized = {
-      ...file,
-      path: prefix && file.path.startsWith(prefix) ? file.path.slice(prefix.length) : file.path,
-    };
-    if (prefix && file.oldPath?.startsWith(prefix)) {
-      normalized.oldPath = file.oldPath.slice(prefix.length);
-    }
-    return normalized;
-  });
+  const projectFiles = projectManifest(files, projectRelativePath);
   if (commandResult == null) return { files: projectFiles, command: null };
   const stdout = boundedTail(commandResult.stdout, maxOutputBytes);
   const stderr = boundedTail(commandResult.stderr, maxOutputBytes);

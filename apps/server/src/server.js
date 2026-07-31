@@ -303,6 +303,47 @@ export async function createApp(options = {}) {
       { expected: expectedOid, observed },
     );
   };
+  const errorEvidence = (error) => {
+    const name = typeof error?.name === "string" && error.name.trim()
+      ? error.name.slice(0, 128)
+      : "Error";
+    const message = typeof error?.message === "string" && error.message.trim()
+      ? error.message.slice(0, 4096)
+      : "Result checkpoint capture failed";
+    const code = typeof error?.code === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(error.code)
+      ? error.code
+      : null;
+    return { name, message, ...(code ? { code } : {}) };
+  };
+  const evidenceReconciliationError = async (
+    workspace,
+    { sessionId, attemptId, captureError, persistenceError = null },
+  ) => {
+    const observed = await inspectGitRepository(workspace.worktreeRoot)
+      .then((inspection) => inspection.headOid)
+      .catch(() => null);
+    return structuredError(
+      "Result evidence capture failed; reconciliation is required",
+      409,
+      "reconciliation_required",
+      {
+        expected: {
+          ref: `refs/dev-workbench/checkpoints/${sessionId}/${attemptId}/result`,
+          oid: null,
+        },
+        observed,
+        captureError: {
+          ...errorEvidence(captureError),
+        },
+        ...(persistenceError ? {
+          persistenceError: {
+            ...errorEvidence(persistenceError),
+          },
+        } : {}),
+      },
+    );
+  };
 
   async function createSession(input) {
     assertSessionInput(input);
@@ -619,7 +660,32 @@ export async function createApp(options = {}) {
             throw new Error('Review body must be exactly {"decision":"accept"} or {"decision":"reject"}');
           }
           const session = await requireSession(id);
-          engine.reviewStep(session, Number(reviewMatch[2]), body.decision);
+          const index = Number(reviewMatch[2]);
+          if (body.decision === "accept" && session.workspace != null) {
+            const step = engine.requireStep(session, index);
+            const attempt = session.attempts?.find((candidate) => (
+              candidate.stepIndex === index
+              && candidate.attempt === step.attempt
+              && candidate.status === "awaiting_review"
+            ));
+            if (attempt) {
+              await workspaceAdapter.validate(session.workspace, { session, sessionId: session.id });
+              const inspection = await inspectGitRepository(session.workspace.worktreeRoot);
+              if (inspection.dirty.length > 0 || inspection.headOid !== attempt.result.oid) {
+                throw structuredError(
+                  "Recoverable result evidence no longer matches the managed worktree",
+                  409,
+                  "review_evidence_mismatch",
+                  {
+                    expected: attempt.result.oid,
+                    observed: inspection.headOid,
+                    dirty: inspection.dirty,
+                  },
+                );
+              }
+            }
+          }
+          engine.reviewStep(session, index, body.decision);
           await store.save(session); emit(session);
           return sendJson(response, 200, publicSession(session));
         } finally { release(); }
@@ -746,6 +812,7 @@ export async function createApp(options = {}) {
           let attemptNumber = null;
           let active = null;
           let finalCheckpoint = null;
+          let checkpointCaptureError = null;
           try {
             const recoverable = Boolean(
               step.action
@@ -804,10 +871,15 @@ export async function createApp(options = {}) {
               }
             }
             if (attemptId) {
-              finalCheckpoint = await workspaceAdapter.createResult(
-                { ...session.workspace, sessionId: session.id },
-                { sessionId: session.id, attemptId, baseline },
-              );
+              try {
+                finalCheckpoint = await workspaceAdapter.createResult(
+                  { ...session.workspace, sessionId: session.id },
+                  { sessionId: session.id, attemptId, baseline },
+                );
+              } catch (error) {
+                checkpointCaptureError = error;
+                throw error;
+              }
               const snapshot = checkpointAttemptSnapshot(finalCheckpoint.files, result, {
                 projectRelativePath: session.workspace.projectRelativePath,
               });
@@ -838,8 +910,7 @@ export async function createApp(options = {}) {
               }
               let snapshot = null;
               let resultCheckpoint = null;
-              let checkpointError = null;
-              if (attemptId) {
+              if (attemptId && checkpointCaptureError == null) {
                 try {
                   active && (active.phase = "finishing");
                   resultCheckpoint = await workspaceAdapter.createResult(
@@ -850,7 +921,7 @@ export async function createApp(options = {}) {
                     projectRelativePath: session.workspace.projectRelativePath,
                   });
                 } catch (snapshotError) {
-                  checkpointError = snapshotError;
+                  checkpointCaptureError = snapshotError;
                   runtime.warn(`Could not capture failed command snapshot for session ${id}: ${snapshotError.message}`);
                 }
               } else if (error.result) {
@@ -860,8 +931,34 @@ export async function createApp(options = {}) {
                   runtime.warn(`Could not capture failed command snapshot for session ${id}: ${snapshotError.message}`);
                 }
               }
+              if (attemptId && checkpointCaptureError) {
+                const evidenceError = errorEvidence(checkpointCaptureError);
+                const terminalError = Object.assign(new Error(evidenceError.message), {
+                  name: evidenceError.name,
+                });
+                engine.failStep(
+                  session,
+                  index,
+                  terminalError,
+                  null,
+                  null,
+                  evidenceError,
+                );
+                let persistenceError = null;
+                try {
+                  await store.save(session);
+                  emit(session);
+                } catch (saveError) {
+                  persistenceError = saveError;
+                }
+                throw await evidenceReconciliationError(session.workspace, {
+                  sessionId: session.id,
+                  attemptId,
+                  captureError: checkpointCaptureError,
+                  persistenceError,
+                });
+              }
               try {
-                if (attemptId && !resultCheckpoint) throw checkpointError;
                 if (attemptId && resultCheckpoint) {
                   if (error.name === "AbortError" && active?.cancelReason === "user") {
                     engine.cancelStep(

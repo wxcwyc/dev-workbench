@@ -1105,6 +1105,73 @@ test("failStep is atomic when reading the snapshot throws", () => {
   assert.strictEqual(session.events, refs.events);
 });
 
+test("failStep records explicit evidence capture failure without fabricating a result checkpoint", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  const baseline = structuredClone(session.attempts[0].baseline);
+  const evidenceError = {
+    name: "GitWorkspaceError",
+    message: "Result checkpoint capture failed",
+    code: "checkpoint_capture_failed"
+  };
+
+  engine.failStep(session, 0, new Error(evidenceError.message), null, null, evidenceError);
+
+  assert.equal(session.status, "failed");
+  assert.equal(session.steps[0].status, "failed");
+  assert.deepEqual(session.steps[0].error, {
+    name: "Error",
+    message: "Result checkpoint capture failed"
+  });
+  assert.equal(session.attempts[0].status, "failed");
+  assert.deepEqual(session.attempts[0].baseline, baseline);
+  assert.deepEqual(session.attempts[0].evidenceError, evidenceError);
+  assert.equal(Object.hasOwn(session.attempts[0], "result"), false);
+  assert.equal(Object.hasOwn(session.attempts[0], "snapshot"), false);
+  assert.equal(engine.nextRunnable(session), 0);
+
+  startMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-2",
+    baselineOid: baseline.oid
+  });
+  assert.equal(session.steps[0].attempt, 2);
+  assert.equal(session.attempts.length, 2);
+  assert.deepEqual(session.attempts[0].evidenceError, evidenceError);
+});
+
+test("failStep evidence capture failure is atomic when evidenceError is invalid", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ id: "apply", title: "Apply" }]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  const before = structuredClone(session);
+
+  assert.throws(
+    () => engine.failStep(
+      session,
+      0,
+      new Error("capture failed"),
+      null,
+      null,
+      { name: "Error", message: "", extra: true }
+    ),
+    /evidenceError/i
+  );
+  assert.deepEqual(session, before);
+});
+
 test("completeStep is atomic when its public result cannot be cloned", () => {
   const engine = new SessionEngine();
   const session = engine.create({

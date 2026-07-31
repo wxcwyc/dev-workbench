@@ -248,6 +248,17 @@ test("attempt validator enforces lifecycle evidence invariants", () => {
     result: { ...completedEvidence.result, restorable: true }
   };
   assert.equal(assertAttempt(completed), completed);
+  const evidenceFailed = {
+    ...running,
+    status: "failed",
+    completedAt: completedEvidence.completedAt,
+    evidenceError: {
+      name: "GitWorkspaceError",
+      message: "Result checkpoint capture failed",
+      code: "checkpoint_capture_failed"
+    }
+  };
+  assert.equal(assertAttempt(evidenceFailed), evidenceFailed);
 
   const invalid = [
     [{ ...running, completedAt: completedEvidence.completedAt }, "/completedAt"],
@@ -269,7 +280,11 @@ test("attempt validator enforces lifecycle evidence invariants", () => {
       ...completedEvidence,
       status,
       result: { ...completedEvidence.result, restorable: true }
-    }, "/result/restorable"])
+    }, "/result/restorable"]),
+    [{ ...evidenceFailed, result: completedEvidence.result }, "/result"],
+    [{ ...evidenceFailed, snapshot: completedEvidence.snapshot }, "/snapshot"],
+    [{ ...evidenceFailed, evidenceError: { message: "missing name" } }, "/evidenceError/name"],
+    [{ ...evidenceFailed, evidenceError: { name: "Error", message: "", extra: true } }, "/evidenceError/extra"]
   ];
 
   for (const [attempt, expectedPath] of invalid) {

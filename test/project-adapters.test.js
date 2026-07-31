@@ -52,6 +52,46 @@ test("checkpoint attempt snapshots retain a bounded output tail with truncation 
   });
 });
 
+test("checkpoint attempt output tails never split UTF-8 code points", () => {
+  const snapshot = checkpointAttemptSnapshot(
+    [],
+    { stdout: "a🙂b", stderr: "a🙂b" },
+    { maxOutputBytes: 5 },
+  );
+  const narrow = checkpointAttemptSnapshot(
+    [],
+    { stdout: "a🙂b", stderr: "" },
+    { maxOutputBytes: 4 },
+  );
+
+  assert.equal(snapshot.command.stdout, "🙂b");
+  assert.equal(Buffer.byteLength(snapshot.command.stdout), 5);
+  assert.equal(snapshot.command.stderr, "🙂b");
+  assert.equal(narrow.command.stdout, "b");
+  assert.ok(!narrow.command.stdout.includes("\uFFFD"));
+  assert.ok(Buffer.byteLength(narrow.command.stdout) <= 4);
+});
+
+test("checkpoint manifests expose only changes inside the project subtree", () => {
+  const snapshot = checkpointAttemptSnapshot([
+    { path: "app/inside.txt", oldPath: null, status: "modified" },
+    { path: "app2/prefix.txt", oldPath: null, status: "modified" },
+    { path: "sibling/outside.txt", oldPath: null, status: "added" },
+    { path: "app/moved-in.txt", oldPath: "sibling/source.txt", status: "renamed" },
+    { path: "sibling/moved-out.txt", oldPath: "app/source.txt", status: "renamed" },
+    { path: "sibling/copied-out.txt", oldPath: "app/source.txt", status: "copied" },
+    { path: "app/copied-in.txt", oldPath: "sibling/source.txt", status: "copied" },
+    { path: "app/new-name.txt", oldPath: "app/old-name.txt", status: "renamed" },
+  ], null, { projectRelativePath: "app" });
+
+  assert.deepEqual(snapshot.files, [
+    { path: "inside.txt", oldPath: null, status: "modified" },
+    { path: "moved-in.txt", oldPath: null, status: "renamed" },
+    { path: "copied-in.txt", oldPath: null, status: "copied" },
+    { path: "new-name.txt", oldPath: "old-name.txt", status: "renamed" },
+  ]);
+});
+
 test("captureFileTree reports a nested scan error and continues", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-tree-nested-error-"));
   const nested = path.join(root, "nested");

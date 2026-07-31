@@ -10,6 +10,10 @@ import { promisify } from "node:util";
 
 import { createApp } from "../apps/server/src/server.js";
 import { TerminalBuffer } from "../packages/execution-core/src/terminal-buffer.js";
+import {
+  createBaselineCheckpoint,
+  restoreCheckpoint,
+} from "../packages/project-adapters/src/git-adapter.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1627,6 +1631,52 @@ test("prepared migration command runs create immutable Git checkpoints and accep
   assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
 });
 
+test("accept rejects dirty or drifted recoverable result worktrees without persistence or publication", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Review result identity",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Change",
+      action: {
+        command: [process.execPath, "-e", "require('node:fs').writeFileSync('keep.txt','result\\n')"],
+      },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const before = structuredClone(run.body);
+  const mutations = trackSessionMutations(t, created.body.id);
+
+  await fs.writeFile(path.join(prepared.workspace.executionRoot, "keep.txt"), "dirty\n");
+  const dirty = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(dirty.response.status, 409);
+  assert.equal(dirty.body.code, "review_evidence_mismatch");
+  assert.deepEqual(mutations.counts(), { saves: 0, emits: 0 });
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+
+  await fs.writeFile(path.join(prepared.workspace.executionRoot, "keep.txt"), "result\n");
+  await git(
+    prepared.workspace.worktreeRoot,
+    "checkout",
+    "--detach",
+    run.body.attempts[0].baseline.oid,
+  );
+  const drifted = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  assert.equal(drifted.response.status, 409);
+  assert.equal(drifted.body.code, "review_evidence_mismatch");
+  assert.deepEqual(mutations.counts(), { saves: 0, emits: 0 });
+  const persisted = await (await fetch(sessionUrl)).json();
+  assert.deepEqual(persisted, before);
+  assert.equal(persisted.attempts[0].result.restorable, false);
+  assert.equal(persisted.workspace.currentCheckpointId, "initial");
+});
+
 test("failed checkpointed attempts retain bounded partial evidence and retry restores the exact baseline first", async (t) => {
   const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
   t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
@@ -1936,6 +1986,75 @@ test("checkpointed run save failure reports result reconciliation after Git norm
   const persisted = await (await fetch(sessionUrl)).json();
   assert.equal(persisted.steps[0].status, "running");
   assert.equal(persisted.attempts[0].status, "running");
+});
+
+test("result checkpoint capture failure persists explicit evidence failure and returns reconciliation details", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandCalls = 0;
+  const captureError = Object.assign(new Error("simulated result capture failure"), {
+    name: "GitWorkspaceError",
+    code: "checkpoint_capture_failed",
+  });
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    workspaceAdapter: {
+      createBaseline: createBaselineCheckpoint,
+      createResult: async () => { throw captureError; },
+      restore: restoreCheckpoint,
+    },
+    runCommand: async (root, action) => {
+      commandCalls += 1;
+      await fs.writeFile(path.join(root, "partial.txt"), "partial\n");
+      throw Object.assign(new Error("simulated command failure"), {
+        result: {
+          command: action.command,
+          cwd: root,
+          stdout: "partial\n",
+          stderr: "command failed\n",
+          exitCode: 2,
+        },
+      });
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Capture failure",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Change", action: { command: ["fake-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  const mutations = trackSessionMutations(t, created.body.id);
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+
+  assert.equal(run.response.status, 409);
+  assert.equal(run.body.code, "reconciliation_required");
+  assert.deepEqual(run.body.details.expected, {
+    ref: `refs/dev-workbench/checkpoints/${created.body.id}/attempt-1/result`,
+    oid: null,
+  });
+  assert.equal(run.body.details.observed, prepared.workspace.baseOid);
+  assert.deepEqual(run.body.details.captureError, {
+    name: "GitWorkspaceError",
+    message: "simulated result capture failure",
+    code: "checkpoint_capture_failed",
+  });
+  assert.equal(commandCalls, 1);
+  assert.deepEqual(mutations.counts(), { saves: 2, emits: 2 });
+  const persisted = await (await fetch(sessionUrl)).json();
+  assert.equal(persisted.status, "failed");
+  assert.equal(persisted.steps[0].status, "failed");
+  assert.equal(persisted.steps[0].error.message, "simulated result capture failure");
+  assert.equal(persisted.attempts[0].status, "failed");
+  assert.deepEqual(persisted.attempts[0].evidenceError, run.body.details.captureError);
+  assert.equal(Object.hasOwn(persisted.attempts[0], "result"), false);
+  assert.equal(Object.hasOwn(persisted.attempts[0], "snapshot"), false);
+  const cancel = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  assert.equal(cancel.response.status, 409);
+  assert.equal(cancel.body.code, "attempt_not_active");
 });
 
 test("two accepted checkpoints restore both directions with append-only history and one mutation each", async (t) => {
