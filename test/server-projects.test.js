@@ -273,6 +273,7 @@ function createSampleWorkspaceAdapter() {
       };
     },
     async validate() {},
+    async dispose() {},
   };
 }
 
@@ -1251,6 +1252,7 @@ test("workspace preparation rejects overlapping managed roots and only reuses an
 
   let prepareCalls = 0;
   let validateCalls = 0;
+  const validateSessionIds = [];
   const fakeWorkspace = {
     projectRoot: "/tmp/source/app",
     repositoryRoot: "/tmp/source",
@@ -1268,8 +1270,9 @@ test("workspace preparation rejects overlapping managed roots and only reuses an
         prepareCalls += 1;
         return structuredClone(fakeWorkspace);
       },
-      validate: async () => {
+      validate: async (_workspace, { sessionId }) => {
         validateCalls += 1;
+        validateSessionIds.push(sessionId);
       },
     },
   });
@@ -1290,9 +1293,40 @@ test("workspace preparation rejects overlapping managed roots and only reuses an
   assert.deepEqual(second.body, first.body);
   assert.equal(prepareCalls, 1);
   assert.equal(validateCalls, 1);
+  assert.deepEqual(validateSessionIds, [created.body.id]);
 });
 
-test("workspace preparation save failures do not publish or persist a prepared workspace", async (t) => {
+test("workspace preparation rejects foreign persisted workspaces instead of reusing them idempotently", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  await makeGitMigrationProject(app.allowedRoot);
+
+  const owner = await postJson(`${app.url}/api/sessions`, {
+    title: "Owned workspace",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [],
+  });
+  const ownerWorkspace = await prepareSessionWorkspace(app, owner.body.id);
+  const foreign = await postJson(`${app.url}/api/sessions`, {
+    title: "Foreign workspace",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [],
+  });
+  const foreignPath = path.join(app.stateRoot, `${foreign.body.id}.json`);
+  const persisted = JSON.parse(await fs.readFile(foreignPath, "utf8"));
+  persisted.workspace = ownerWorkspace.workspace;
+  await fs.writeFile(foreignPath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+  const prepared = await postJson(`${app.url}/api/sessions/${foreign.body.id}/workspace/prepare`, {});
+
+  assert.equal(prepared.response.status, 400);
+  assert.equal(prepared.body.code, "ownership_mismatch");
+});
+
+test("workspace preparation save failures dispose unpersisted fake workspaces exactly once without publishing", async (t) => {
   const fakeWorkspace = {
     projectRoot: "/tmp/source/app",
     repositoryRoot: "/tmp/source",
@@ -1304,10 +1338,16 @@ test("workspace preparation save failures do not publish or persist a prepared w
     ownershipToken: "owner-2",
     currentCheckpointId: "initial",
   };
+  let disposeCalls = 0;
+  const disposeSessionIds = [];
   const app = await startTestApp(t, {
     workspaceAdapter: {
       prepare: async () => structuredClone(fakeWorkspace),
       validate: async () => {},
+      dispose: async (_workspace, { sessionId }) => {
+        disposeCalls += 1;
+        disposeSessionIds.push(sessionId);
+      },
     },
   });
   await makeSampleProject(app.allowedRoot);
@@ -1348,8 +1388,100 @@ test("workspace preparation save failures do not publish or persist a prepared w
   assert.match(prepared.body.error, /simulated prepare save failure/i);
   assert.equal(timedOut, true);
   assert.equal((await (await fetch(sessionUrl)).json()).workspace, null);
+  assert.equal(disposeCalls, 1);
+  assert.deepEqual(disposeSessionIds, [created.body.id]);
   await stream.cancel();
   streamAbort.abort();
+});
+
+test("workspace preparation save failures preserve the save error when cleanup also fails", async (t) => {
+  const warnings = [];
+  const app = await startTestApp(t, {
+    warn: (message) => warnings.push(String(message)),
+    workspaceAdapter: {
+      prepare: async () => ({
+        projectRoot: "/tmp/source/app",
+        repositoryRoot: "/tmp/source",
+        projectRelativePath: "app",
+        commonGitDir: "/tmp/source/.git",
+        worktreeRoot: "/tmp/managed/session-cleanup",
+        executionRoot: "/tmp/managed/session-cleanup/app",
+        baseOid: "c".repeat(40),
+        ownershipToken: "owner-3",
+        currentCheckpointId: "initial",
+      }),
+      validate: async () => {},
+      dispose: async () => {
+        throw new Error("simulated cleanup failure");
+      },
+    },
+  });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Prepare cleanup failure",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+
+  const originalRename = fs.rename;
+  fs.rename = async (...args) => {
+    if (path.basename(args[1]) === `${created.body.id}.json`) {
+      const error = new Error("simulated prepare save failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalRename(...args);
+  };
+  t.after(() => {
+    if (fs.rename !== originalRename) fs.rename = originalRename;
+  });
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+
+  assert.equal(prepared.response.status, 400);
+  assert.match(prepared.body.error, /simulated prepare save failure/i);
+  assert.equal((await (await fetch(sessionUrl)).json()).workspace, null);
+  assert.ok(warnings.some((message) => /Could not dispose unpersisted workspace/.test(message)));
+});
+
+test("workspace preparation save failures remove unpersisted real managed worktrees", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Real prepare save failure",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const expectedWorktreeRoot = path.join(managedRoot, created.body.id);
+
+  const originalRename = fs.rename;
+  fs.rename = async (...args) => {
+    if (path.basename(args[1]) === `${created.body.id}.json`) {
+      const error = new Error("simulated prepare save failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalRename(...args);
+  };
+  t.after(() => {
+    if (fs.rename !== originalRename) fs.rename = originalRename;
+  });
+
+  const prepared = await postJson(`${sessionUrl}/workspace/prepare`, {});
+  const registeredWorktrees = await git(project.repositoryRoot, "worktree", "list", "--porcelain");
+
+  assert.equal(prepared.response.status, 400);
+  assert.match(prepared.body.error, /simulated prepare save failure/i);
+  assert.equal((await (await fetch(sessionUrl)).json()).workspace, null);
+  await assert.rejects(fs.access(expectedWorktreeRoot), (error) => error?.code === "ENOENT");
+  assert.ok(!registeredWorktrees.includes(expectedWorktreeRoot));
+  assert.deepEqual(await fs.readdir(managedRoot), []);
 });
 
 test("prepared migration actions execute and snapshot from workspace.executionRoot while source identity stays unchanged", async (t) => {

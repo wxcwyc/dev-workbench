@@ -11,7 +11,13 @@ import { decodeNdjson } from "../../../packages/adapter-sdk/src/index.js";
 import { ProtocolValidationError, assertPlanInput, assertSessionInput, assertTraceEvent, assertWorkspace, publicSession } from "../../../packages/protocol/src/index.js";
 import { resolveCommandCwd, resolveProjectRoot } from "../../../packages/project-adapters/src/project-boundary.js";
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
-import { GitWorkspaceError, inspectGitRepository, prepareManagedWorkspace } from "../../../packages/project-adapters/src/git-adapter.js";
+import {
+  GitWorkspaceError,
+  disposeManagedWorkspace,
+  inspectGitRepository,
+  prepareManagedWorkspace,
+  validateManagedWorkspace,
+} from "../../../packages/project-adapters/src/git-adapter.js";
 import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
 import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
 import { PreviewProcessSupervisor } from "../../../packages/project-adapters/src/preview-process-supervisor.js";
@@ -194,9 +200,14 @@ export async function createApp(options = {}) {
   const engine = new SessionEngine();
   const store = new SessionStore(runtime.stateRoot);
   const runCommand = options.runCommand ?? runConfirmedCommand;
-  const workspaceAdapter = options.workspaceAdapter ?? {
+  const workspaceAdapter = {
     prepare: prepareManagedWorkspace,
-    validate: (session, preparedWorkspace) => validatePreparedWorkspace(session, preparedWorkspace),
+    validate: async (preparedWorkspace, { session, sessionId }) => {
+      await validateManagedWorkspace(preparedWorkspace, { sessionId });
+      return validatePreparedWorkspace(session, preparedWorkspace);
+    },
+    dispose: disposeManagedWorkspace,
+    ...options.workspaceAdapter,
   };
   const terminal = options.terminal ?? new TerminalBuffer();
   const previews = options.previews ?? new PreviewProcessSupervisor({ terminal });
@@ -348,18 +359,19 @@ export async function createApp(options = {}) {
           requireExactEmptyObject(body, "Workspace prepare body must be an empty object");
           const session = await requireMigrationSession(id);
           if (session.workspace != null) {
-            await workspaceAdapter.validate(session, session.workspace);
+            await workspaceAdapter.validate(session.workspace, { session, sessionId: session.id });
             return sendJson(response, 200, publicSession(session));
           }
           const previousWorkspace = session.workspace;
           const previousEvents = session.events;
           const previousUpdatedAt = session.updatedAt;
-          session.workspace = normalizeWorkspace(await workspaceAdapter.prepare({
+          const preparedWorkspace = normalizeWorkspace(await workspaceAdapter.prepare({
             projectRoot: session.projectRoot,
             workspaceRoot: runtime.workspaceRoot,
             sessionId: session.id,
             ownershipToken: randomUUID(),
           }));
+          session.workspace = preparedWorkspace;
           session.events = [...session.events, {
             id: randomUUID(),
             type: "workspace.prepared",
@@ -372,6 +384,12 @@ export async function createApp(options = {}) {
             session.workspace = previousWorkspace;
             session.events = previousEvents;
             session.updatedAt = previousUpdatedAt;
+            try {
+              await workspaceAdapter.dispose(preparedWorkspace, { sessionId: session.id });
+            } catch (disposeError) {
+              error.cause ??= disposeError;
+              runtime.warn(`Could not dispose unpersisted workspace for session ${id}: ${disposeError.message}`);
+            }
             throw error;
           }
           emit(session);
