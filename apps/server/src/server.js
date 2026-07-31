@@ -136,38 +136,6 @@ function executionProjectRoot(session) {
   return session.workspace?.executionRoot ?? session.projectRoot;
 }
 
-function checkpointRef(sessionId, attemptId, role) {
-  return `refs/dev-workbench/checkpoints/${sessionId}/${attemptId}/${role}`;
-}
-
-function currentCheckpointOid(session) {
-  const workspace = session.workspace;
-  if (!workspace || workspace.currentCheckpointId == null || workspace.currentCheckpointId === "initial") {
-    return workspace?.baseOid ?? null;
-  }
-  const priorAttempt = (session.attempts ?? []).find((attempt) => attempt.id === workspace.currentCheckpointId);
-  return priorAttempt?.result?.oid ?? workspace.baseOid;
-}
-
-function attemptIdentity(session) {
-  const oid = currentCheckpointOid(session);
-  const id = randomUUID();
-  return {
-    id,
-    baseline: {
-      oid,
-      ref: checkpointRef(session.id, id, "baseline"),
-    },
-  };
-}
-
-function resultIdentity(session, attemptIdValue) {
-  return {
-    oid: currentCheckpointOid(session),
-    ref: checkpointRef(session.id, attemptIdValue, "result"),
-  };
-}
-
 function normalizeWorkspace(workspace) {
   const {
     sessionId: _sessionId,
@@ -605,9 +573,6 @@ export async function createApp(options = {}) {
           if (index !== engine.nextRunnable(session)) throw new Error("Steps must run in plan order");
           const step = engine.requireStep(session, index);
           const projectExecutionRoot = executionProjectRoot(session);
-          const runAttemptIdentity = step.action && session.workbench === "migration" && session.workspace != null
-            ? attemptIdentity(session)
-            : null;
           if (step.action && session.workbench === "migration") {
             requirePreparedWorkspace(session, "A prepared workspace is required before running migration actions");
           }
@@ -615,7 +580,7 @@ export async function createApp(options = {}) {
           if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
           let baseline = null;
           try {
-            engine.startStep(session, index, runAttemptIdentity); await store.save(session); emit(session);
+            engine.startStep(session, index); await store.save(session); emit(session);
             baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(projectExecutionRoot);
             let result = null;
             if (step.action) {
@@ -637,21 +602,14 @@ export async function createApp(options = {}) {
             }
             const snapshot = step.traceState
               ? { trace: step.traceState }
-              : runAttemptIdentity
-                ? { files: [], command: result }
-                : await captureProjectSnapshot(projectExecutionRoot, baseline, result);
-            engine.completeStep(
-              session,
-              index,
-              snapshot,
-              runAttemptIdentity ? resultIdentity(session, runAttemptIdentity.id) : null,
-            );
+              : await captureProjectSnapshot(projectExecutionRoot, baseline, result);
+            engine.completeStep(session, index, snapshot);
             await store.save(session); emit(session);
             return sendJson(response, 200, publicSession(session));
           } catch (error) {
             if (session.steps[index]?.status === "running") {
-              let snapshot = runAttemptIdentity ? { files: [], command: error.result ?? null } : null;
-              if (error.result && !runAttemptIdentity) {
+              let snapshot = null;
+              if (error.result) {
                 try {
                   snapshot = await captureProjectSnapshot(projectExecutionRoot, baseline, error.result);
                 } catch (snapshotError) {
@@ -659,13 +617,7 @@ export async function createApp(options = {}) {
                 }
               }
               try {
-                engine.failStep(
-                  session,
-                  index,
-                  error,
-                  snapshot,
-                  runAttemptIdentity ? resultIdentity(session, runAttemptIdentity.id) : null,
-                );
+                engine.failStep(session, index, error, snapshot);
                 await store.save(session); emit(session);
               } catch (failureError) {
                 runtime.warn(`Could not persist failed step for session ${id}: ${failureError.message}`);

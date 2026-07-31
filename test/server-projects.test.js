@@ -1388,14 +1388,24 @@ test("prepared migration actions execute and snapshot from workspace.executionRo
   assert.equal(prepared.response.status, 200);
 
   const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const reviewed = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
 
   assert.equal(run.response.status, 200);
+  assert.equal(run.body.status, "awaiting_review");
   assert.equal(commandRoot, prepared.body.workspace.executionRoot);
   assert.equal(run.body.projectRoot, project.projectRoot);
+  assert.deepEqual(run.body.attempts, []);
+  assert.equal(run.body.workspace.currentCheckpointId, "initial");
   assert.equal(
     run.body.currentSnapshot.command.cwd,
     path.join(prepared.body.workspace.executionRoot, "nested"),
   );
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.status, "completed");
+  assert.equal(reviewed.body.steps[0].status, "completed");
+  assert.deepEqual(reviewed.body.attempts, []);
+  assert.equal(reviewed.body.workspace.currentCheckpointId, "initial");
+  assert.equal(reviewed.body.projectRoot, project.projectRoot);
   assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
 });
 
