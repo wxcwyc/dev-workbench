@@ -18,6 +18,7 @@ import {
   disposeManagedWorkspace,
   inspectGitRepository,
   prepareManagedWorkspace,
+  readCheckpointFileDiff,
   restoreCheckpoint,
   validateManagedWorkspace,
 } from "../../../packages/project-adapters/src/git-adapter.js";
@@ -60,6 +61,33 @@ function requireExactEmptyObject(body, message) {
   ) {
     throw new Error(message);
   }
+}
+
+function exactDiffPath(search) {
+  if (!search.startsWith("?") || search.slice(1).split("&").length !== 1) {
+    rejectRequest("Diff query must contain exactly one path parameter", 400);
+  }
+  const [rawName, rawValue, ...extra] = search.slice(1).split("=");
+  if (rawName !== "path" || rawValue === undefined || extra.length > 0) {
+    rejectRequest("Diff query must contain exactly one path parameter", 400);
+  }
+  let filePath;
+  try {
+    filePath = decodeURIComponent(rawValue);
+  } catch {
+    rejectRequest("Diff path encoding is malformed", 400);
+  }
+  const segments = filePath.split("/");
+  if (
+    filePath === ""
+    || filePath.includes("\0")
+    || filePath.includes("\\")
+    || path.posix.isAbsolute(filePath)
+    || segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    rejectRequest("Diff path is not safe", 400);
+  }
+  return filePath;
 }
 
 function validateRequestOrigin(request) {
@@ -210,6 +238,7 @@ export async function createApp(options = {}) {
     prepare: prepareManagedWorkspace,
     createBaseline: createBaselineCheckpoint,
     createResult: createResultCheckpoint,
+    diff: readCheckpointFileDiff,
     restore: restoreCheckpoint,
     validate: async (preparedWorkspace, { session, sessionId }) => {
       await validateManagedWorkspace(preparedWorkspace, { sessionId });
@@ -516,6 +545,46 @@ export async function createApp(options = {}) {
         response.once("close", cleanup);
         send(publicSession(session));
         return;
+      }
+
+      const diffMatch = pathname.match(
+        /^\/api\/sessions\/([a-f0-9-]+)\/attempts\/([A-Za-z0-9._-]+)\/diff$/,
+      );
+      if (diffMatch) {
+        if (request.method !== "GET") {
+          response.setHeader("allow", "GET");
+          return sendJson(response, 405, { error: "Method not allowed" });
+        }
+        const requestedPath = exactDiffPath(url.search);
+        const session = await requireSession(diffMatch[1]);
+        const attempt = session.attempts?.find((candidate) => candidate.id === diffMatch[2]);
+        if (!attempt) throw structuredError("Attempt not found", 404, "attempt_not_found");
+        if (!attempt.result || !attempt.snapshot?.files) {
+          throw structuredError(
+            "Attempt result evidence is unavailable",
+            409,
+            "missing_evidence",
+            attempt.evidenceError,
+          );
+        }
+        const file = attempt.snapshot.files.find((candidate) => candidate.path === requestedPath);
+        if (!file) {
+          throw structuredError("Path is not present in the attempt manifest", 404, "path_not_in_manifest");
+        }
+        const workspace = requirePreparedWorkspace(
+          session,
+          "A prepared workspace is required to read attempt evidence",
+        );
+        return sendJson(response, 200, await workspaceAdapter.diff(
+          { ...workspace, sessionId: session.id },
+          {
+            sessionId: session.id,
+            attemptId: attempt.id,
+            baseline: attempt.baseline,
+            result: attempt.result,
+            file,
+          },
+        ));
       }
 
       const runtimeMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/runtime$/i);

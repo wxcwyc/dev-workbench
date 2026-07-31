@@ -13,6 +13,7 @@ import {
   disposeManagedWorkspace,
   inspectGitRepository,
   prepareManagedWorkspace,
+  readCheckpointFileDiff,
   restoreCheckpoint,
   validateManagedWorkspace,
 } from "../packages/project-adapters/src/git-adapter.js";
@@ -528,6 +529,129 @@ test("creates immutable baseline and exact result checkpoints then normalizes th
     status: "",
     diff: "",
   });
+});
+
+test("reads structured text diffs for every checkpoint manifest status", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, "app", "copy-source.txt"), "copy source\n");
+  await fs.writeFile(path.join(root, "app", "empty.txt"), "not empty\n");
+  await fs.writeFile(path.join(root, "app", "type.txt"), "regular\n");
+  await git(root, "add", ".");
+  await git(root, "commit", "--quiet", "-m", "diff fixture");
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: root,
+    workspaceRoot: managedRoot,
+    sessionId: "session-diff",
+    ownershipToken: "owner-diff",
+  });
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-diff",
+    attemptId: "attempt-1",
+  });
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "keep.txt"), "after 世界\n");
+  await fs.rm(path.join(workspace.worktreeRoot, "app", "remove.txt"));
+  await fs.rename(
+    path.join(workspace.worktreeRoot, "app", "copy-source.txt"),
+    path.join(workspace.worktreeRoot, "app", "renamed.txt"),
+  );
+  await fs.copyFile(
+    path.join(workspace.worktreeRoot, "app", "renamed.txt"),
+    path.join(workspace.worktreeRoot, "app", "copied.txt"),
+  );
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "added.txt"), "added\n");
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "empty.txt"), "");
+  await fs.rm(path.join(workspace.worktreeRoot, "app", "type.txt"));
+  await fs.symlink("keep.txt", path.join(workspace.worktreeRoot, "app", "type.txt"));
+  const result = await createResultCheckpoint(workspace, {
+    sessionId: "session-diff",
+    attemptId: "attempt-1",
+    baseline,
+  });
+  assert.deepEqual(
+    [...new Set(result.files.map((file) => file.status))].sort(),
+    ["added", "copied", "deleted", "modified", "renamed", "type-changed"],
+  );
+
+  for (const file of result.files) {
+    const diff = await readCheckpointFileDiff(workspace, {
+      sessionId: "session-diff",
+      attemptId: "attempt-1",
+      baseline,
+      result,
+      file,
+    });
+    assert.equal(diff.status, file.status);
+    assert.equal(diff.oldPath, file.oldPath ?? (file.status === "added" ? null : file.path));
+    assert.equal(diff.newPath, file.status === "deleted" ? null : file.path);
+    assert.equal(diff.binary, false);
+    assert.equal(diff.truncated, false);
+    assert.ok(Array.isArray(diff.hunks));
+  }
+  const modified = await readCheckpointFileDiff(workspace, {
+    sessionId: "session-diff",
+    attemptId: "attempt-1",
+    baseline,
+    result,
+    file: result.files.find((file) => file.path === "app/keep.txt"),
+  });
+  assert.equal(modified.old.text, "before\n");
+  assert.equal(modified.new.text, "after 世界\n");
+  assert.deepEqual(
+    modified.hunks[0].lines.map(({ type, text }) => ({ type, text })),
+    [
+      { type: "deletion", text: "before" },
+      { type: "addition", text: "after 世界" },
+    ],
+  );
+});
+
+test("bounds oversized text and hunks while classifying binary and malformed UTF-8", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: root,
+    workspaceRoot: managedRoot,
+    sessionId: "session-limits",
+    ownershipToken: "owner-limits",
+  });
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-limits",
+    attemptId: "attempt-1",
+  });
+  const manyLines = Array.from({ length: 2500 }, (_, index) => `line-${index}-changed`).join("\n");
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "keep.txt"), `${manyLines}\n`);
+  await fs.writeFile(path.join(workspace.worktreeRoot, "large.txt"), "x".repeat(96 * 1024));
+  await fs.writeFile(path.join(workspace.worktreeRoot, "binary.bin"), Buffer.from([0, 1, 2, 255]));
+  await fs.writeFile(path.join(workspace.worktreeRoot, "invalid.txt"), Buffer.from([0xc3, 0x28]));
+  const result = await createResultCheckpoint(workspace, {
+    sessionId: "session-limits",
+    attemptId: "attempt-1",
+    baseline,
+  });
+  const read = (filePath) => readCheckpointFileDiff(workspace, {
+    sessionId: "session-limits",
+    attemptId: "attempt-1",
+    baseline,
+    result,
+    file: result.files.find((file) => file.path === filePath),
+  });
+
+  const large = await read("large.txt");
+  assert.equal(large.new.truncated, true);
+  assert.ok(Buffer.byteLength(large.new.text) <= 64 * 1024);
+  assert.equal(large.truncated, true);
+  const lineLimited = await read("app/keep.txt");
+  assert.equal(lineLimited.hunksTruncated, true);
+  assert.ok(lineLimited.hunks.flatMap((hunk) => hunk.lines).length <= 2000);
+  for (const filePath of ["binary.bin", "invalid.txt"]) {
+    const binary = await read(filePath);
+    assert.equal(binary.binary, true);
+    assert.equal(binary.new.text, null);
+    assert.deepEqual(binary.hunks, []);
+  }
 });
 
 test("checkpoint mutations reject ref collisions and ownership mismatch", async (context) => {

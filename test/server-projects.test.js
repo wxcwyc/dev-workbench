@@ -1631,6 +1631,108 @@ test("prepared migration command runs create immutable Git checkpoints and accep
   assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
 });
 
+test("lazy attempt diffs require exact owned manifest evidence and never enter Session JSON or SSE", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  await makeGitMigrationProject(app.allowedRoot);
+  const sentinel = "FULL_PATCH_SENTINEL_DO_NOT_PERSIST";
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Lazy diff evidence",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Change file",
+      action: {
+        command: [
+          process.execPath,
+          "-e",
+          "const s=['FULL','PATCH','SENTINEL','DO','NOT','PERSIST'].join('_');require('node:fs').writeFileSync('keep.txt',s+'\\n世界\\n')",
+        ],
+      },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  await prepareSessionWorkspace(app, created.body.id);
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const attempt = run.body.attempts[0];
+  const endpoint = `${sessionUrl}/attempts/${attempt.id}/diff`;
+
+  assert.doesNotMatch(JSON.stringify(run.body), new RegExp(sentinel));
+  const eventResponse = await fetch(`${sessionUrl}/events`);
+  const stream = createSseReader(eventResponse);
+  t.after(() => stream.cancel());
+  assert.doesNotMatch(JSON.stringify(await withTimeout(stream.next(), "diff SSE session")), new RegExp(sentinel));
+
+  const response = await fetch(`${endpoint}?path=${encodeURIComponent("keep.txt")}`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /^application\/json; charset=utf-8$/);
+  const diff = await response.json();
+  assert.equal(diff.status, "modified");
+  assert.equal(diff.oldPath, "keep.txt");
+  assert.equal(diff.newPath, "keep.txt");
+  assert.equal(diff.old.text, "before\n");
+  assert.equal(diff.new.text, `${sentinel}\n世界\n`);
+  assert.equal(diff.binary, false);
+  assert.equal(diff.truncated, false);
+  assert.ok(diff.hunks.length > 0);
+
+  const invalidUrls = [
+    endpoint,
+    `${endpoint}?path=keep.txt&extra=1`,
+    `${endpoint}?path=keep.txt&path=keep.txt`,
+    `${endpoint}?path=${encodeURIComponent("../keep.txt")}`,
+    `${endpoint}?path=${encodeURIComponent("/keep.txt")}`,
+    `${endpoint}?path=${encodeURIComponent("nested\\entry.txt")}`,
+    `${endpoint}?path=missing.txt`,
+    `${sessionUrl}/attempts/attempt-foreign/diff?path=keep.txt`,
+  ];
+  for (const url of invalidUrls) {
+    const invalid = await fetch(url);
+    assert.ok([400, 404].includes(invalid.status), `${invalid.status} for ${url}`);
+    assert.match(invalid.headers.get("content-type"), /^application\/json/);
+  }
+  const malformed = await requestRawJson(`${endpoint}?path=%E0%A4%A`);
+  assert.equal(malformed.status, 400);
+  const unsupported = await fetch(`${endpoint}?path=keep.txt`, { method: "POST" });
+  assert.equal(unsupported.status, 405);
+  assert.equal(unsupported.headers.get("allow"), "GET");
+
+  const storedPath = path.join(app.stateRoot, `${created.body.id}.json`);
+  const stored = JSON.parse(await fs.readFile(storedPath, "utf8"));
+  stored.attempts[0].baseline.ref = `refs/dev-workbench/checkpoints/${created.body.id}/foreign/baseline`;
+  await fs.writeFile(storedPath, `${JSON.stringify(stored)}\n`);
+  const foreignRef = await fetch(`${endpoint}?path=keep.txt`);
+  assert.equal(foreignRef.status, 400);
+  assert.equal((await foreignRef.json()).code, "checkpoint_mismatch");
+});
+
+test("lazy attempt diffs report missing result evidence", async (t) => {
+  const checkpointError = Object.assign(new Error("capture failed"), { code: "checkpoint_capture_failed" });
+  const adapter = createSampleWorkspaceAdapter();
+  adapter.createBaseline = async (_workspace, { sessionId, attemptId }) => ({
+    oid: "a".repeat(40),
+    ref: `refs/dev-workbench/checkpoints/${sessionId}/${attemptId}/baseline`,
+  });
+  adapter.createResult = async () => { throw checkpointError; };
+  adapter.restore = async () => {};
+  const app = await startTestApp(t, { workspaceAdapter: adapter });
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Missing diff evidence",
+    workbench: "migration",
+    projectRoot: "sample",
+    steps: [{ title: "Run", action: { command: [process.execPath, "-e", ""] } }],
+  });
+  await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, { confirmed: true });
+  const response = await fetch(
+    `${app.url}/api/sessions/${created.body.id}/attempts/attempt-1/diff?path=file.txt`,
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "missing_evidence");
+});
+
 test("accept rejects dirty or drifted recoverable result worktrees without persistence or publication", async (t) => {
   const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
   t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));

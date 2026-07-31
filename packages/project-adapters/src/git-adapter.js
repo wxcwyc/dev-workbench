@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,10 @@ const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 8 * 1024 * 1024;
 const CHECKPOINT_PREFIX = "refs/dev-workbench/checkpoints";
 const IDENTITY_PATTERN = /^(?!\.)(?!.*\.\.)(?!.*\.$)[A-Za-z0-9._-]+$/;
+const MAX_DIFF_TEXT_BYTES = 64 * 1024;
+const MAX_DIFF_LINES = 2000;
+const MAX_DIFF_HUNKS = 200;
+const MAX_PATCH_BYTES = 512 * 1024;
 
 export class GitWorkspaceError extends Error {
   constructor(code, message, diagnostics = []) {
@@ -435,10 +439,223 @@ async function assertCheckpointRef(workspace, checkpoint, sessionId, attemptId, 
   if (checkpoint?.ref !== expectedRef || !/^[0-9a-f]{40,64}$/.test(checkpoint?.oid ?? "")) {
     throw new GitWorkspaceError("checkpoint_mismatch", "Checkpoint identity does not match");
   }
-  const observedOid = await runGit(workspace.repositoryRoot, ["rev-parse", "--verify", expectedRef]);
+  const observedOid = await runGit(workspace.repositoryRoot, [
+    "rev-parse",
+    "--verify",
+    `${expectedRef}^{commit}`,
+  ]).catch(() => null);
   if (observedOid !== checkpoint.oid) {
     throw new GitWorkspaceError("checkpoint_mismatch", "Checkpoint ref does not resolve to the expected OID");
   }
+}
+
+function assertManifestPath(filePath) {
+  const segments = typeof filePath === "string" ? filePath.split("/") : [];
+  if (
+    segments.length === 0
+    || filePath === ""
+    || filePath.includes("\0")
+    || filePath.includes("\\")
+    || path.posix.isAbsolute(filePath)
+    || segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new GitWorkspaceError("invalid_path", "Manifest path is not safe");
+  }
+}
+
+function runGitPrefix(cwd, args, limit) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["-C", cwd, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const chunks = [];
+    const errors = [];
+    let retained = 0;
+    let total = 0;
+    let terminated = false;
+    child.stdout.on("data", (chunk) => {
+      total += chunk.length;
+      if (retained < limit) {
+        const kept = chunk.subarray(0, limit - retained);
+        chunks.push(kept);
+        retained += kept.length;
+      }
+      if (total > limit && !terminated) {
+        terminated = true;
+        child.kill();
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      const errorBytes = errors.reduce((sum, item) => sum + item.length, 0);
+      if (errorBytes < 4096) errors.push(chunk.subarray(0, 4096 - errorBytes));
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0 && !terminated) {
+        const error = new Error(Buffer.concat(errors).toString("utf8").trim() || `git exited with code ${code}`);
+        error.code = code;
+        reject(error);
+        return;
+      }
+      resolve({ buffer: Buffer.concat(chunks), truncated: terminated || total > limit, total });
+    });
+  });
+}
+
+async function readBlob(repositoryRoot, oid, filePath) {
+  if (filePath === null) {
+    return { path: null, exists: false, bytes: 0, text: null, truncated: false };
+  }
+  const object = `${oid}:${filePath}`;
+  const type = await runGit(repositoryRoot, ["cat-file", "-t", object]).catch(() => null);
+  if (type !== "blob") {
+    return { path: filePath, exists: true, bytes: 0, text: null, truncated: false, binary: true };
+  }
+  const size = Number(await runGit(repositoryRoot, ["cat-file", "-s", object]));
+  const content = await runGitPrefix(repositoryRoot, ["cat-file", "blob", object], MAX_DIFF_TEXT_BYTES);
+  const hasNul = content.buffer.includes(0);
+  let text = null;
+  let invalidUtf8 = false;
+  if (!hasNul) {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const maximumTrim = content.truncated ? Math.min(3, content.buffer.length) : 0;
+    for (let trim = 0; trim <= maximumTrim; trim += 1) {
+      try {
+        text = decoder.decode(trim === 0 ? content.buffer : content.buffer.subarray(0, -trim));
+        break;
+      } catch {
+        if (trim === maximumTrim) invalidUtf8 = true;
+      }
+    }
+  }
+  return {
+    path: filePath,
+    exists: true,
+    bytes: Number.isFinite(size) ? size : content.total,
+    text: hasNul || invalidUtf8 ? null : text,
+    truncated: content.truncated,
+    binary: hasNul || invalidUtf8,
+  };
+}
+
+function parseHunks(patchText, patchTruncated) {
+  const hunks = [];
+  let lineCount = 0;
+  let truncated = patchTruncated;
+  let current = null;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const rawLine of patchText.split("\n")) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(rawLine);
+    if (match) {
+      if (hunks.length >= MAX_DIFF_HUNKS) {
+        truncated = true;
+        break;
+      }
+      current = {
+        oldStart: Number(match[1]),
+        oldLines: Number(match[2] ?? 1),
+        newStart: Number(match[3]),
+        newLines: Number(match[4] ?? 1),
+        lines: [],
+      };
+      oldLine = current.oldStart;
+      newLine = current.newStart;
+      hunks.push(current);
+      continue;
+    }
+    if (!current || rawLine.startsWith("\\ No newline at end of file")) continue;
+    const marker = rawLine[0];
+    if (![' ', '+', '-'].includes(marker)) continue;
+    if (lineCount >= MAX_DIFF_LINES) {
+      truncated = true;
+      break;
+    }
+    const line = {
+      type: marker === "+" ? "addition" : marker === "-" ? "deletion" : "context",
+      text: rawLine.slice(1),
+      oldLine: marker === "+" ? null : oldLine,
+      newLine: marker === "-" ? null : newLine,
+    };
+    current.lines.push(line);
+    lineCount += 1;
+    if (marker !== "+") oldLine += 1;
+    if (marker !== "-") newLine += 1;
+  }
+  return { hunks, truncated };
+}
+
+export async function readCheckpointFileDiff(workspace, {
+  sessionId,
+  attemptId,
+  baseline,
+  result,
+  file,
+}) {
+  if (sessionId !== workspace?.sessionId) {
+    throw new GitWorkspaceError("ownership_mismatch", "Diff session does not own this repository evidence");
+  }
+  assertIdentity(sessionId, "sessionId");
+  assertIdentity(attemptId, "attemptId");
+  if (workspace.projectRelativePath !== ".") assertManifestPath(workspace.projectRelativePath);
+  const validStatuses = new Set(["added", "modified", "deleted", "renamed", "copied", "type-changed"]);
+  if (!file || !validStatuses.has(file.status)) {
+    throw new GitWorkspaceError("manifest_mismatch", "Diff path is not present in the attempt manifest");
+  }
+  assertManifestPath(file.path);
+  if (file.oldPath !== null && file.oldPath !== undefined) assertManifestPath(file.oldPath);
+  await assertCheckpointRef(workspace, baseline, sessionId, attemptId, "baseline");
+  await assertCheckpointRef(workspace, result, sessionId, attemptId, "result");
+
+  const oldPath = file.status === "added"
+    ? null
+    : (file.status === "renamed" || file.status === "copied" ? file.oldPath : file.path);
+  const newPath = file.status === "deleted" ? null : file.path;
+  if ((file.status === "renamed" || file.status === "copied") && oldPath == null) {
+    throw new GitWorkspaceError("manifest_mismatch", "Renamed and copied files require an old path");
+  }
+  const projectPrefix = workspace.projectRelativePath === "." ? "" : `${workspace.projectRelativePath}/`;
+  const repositoryOldPath = oldPath === null ? null : `${projectPrefix}${oldPath}`;
+  const repositoryNewPath = newPath === null ? null : `${projectPrefix}${newPath}`;
+  const [oldSide, newSide] = await Promise.all([
+    readBlob(workspace.repositoryRoot, baseline.oid, repositoryOldPath),
+    readBlob(workspace.repositoryRoot, result.oid, repositoryNewPath),
+  ]);
+  oldSide.path = oldPath;
+  newSide.path = newPath;
+  const binary = file.binary === true || oldSide.binary === true || newSide.binary === true;
+  delete oldSide.binary;
+  delete newSide.binary;
+  let hunks = [];
+  let hunksTruncated = false;
+  if (!binary) {
+    const paths = [...new Set([repositoryOldPath, repositoryNewPath].filter(Boolean))];
+    const patch = await runGitPrefix(workspace.repositoryRoot, [
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--no-color",
+      "--unified=3",
+      "--find-renames",
+      "--find-copies",
+      baseline.oid,
+      result.oid,
+      "--",
+      ...paths,
+    ], MAX_PATCH_BYTES);
+    ({ hunks, truncated: hunksTruncated } = parseHunks(patch.buffer.toString("utf8"), patch.truncated));
+  }
+  return {
+    status: file.status,
+    oldPath,
+    newPath,
+    binary,
+    truncated: oldSide.truncated || newSide.truncated || hunksTruncated,
+    old: oldSide,
+    new: newSide,
+    hunks,
+    hunksTruncated,
+  };
 }
 
 function statusName(letter) {
