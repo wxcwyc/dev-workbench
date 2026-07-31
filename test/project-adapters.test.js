@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { captureFileTree, compareTrees } from "../packages/project-adapters/src/file-tree.js";
+import { checkpointAttemptSnapshot } from "../packages/project-adapters/src/snapshot.js";
 import { runConfirmedCommand } from "../packages/project-adapters/src/command-runner.js";
 import { resolveInsideProject, resolveProjectRoot } from "../packages/project-adapters/src/project-boundary.js";
 
@@ -30,6 +31,25 @@ test("captureFileTree can skip content hashes", async (context) => {
 
   assert.equal(tree.entries.length, 1);
   assert.equal("hash" in tree.entries[0], false);
+});
+
+test("checkpoint attempt snapshots retain a bounded output tail with truncation metadata", () => {
+  const snapshot = checkpointAttemptSnapshot(
+    [{ path: "app/changed.txt", oldPath: "app/old.txt", status: "modified" }],
+    { stdout: "0123456789", stderr: "abcdefghij", exitCode: 1 },
+    { maxOutputBytes: 6, projectRelativePath: "app" },
+  );
+
+  assert.deepEqual(snapshot, {
+    files: [{ path: "changed.txt", oldPath: "old.txt", status: "modified" }],
+    command: {
+      stdout: "456789",
+      stderr: "efghij",
+      exitCode: 1,
+      stdoutTruncated: true,
+      stderrTruncated: true,
+    },
+  });
 });
 
 test("captureFileTree reports a nested scan error and continues", async (context) => {

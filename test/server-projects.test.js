@@ -1526,7 +1526,9 @@ test("prepared migration actions execute and snapshot from workspace.executionRo
   assert.equal(run.body.status, "awaiting_review");
   assert.equal(commandRoot, prepared.body.workspace.executionRoot);
   assert.equal(run.body.projectRoot, project.projectRoot);
-  assert.deepEqual(run.body.attempts, []);
+  assert.equal(run.body.attempts.length, 1);
+  assert.equal(run.body.attempts[0].status, "awaiting_review");
+  assert.equal(run.body.attempts[0].result.restorable, false);
   assert.equal(run.body.workspace.currentCheckpointId, "initial");
   assert.equal(
     run.body.currentSnapshot.command.cwd,
@@ -1535,10 +1537,405 @@ test("prepared migration actions execute and snapshot from workspace.executionRo
   assert.equal(reviewed.response.status, 200);
   assert.equal(reviewed.body.status, "completed");
   assert.equal(reviewed.body.steps[0].status, "completed");
-  assert.deepEqual(reviewed.body.attempts, []);
-  assert.equal(reviewed.body.workspace.currentCheckpointId, "initial");
+  assert.equal(reviewed.body.attempts.length, 1);
+  assert.equal(reviewed.body.attempts[0].status, "completed");
+  assert.equal(reviewed.body.attempts[0].result.restorable, true);
+  assert.equal(reviewed.body.workspace.currentCheckpointId, reviewed.body.attempts[0].id);
   assert.equal(reviewed.body.projectRoot, project.projectRoot);
   assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+});
+
+test("prepared migration command runs create immutable Git checkpoints and accept makes the result restorable", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Checkpointed migration",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      id: "checkpointed-run",
+      title: "Checkpointed run",
+      action: {
+        command: [
+          process.execPath,
+          "-e",
+          "const fs=require('node:fs');fs.writeFileSync('keep.txt','after\\n');fs.writeFileSync('added.txt','new\\n');",
+        ],
+      },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+
+  assert.equal(run.response.status, 200);
+  assert.equal(run.body.status, "awaiting_review");
+  assert.equal(run.body.steps[0].status, "awaiting_review");
+  assert.equal(run.body.steps[0].attempt, 1);
+  assert.equal(run.body.attempts.length, 1);
+  assert.equal(run.body.attempts[0].id, "attempt-1");
+  assert.equal(run.body.attempts[0].status, "awaiting_review");
+  assert.equal(run.body.attempts[0].baseline.oid, prepared.workspace.baseOid);
+  assert.equal(
+    run.body.attempts[0].baseline.ref,
+    `refs/dev-workbench/checkpoints/${created.body.id}/attempt-1/baseline`,
+  );
+  assert.equal(
+    await git(project.repositoryRoot, "rev-parse", "--verify", run.body.attempts[0].baseline.ref),
+    run.body.attempts[0].baseline.oid,
+  );
+  assert.equal(
+    run.body.attempts[0].result.ref,
+    `refs/dev-workbench/checkpoints/${created.body.id}/attempt-1/result`,
+  );
+  assert.equal(run.body.attempts[0].result.restorable, false);
+  assert.equal(
+    await git(project.repositoryRoot, "rev-parse", "--verify", run.body.attempts[0].result.ref),
+    run.body.attempts[0].result.oid,
+  );
+  assert.deepEqual(
+    run.body.attempts[0].snapshot.files.map(({ path, status }) => ({ path, status })),
+    [
+      { path: "added.txt", status: "added" },
+      { path: "keep.txt", status: "modified" },
+    ],
+  );
+  assert.equal(
+    await git(prepared.workspace.worktreeRoot, "rev-parse", "HEAD"),
+    run.body.attempts[0].result.oid,
+  );
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+
+  const reviewed = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.status, "completed");
+  assert.equal(reviewed.body.steps[0].status, "completed");
+  assert.equal(reviewed.body.steps[0].review.decision, "accept");
+  assert.equal(reviewed.body.workspace.currentCheckpointId, "attempt-1");
+  assert.equal(reviewed.body.attempts.length, 1);
+  assert.equal(reviewed.body.attempts[0].status, "completed");
+  assert.equal(reviewed.body.attempts[0].result.restorable, true);
+  assert.equal(
+    await git(prepared.workspace.worktreeRoot, "rev-parse", "HEAD"),
+    reviewed.body.attempts[0].result.oid,
+  );
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+});
+
+test("failed checkpointed attempts retain bounded partial evidence and retry restores the exact baseline first", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandCalls = 0;
+  let retryStartedClean = false;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action) => {
+      commandCalls += 1;
+      const partialPath = path.join(root, "partial.txt");
+      if (commandCalls === 1) {
+        await fs.writeFile(partialPath, "partial\n");
+        const error = new Error("intentional checkpointed failure");
+        error.result = {
+          command: action.command,
+          cwd: root,
+          stdout: "x".repeat(70 * 1024),
+          stderr: "failure-tail\n",
+          exitCode: 2,
+        };
+        throw error;
+      }
+      retryStartedClean = await fs.access(partialPath).then(() => false, () => true);
+      await fs.writeFile(path.join(root, "keep.txt"), "retry-success\n");
+      return { command: action.command, cwd: root, stdout: "ok\n", stderr: "", exitCode: 0 };
+    },
+  });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Retry exact baseline",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Retry", action: { command: ["fake-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+
+  const failedRun = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const failed = await (await fetch(sessionUrl)).json();
+
+  assert.equal(failedRun.response.status, 400);
+  assert.equal(failed.steps[0].status, "failed");
+  assert.equal(failed.attempts[0].status, "failed");
+  assert.equal(failed.attempts[0].result.restorable, false);
+  assert.equal(failed.attempts[0].snapshot.command.stdout.length, 64 * 1024);
+  assert.equal(failed.attempts[0].snapshot.command.stdoutTruncated, true);
+  assert.deepEqual(
+    failed.attempts[0].snapshot.files.map(({ path, status }) => ({ path, status })),
+    [{ path: "partial.txt", status: "added" }],
+  );
+  const stale = await postJson(`${sessionUrl}/steps/0/run`, {
+    confirmed: true,
+    confirmedRestore: true,
+    expectedAttemptId: "attempt-stale",
+    expectedBaselineOid: failed.attempts[0].baseline.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.code, "retry_confirmation_mismatch");
+
+  const retried = await postJson(`${sessionUrl}/steps/0/run`, {
+    confirmed: true,
+    confirmedRestore: true,
+    expectedAttemptId: failed.attempts[0].id,
+    expectedBaselineOid: failed.attempts[0].baseline.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+
+  assert.equal(retried.response.status, 200);
+  assert.equal(retryStartedClean, true);
+  assert.equal(retried.body.steps[0].attempt, 2);
+  assert.equal(retried.body.attempts.length, 2);
+  assert.equal(retried.body.attempts[0].status, "failed");
+  assert.equal(retried.body.attempts[1].status, "awaiting_review");
+  assert.equal(retried.body.attempts[1].baseline.oid, failed.attempts[0].baseline.oid);
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+});
+
+test("cancel signals only the exact active generation and the owning run persists cancelled evidence", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let commandStarted = false;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action, { signal, onOutput }) => {
+      await fs.writeFile(path.join(root, "partial.txt"), "cancelled partial\n");
+      onOutput({ stream: "stdout", text: "partial output\n" });
+      commandStarted = true;
+      await new Promise((_, reject) => {
+        signal.addEventListener("abort", () => {
+          const error = Object.assign(new Error("Command aborted"), {
+            name: "AbortError",
+            result: {
+              command: action.command,
+              cwd: root,
+              stdout: "partial output\n",
+              stderr: "",
+              exitCode: null,
+            },
+          });
+          reject(error);
+        }, { once: true });
+      });
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Cancelable attempt",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Long run", action: { command: ["fake-long-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  await prepareSessionWorkspace(app, created.body.id);
+  const runPromise = postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  await waitForCondition(() => commandStarted, "checkpointed command start");
+
+  const wrong = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 2 });
+  const cancelled = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  const repeated = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  const run = await runPromise;
+  const persisted = await (await fetch(sessionUrl)).json();
+
+  assert.equal(wrong.response.status, 409);
+  assert.equal(wrong.body.code, "attempt_not_active");
+  assert.equal(cancelled.response.status, 202);
+  assert.deepEqual(cancelled.body, { status: "cancelling", stepIndex: 0, attempt: 1 });
+  assert.equal(repeated.response.status, 409);
+  assert.ok(["finishing", "attempt_not_active"].includes(repeated.body.code));
+  assert.equal(run.response.status, 400);
+  assert.equal(persisted.steps[0].status, "cancelled");
+  assert.equal(persisted.attempts[0].status, "cancelled");
+  assert.equal(persisted.attempts[0].snapshot.command.stdout, "partial output\n");
+  assert.deepEqual(
+    persisted.attempts[0].snapshot.files.map(({ path, status }) => ({ path, status })),
+    [{ path: "partial.txt", status: "added" }],
+  );
+  const afterFinish = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
+  assert.equal(afterFinish.response.status, 409);
+  assert.equal(afterFinish.body.code, "attempt_not_active");
+});
+
+test("restore requires exact accepted evidence, inactive previews, and reports persistence reconciliation", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const previews = new FakePreviewSupervisor();
+  previews.states.source.state = "stopped";
+  previews.states.target.state = "stopped";
+  const app = await startTestApp(t, { workspaceRoot: managedRoot, previews });
+  const project = await makeGitMigrationProject(app.allowedRoot);
+  const fingerprintBefore = await sourceFingerprint(project.repositoryRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Restore accepted checkpoint",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Change",
+      action: {
+        command: [process.execPath, "-e", "require('node:fs').writeFileSync('keep.txt','changed\\n')"],
+      },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const accepted = await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+
+  const stale = await postJson(`${sessionUrl}/checkpoints/initial/restore`, {
+    confirmed: true,
+    expectedOid: "f".repeat(40),
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.code, "restore_confirmation_mismatch");
+
+  previews.states.target.state = "running";
+  const previewActive = await postJson(`${sessionUrl}/checkpoints/initial/restore`, {
+    confirmed: true,
+    expectedOid: prepared.workspace.baseOid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(previewActive.response.status, 409);
+  assert.equal(previewActive.body.code, "preview_active");
+  previews.states.target.state = "stopped";
+
+  const restored = await postJson(`${sessionUrl}/checkpoints/initial/restore`, {
+    confirmed: true,
+    expectedOid: prepared.workspace.baseOid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.workspace.currentCheckpointId, "initial");
+  assert.equal(restored.body.steps[0].status, "pending");
+  assert.equal(restored.body.attempts.length, 1);
+  assert.deepEqual(restored.body.attempts, accepted.body.attempts);
+  assert.equal(await fs.readFile(path.join(prepared.workspace.executionRoot, "keep.txt"), "utf8"), "before\n");
+  assert.deepEqual(await sourceFingerprint(project.repositoryRoot), fingerprintBefore);
+
+  await fs.writeFile(path.join(prepared.workspace.executionRoot, "keep.txt"), "dirty\n");
+  const dirty = await postJson(`${sessionUrl}/checkpoints/${run.body.attempts[0].id}/restore`, {
+    confirmed: true,
+    expectedOid: run.body.attempts[0].result.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(dirty.response.status, 400);
+  assert.equal(dirty.body.code, "workspace_dirty");
+
+  await fs.writeFile(path.join(prepared.workspace.executionRoot, "keep.txt"), "before\n");
+  const sessionPath = path.join(app.stateRoot, `${created.body.id}.json`);
+  const foreignSession = JSON.parse(await fs.readFile(sessionPath, "utf8"));
+  foreignSession.workspace.ownershipToken = "foreign-owner";
+  await fs.writeFile(sessionPath, `${JSON.stringify(foreignSession, null, 2)}\n`);
+  const foreign = await postJson(`${sessionUrl}/checkpoints/${run.body.attempts[0].id}/restore`, {
+    confirmed: true,
+    expectedOid: run.body.attempts[0].result.oid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+  assert.equal(foreign.response.status, 400);
+  assert.equal(foreign.body.code, "ownership_mismatch");
+});
+
+test("restore save failure reports the intended and observed checkpoint without a second Git mutation", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const app = await startTestApp(t, { workspaceRoot: managedRoot });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Restore reconciliation",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Change",
+      action: {
+        command: [process.execPath, "-e", "require('node:fs').writeFileSync('keep.txt','changed\\n')"],
+      },
+    }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  await postJson(`${sessionUrl}/steps/0/review`, { decision: "accept" });
+  const originalRename = fs.rename;
+  fs.rename = async (...args) => {
+    if (path.basename(args[1]) === `${created.body.id}.json`) {
+      throw new Error("simulated restore save failure");
+    }
+    return originalRename(...args);
+  };
+  t.after(() => {
+    if (fs.rename !== originalRename) fs.rename = originalRename;
+  });
+
+  const restored = await postJson(`${sessionUrl}/checkpoints/initial/restore`, {
+    confirmed: true,
+    expectedOid: prepared.workspace.baseOid,
+    expectedExecutionRoot: prepared.workspace.executionRoot,
+  });
+
+  assert.equal(restored.response.status, 409);
+  assert.equal(restored.body.code, "reconciliation_required");
+  assert.deepEqual(restored.body.details, {
+    expected: prepared.workspace.baseOid,
+    observed: prepared.workspace.baseOid,
+  });
+});
+
+test("checkpointed run save failure reports result reconciliation after Git normalization", async (t) => {
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  let failNextSave = false;
+  const app = await startTestApp(t, {
+    workspaceRoot: managedRoot,
+    runCommand: async (root, action) => {
+      await fs.writeFile(path.join(root, "keep.txt"), "normalized result\n");
+      failNextSave = true;
+      return { command: action.command, cwd: root, stdout: "", stderr: "", exitCode: 0 };
+    },
+  });
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Run reconciliation",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{ title: "Change", action: { command: ["fake-command"] } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  const originalRename = fs.rename;
+  fs.rename = async (...args) => {
+    if (failNextSave && path.basename(args[1]) === `${created.body.id}.json`) {
+      failNextSave = false;
+      throw new Error("simulated result save failure");
+    }
+    return originalRename(...args);
+  };
+  t.after(() => {
+    if (fs.rename !== originalRename) fs.rename = originalRename;
+  });
+
+  const run = await postJson(`${sessionUrl}/steps/0/run`, { confirmed: true });
+  const observed = await git(prepared.workspace.worktreeRoot, "rev-parse", "HEAD");
+
+  assert.equal(run.response.status, 409);
+  assert.equal(run.body.code, "reconciliation_required");
+  assert.deepEqual(run.body.details, { expected: observed, observed });
+  const persisted = await (await fetch(sessionUrl)).json();
+  assert.equal(persisted.steps[0].status, "running");
+  assert.equal(persisted.attempts[0].status, "running");
 });
 
 test("invalid review targets, state, media type, and workbench neither mutate nor publish", async (t) => {

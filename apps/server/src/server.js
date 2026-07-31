@@ -13,13 +13,19 @@ import { resolveCommandCwd, resolveProjectRoot } from "../../../packages/project
 import { runConfirmedCommand } from "../../../packages/project-adapters/src/command-runner.js";
 import {
   GitWorkspaceError,
+  createBaselineCheckpoint,
+  createResultCheckpoint,
   disposeManagedWorkspace,
   inspectGitRepository,
   prepareManagedWorkspace,
+  restoreCheckpoint,
   validateManagedWorkspace,
 } from "../../../packages/project-adapters/src/git-adapter.js";
 import { inspectProject } from "../../../packages/project-adapters/src/project-inspector.js";
-import { captureProjectSnapshot } from "../../../packages/project-adapters/src/snapshot.js";
+import {
+  captureProjectSnapshot,
+  checkpointAttemptSnapshot,
+} from "../../../packages/project-adapters/src/snapshot.js";
 import { PreviewProcessSupervisor } from "../../../packages/project-adapters/src/preview-process-supervisor.js";
 import { manifest as prologManifest, prologAdapter } from "../../../packages/prolog-adapter/src/index.js";
 import { allowedRoot, examplesRoot, port, projectRoot, stateRoot, webRoot, workspaceRoot } from "./config.js";
@@ -202,6 +208,9 @@ export async function createApp(options = {}) {
   const runCommand = options.runCommand ?? runConfirmedCommand;
   const workspaceAdapter = {
     prepare: prepareManagedWorkspace,
+    createBaseline: createBaselineCheckpoint,
+    createResult: createResultCheckpoint,
+    restore: restoreCheckpoint,
     validate: async (preparedWorkspace, { session, sessionId }) => {
       await validateManagedWorkspace(preparedWorkspace, { sessionId });
       return validatePreparedWorkspace(session, preparedWorkspace);
@@ -209,6 +218,10 @@ export async function createApp(options = {}) {
     dispose: disposeManagedWorkspace,
     ...options.workspaceAdapter,
   };
+  const recoverableWorkspaceAdapter = options.workspaceAdapter == null
+    || ["createBaseline", "createResult", "restore"].every((method) => (
+      typeof options.workspaceAdapter?.[method] === "function"
+    ));
   const terminal = options.terminal ?? new TerminalBuffer();
   const previews = options.previews ?? new PreviewProcessSupervisor({ terminal });
   const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
@@ -247,6 +260,49 @@ export async function createApp(options = {}) {
     ...await previews.snapshot(session),
     ...terminal.snapshot(session.id),
   });
+  const activeAttempt = (id, index, attempt) => {
+    const active = activeStepControllers.get(id);
+    return active?.index === index && active.attempt === attempt ? active : null;
+  };
+  const checkpointTarget = (session, checkpointId) => {
+    if (checkpointId === "initial") {
+      const first = session.attempts?.[0]?.baseline;
+      return first && first.oid === session.workspace?.baseOid
+        ? { ...first, accepted: true }
+        : null;
+    }
+    const attempt = session.attempts?.find((candidate) => (
+      candidate.id === checkpointId
+      && candidate.status === "completed"
+      && candidate.result?.restorable === true
+    ));
+    return attempt ? { ...attempt.result, accepted: true } : null;
+  };
+  const requireExactRetryConfirmation = (body, session, previousAttempt) => {
+    if (
+      body?.confirmedRestore !== true
+      || body.expectedAttemptId !== previousAttempt.id
+      || body.expectedBaselineOid !== previousAttempt.baseline.oid
+      || body.expectedExecutionRoot !== session.workspace.executionRoot
+    ) {
+      throw structuredError(
+        "Retry requires exact baseline restore confirmation",
+        409,
+        "retry_confirmation_mismatch",
+      );
+    }
+  };
+  const reconciliationError = async (workspace, expectedOid) => {
+    const observed = await inspectGitRepository(workspace.worktreeRoot)
+      .then((inspection) => inspection.headOid)
+      .catch(() => null);
+    return structuredError(
+      "Workspace changed but Session persistence failed; reconciliation is required",
+      409,
+      "reconciliation_required",
+      { expected: expectedOid, observed },
+    );
+  };
 
   async function createSession(input) {
     assertSessionInput(input);
@@ -569,6 +625,92 @@ export async function createApp(options = {}) {
         } finally { release(); }
       }
 
+      const cancelMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/cancel$/i);
+      if (request.method === "POST" && cancelMatch) {
+        const id = cancelMatch[1];
+        const index = Number(cancelMatch[2]);
+        const body = await readJson(request);
+        if (
+          body === null
+          || Array.isArray(body)
+          || typeof body !== "object"
+          || Object.keys(body).length !== 1
+          || !Number.isInteger(body.attempt)
+          || body.attempt < 1
+        ) {
+          throw new Error('Cancel body must be exactly {"attempt":<positive integer>}');
+        }
+        const active = activeAttempt(id, index, body.attempt);
+        if (!active) {
+          throw structuredError("No matching active command attempt", 409, "attempt_not_active");
+        }
+        if (active.phase !== "running") {
+          throw structuredError("Command attempt is already finishing", 409, "finishing");
+        }
+        active.phase = "cancelling";
+        active.cancelReason = "user";
+        active.controller.abort("user");
+        return sendJson(response, 202, {
+          status: "cancelling",
+          stepIndex: index,
+          attempt: body.attempt,
+        });
+      }
+
+      const restoreMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/checkpoints\/([A-Za-z0-9._-]+)\/restore$/);
+      if (request.method === "POST" && restoreMatch) {
+        const id = restoreMatch[1];
+        const checkpointId = restoreMatch[2];
+        const release = claimSession(id);
+        try {
+          if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "restore" });
+          const body = await readJson(request);
+          if (
+            body === null
+            || Array.isArray(body)
+            || typeof body !== "object"
+            || Object.keys(body).length !== 3
+            || body.confirmed !== true
+            || typeof body.expectedOid !== "string"
+            || typeof body.expectedExecutionRoot !== "string"
+          ) {
+            throw new Error("Restore requires confirmed, expectedOid, and expectedExecutionRoot");
+          }
+          const session = await requireMigrationSession(id);
+          const workspace = requirePreparedWorkspace(session);
+          if (activeStepControllers.has(id)) {
+            throw structuredError("Cannot restore while a command is active", 409, "operation_active");
+          }
+          const previewState = await previews.snapshot(session);
+          if (["source", "target"].some((slot) => (
+            !["stopped", "unconfigured"].includes(previewState[slot]?.state)
+          ))) {
+            throw structuredError("Cannot restore while previews are active", 409, "preview_active");
+          }
+          const target = checkpointTarget(session, checkpointId);
+          if (
+            !target
+            || target.oid !== body.expectedOid
+            || workspace.executionRoot !== body.expectedExecutionRoot
+          ) {
+            throw structuredError("Restore target confirmation does not match", 409, "restore_confirmation_mismatch");
+          }
+          await workspaceAdapter.validate(workspace, { session, sessionId: session.id });
+          await workspaceAdapter.restore(
+            { ...workspace, sessionId: session.id },
+            target,
+          );
+          engine.restore(session, checkpointId);
+          try {
+            await store.save(session);
+          } catch (error) {
+            throw await reconciliationError(workspace, target.oid);
+          }
+          emit(session);
+          return sendJson(response, 200, publicSession(session));
+        } finally { release(); }
+      }
+
       const runMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/steps\/(\d+)\/run$/i);
       if (request.method === "POST" && runMatch) {
         if (shuttingDown) rejectRequest("Server is shutting down", 503);
@@ -597,13 +739,53 @@ export async function createApp(options = {}) {
           if (step.risk === "high" && body.confirmedRisk !== true) throw new Error("High-risk execution requires confirmedRisk=true");
           if (step.action && body.confirmed !== true) throw new Error("Command execution requires confirmed=true");
           let baseline = null;
+          let attemptId = null;
+          let attemptNumber = null;
+          let active = null;
+          let finalCheckpoint = null;
           try {
-            engine.startStep(session, index); await store.save(session); emit(session);
-            baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(projectExecutionRoot);
+            const recoverable = Boolean(
+              step.action
+              && session.workbench === "migration"
+              && session.workspace
+              && recoverableWorkspaceAdapter
+            );
+            if (recoverable) {
+              await workspaceAdapter.validate(session.workspace, { session, sessionId: session.id });
+              const previousAttempt = [...session.attempts]
+                .reverse()
+                .find((candidate) => candidate.stepIndex === index);
+              if (["failed", "cancelled"].includes(step.status)) {
+                if (!previousAttempt) throw new Error("Retry baseline evidence is missing");
+                requireExactRetryConfirmation(body, session, previousAttempt);
+                await workspaceAdapter.restore(
+                  { ...session.workspace, sessionId: session.id },
+                  { ...previousAttempt.baseline, accepted: true },
+                );
+              }
+              attemptId = `attempt-${session.attempts.length + 1}`;
+              baseline = await workspaceAdapter.createBaseline(
+                { ...session.workspace, sessionId: session.id },
+                { sessionId: session.id, attemptId },
+              );
+              engine.startStep(session, index, { id: attemptId, baseline });
+              attemptNumber = session.steps[index].attempt;
+            } else {
+              engine.startStep(session, index);
+              baseline = index > 0 ? session.snapshots[index - 1] : await captureProjectSnapshot(projectExecutionRoot);
+            }
+            await store.save(session); emit(session);
             let result = null;
             if (step.action) {
               const controller = new AbortController();
-              activeStepControllers.set(id, controller);
+              active = {
+                controller,
+                index,
+                attempt: attemptNumber ?? session.steps[index].attempt,
+                phase: "running",
+                cancelReason: null,
+              };
+              activeStepControllers.set(id, active);
               if (shuttingDown) controller.abort("shutdown");
               try {
                 result = await runCommand(projectExecutionRoot, step.action, {
@@ -615,19 +797,60 @@ export async function createApp(options = {}) {
                   }),
                 });
               } finally {
-                if (activeStepControllers.get(id) === controller) activeStepControllers.delete(id);
+                active.phase = "finishing";
               }
             }
-            const snapshot = step.traceState
-              ? { trace: step.traceState }
-              : await captureProjectSnapshot(projectExecutionRoot, baseline, result);
-            engine.completeStep(session, index, snapshot);
+            if (attemptId) {
+              finalCheckpoint = await workspaceAdapter.createResult(
+                { ...session.workspace, sessionId: session.id },
+                { sessionId: session.id, attemptId, baseline },
+              );
+              const snapshot = checkpointAttemptSnapshot(finalCheckpoint.files, result, {
+                projectRelativePath: session.workspace.projectRelativePath,
+              });
+              engine.completeStep(session, index, snapshot, {
+                oid: finalCheckpoint.oid,
+                ref: finalCheckpoint.ref,
+              });
+            } else {
+              const snapshot = step.traceState
+                ? { trace: step.traceState }
+                : await captureProjectSnapshot(projectExecutionRoot, baseline, result);
+              engine.completeStep(session, index, snapshot);
+            }
             await store.save(session); emit(session);
             return sendJson(response, 200, publicSession(session));
           } catch (error) {
+            if (
+              attemptId
+              && finalCheckpoint
+              && session.steps[index]?.status !== "running"
+              && error.code !== "reconciliation_required"
+            ) {
+              throw await reconciliationError(session.workspace, finalCheckpoint.oid);
+            }
             if (session.steps[index]?.status === "running") {
+              if (error.name === "AbortError" && active?.cancelReason === "shutdown") {
+                error.message = "Command aborted by server shutdown";
+              }
               let snapshot = null;
-              if (error.result) {
+              let resultCheckpoint = null;
+              let checkpointError = null;
+              if (attemptId) {
+                try {
+                  active && (active.phase = "finishing");
+                  resultCheckpoint = await workspaceAdapter.createResult(
+                    { ...session.workspace, sessionId: session.id },
+                    { sessionId: session.id, attemptId, baseline },
+                  );
+                  snapshot = checkpointAttemptSnapshot(resultCheckpoint.files, error.result ?? null, {
+                    projectRelativePath: session.workspace.projectRelativePath,
+                  });
+                } catch (snapshotError) {
+                  checkpointError = snapshotError;
+                  runtime.warn(`Could not capture failed command snapshot for session ${id}: ${snapshotError.message}`);
+                }
+              } else if (error.result) {
                 try {
                   snapshot = await captureProjectSnapshot(projectExecutionRoot, baseline, error.result);
                 } catch (snapshotError) {
@@ -635,13 +858,46 @@ export async function createApp(options = {}) {
                 }
               }
               try {
-                engine.failStep(session, index, error, snapshot);
-                await store.save(session); emit(session);
+                if (attemptId && !resultCheckpoint) throw checkpointError;
+                if (attemptId && resultCheckpoint) {
+                  if (error.name === "AbortError" && active?.cancelReason === "user") {
+                    engine.cancelStep(
+                      session,
+                      index,
+                      attemptNumber,
+                      snapshot,
+                      { oid: resultCheckpoint.oid, ref: resultCheckpoint.ref },
+                      error,
+                    );
+                  } else {
+                    engine.failStep(
+                      session,
+                      index,
+                      error,
+                      snapshot,
+                      { oid: resultCheckpoint.oid, ref: resultCheckpoint.ref },
+                    );
+                  }
+                } else {
+                  engine.failStep(session, index, error, snapshot);
+                }
+                try {
+                  await store.save(session);
+                } catch (saveError) {
+                  if (resultCheckpoint) {
+                    throw await reconciliationError(session.workspace, resultCheckpoint.oid);
+                  }
+                  throw saveError;
+                }
+                emit(session);
               } catch (failureError) {
+                if (failureError.appCode === "reconciliation_required") throw failureError;
                 runtime.warn(`Could not persist failed step for session ${id}: ${failureError.message}`);
               }
             }
             throw error;
+          } finally {
+            if (activeStepControllers.get(id) === active) activeStepControllers.delete(id);
           }
         } finally { release(); }
       }
@@ -671,7 +927,10 @@ export async function createApp(options = {}) {
     if (typeof callback === "function") closeCallbacks.push(callback);
     if (!shutdownPromise) {
       shuttingDown = true;
-      for (const controller of activeStepControllers.values()) controller.abort("shutdown");
+      for (const active of activeStepControllers.values()) {
+        active.cancelReason = "shutdown";
+        active.controller.abort("shutdown");
+      }
       for (const stream of [...activeSseStreams]) {
         stream.cleanup();
         if (!stream.response.writableEnded) stream.response.end();
