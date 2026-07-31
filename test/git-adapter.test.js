@@ -10,9 +10,11 @@ import {
   captureGitState,
   createBaselineCheckpoint,
   createResultCheckpoint,
+  disposeManagedWorkspace,
   inspectGitRepository,
   prepareManagedWorkspace,
   restoreCheckpoint,
+  validateManagedWorkspace,
 } from "../packages/project-adapters/src/git-adapter.js";
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +49,19 @@ async function sourceFingerprint(root) {
     status: await git(root, "status", "--porcelain=v2", "--untracked-files=all"),
     keep: await fs.readFile(path.join(root, "app", "keep.txt")),
   };
+}
+
+async function managedGitDir(worktreeRoot) {
+  return git(worktreeRoot, "rev-parse", "--path-format=absolute", "--git-dir");
+}
+
+async function managedOwnerFile(worktreeRoot) {
+  return path.join(await managedGitDir(worktreeRoot), "dev-workbench-owner.json");
+}
+
+function persistedWorkspace(workspace) {
+  const { sessionId: _sessionId, ...persisted } = workspace;
+  return persisted;
 }
 
 test("inspects clean nested projects with canonical full Git identity", async (context) => {
@@ -216,6 +231,156 @@ test("prepares a detached owned worktree outside the source repository", async (
     status: "",
     diff: "",
   });
+});
+
+test("validates only the exact owned workspace for the owning session", async (context) => {
+  const root = await makeRepository(context);
+  const otherRoot = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-1",
+    ownershipToken: "owner-1",
+  });
+  const persisted = persistedWorkspace(workspace);
+
+  assert.deepEqual(
+    await validateManagedWorkspace(persisted, { sessionId: "session-1" }),
+    persisted,
+  );
+  await assert.rejects(
+    validateManagedWorkspace(persisted, { sessionId: "session-2" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+  await assert.rejects(
+    validateManagedWorkspace({ ...persisted, ownershipToken: "owner-2" }, { sessionId: "session-1" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+
+  const externalExecutionRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-external-"));
+  context.after(() => fs.rm(externalExecutionRoot, { recursive: true, force: true }));
+  await fs.rm(workspace.executionRoot, { recursive: true });
+  await fs.symlink(externalExecutionRoot, workspace.executionRoot, "dir");
+  await assert.rejects(
+    validateManagedWorkspace(persisted, { sessionId: "session-1" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+  await fs.rm(workspace.executionRoot);
+  await git(workspace.worktreeRoot, "checkout", "--quiet", "--", workspace.projectRelativePath);
+
+  const tamperedWorkspace = {
+    ...persisted,
+    repositoryRoot: await fs.realpath(otherRoot),
+    commonGitDir: await fs.realpath(path.join(otherRoot, ".git")),
+  };
+  const tamperedOwner = {
+    ...tamperedWorkspace,
+    sessionId: "session-1",
+  };
+  await fs.writeFile(
+    await managedOwnerFile(workspace.worktreeRoot),
+    `${JSON.stringify(tamperedOwner)}\n`,
+  );
+  await assert.rejects(
+    validateManagedWorkspace(tamperedWorkspace, { sessionId: "session-1" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+
+  await git(root, "worktree", "remove", workspace.worktreeRoot);
+  await assert.rejects(
+    validateManagedWorkspace(workspace, { sessionId: "session-1" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+});
+
+test("disposes only clean owned managed workspaces", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-1",
+    ownershipToken: "owner-1",
+  });
+  const persisted = persistedWorkspace(workspace);
+
+  assert.deepEqual(
+    await disposeManagedWorkspace(persisted, { sessionId: "session-1" }),
+    { removed: true, worktreeRoot: workspace.worktreeRoot },
+  );
+  await assert.rejects(
+    fs.access(workspace.worktreeRoot),
+    (error) => error.code === "ENOENT",
+  );
+  assert.doesNotMatch(await git(root, "worktree", "list", "--porcelain"), new RegExp(workspace.worktreeRoot));
+  assert.deepEqual(await captureGitState(root), {
+    available: true,
+    head: workspace.baseOid.slice(0, 7),
+    status: "",
+    diff: "",
+  });
+});
+
+test("disposal rejects dirty, tampered, and missing managed workspaces without deleting them", async (context) => {
+  const root = await makeRepository(context);
+  const otherRoot = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+
+  const dirtyWorkspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-dirty",
+    ownershipToken: "owner-dirty",
+  });
+  await fs.writeFile(path.join(dirtyWorkspace.executionRoot, "keep.txt"), "dirty\n");
+  await assert.rejects(
+    disposeManagedWorkspace(persistedWorkspace(dirtyWorkspace), { sessionId: "session-dirty" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "workspace_dirty",
+  );
+  assert.match(await git(root, "worktree", "list", "--porcelain"), new RegExp(dirtyWorkspace.worktreeRoot));
+
+  const tamperedWorkspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-tampered",
+    ownershipToken: "owner-tampered",
+  });
+  await assert.rejects(
+    disposeManagedWorkspace(persistedWorkspace(tamperedWorkspace), { sessionId: "session-foreign" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+  await fs.access(tamperedWorkspace.worktreeRoot);
+  const tamperedOwner = {
+    ...persistedWorkspace(tamperedWorkspace),
+    sessionId: "session-tampered",
+    repositoryRoot: await fs.realpath(otherRoot),
+    commonGitDir: await fs.realpath(path.join(otherRoot, ".git")),
+  };
+  await fs.writeFile(
+    await managedOwnerFile(tamperedWorkspace.worktreeRoot),
+    `${JSON.stringify(tamperedOwner)}\n`,
+  );
+  await assert.rejects(
+    disposeManagedWorkspace(persistedWorkspace(tamperedOwner), { sessionId: "session-tampered" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+  await fs.access(tamperedWorkspace.worktreeRoot);
+
+  const missingWorkspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-missing",
+    ownershipToken: "owner-missing",
+  });
+  await git(root, "worktree", "remove", missingWorkspace.worktreeRoot);
+  await assert.rejects(
+    disposeManagedWorkspace(persistedWorkspace(missingWorkspace), { sessionId: "session-missing" }),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
 });
 
 test("preparation rejects containment, path collisions, and unsafe identities", async (context) => {

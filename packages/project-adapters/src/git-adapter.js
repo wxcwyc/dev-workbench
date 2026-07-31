@@ -190,9 +190,13 @@ async function readOwnership(worktreeRoot) {
   }
 }
 
-async function assertOwnedWorkspace(workspace) {
+async function assertOwnedWorkspace(workspace, { sessionId } = {}) {
   if (!workspace || typeof workspace !== "object") {
     throw new GitWorkspaceError("ownership_mismatch", "Managed workspace identity is required");
+  }
+  const expectedSessionId = sessionId ?? workspace.sessionId;
+  if (typeof expectedSessionId !== "string" || expectedSessionId.length === 0) {
+    throw new GitWorkspaceError("ownership_mismatch", "Managed workspace session identity is required");
   }
   const canonicalWorktreeRoot = await fs.realpath(workspace.worktreeRoot).catch(() => null);
   if (canonicalWorktreeRoot !== workspace.worktreeRoot) {
@@ -200,7 +204,7 @@ async function assertOwnedWorkspace(workspace) {
   }
   const owner = await readOwnership(canonicalWorktreeRoot);
   const expected = {
-    sessionId: workspace.sessionId,
+    sessionId: expectedSessionId,
     ownershipToken: workspace.ownershipToken,
     projectRoot: workspace.projectRoot,
     repositoryRoot: workspace.repositoryRoot,
@@ -220,6 +224,7 @@ async function assertOwnedWorkspace(workspace) {
     "repositoryRoot",
     "commonGitDir",
     "worktreeRoot",
+    "executionRoot",
   ]) {
     const canonicalPath = await fs.realpath(workspace[key]).catch(() => null);
     if (canonicalPath !== workspace[key]) {
@@ -230,7 +235,34 @@ async function assertOwnedWorkspace(workspace) {
   if (path.join(workspace.worktreeRoot, relative) !== workspace.executionRoot) {
     throw new GitWorkspaceError("ownership_mismatch", "Managed execution path does not match");
   }
+  const [topLevelOutput, commonGitDirOutput] = await Promise.all([
+    runGit(workspace.worktreeRoot, ["rev-parse", "--show-toplevel"]).catch((error) => {
+      throw new GitWorkspaceError("ownership_mismatch", "Managed worktree root is unavailable", [
+        { kind: "ownership", detail: error.message },
+      ]);
+    }),
+    runGit(workspace.worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch((error) => {
+      throw new GitWorkspaceError("ownership_mismatch", "Managed worktree repository identity is unavailable", [
+        { kind: "ownership", detail: error.message },
+      ]);
+    }),
+  ]);
+  const [topLevel, commonGitDir] = await Promise.all([
+    fs.realpath(topLevelOutput).catch(() => null),
+    fs.realpath(commonGitDirOutput).catch(() => null),
+  ]);
+  if (topLevel !== workspace.worktreeRoot) {
+    throw new GitWorkspaceError("ownership_mismatch", "Managed worktree root does not match its Git identity");
+  }
+  if (commonGitDir !== workspace.commonGitDir) {
+    throw new GitWorkspaceError("ownership_mismatch", "Managed worktree common Git directory does not match");
+  }
   return owner;
+}
+
+export async function validateManagedWorkspace(workspace, { sessionId } = {}) {
+  await assertOwnedWorkspace(workspace, { sessionId });
+  return workspace;
 }
 
 export async function prepareManagedWorkspace({
@@ -309,8 +341,8 @@ export async function prepareManagedWorkspace({
   }
 }
 
-async function assertCleanWorkspace(workspace) {
-  await assertOwnedWorkspace(workspace);
+async function assertCleanWorkspace(workspace, options) {
+  await validateManagedWorkspace(workspace, options);
   const [status, gitDirOutput, commonGitDirOutput] = await Promise.all([
     runGit(workspace.worktreeRoot, [
       "status",
@@ -334,6 +366,42 @@ async function assertCleanWorkspace(workspace) {
   if (dirty.length > 0) {
     throw new GitWorkspaceError("workspace_dirty", "Managed worktree must be clean", dirty);
   }
+}
+
+async function listRegisteredWorktrees(repositoryRoot) {
+  const output = await runGit(repositoryRoot, ["worktree", "list", "--porcelain"], { trim: false });
+  const entries = [];
+  for (const block of output.split("\n\n")) {
+    if (block === "") continue;
+    const worktreeLine = block.split("\n").find((line) => line.startsWith("worktree "));
+    if (worktreeLine) entries.push(worktreeLine.slice("worktree ".length));
+  }
+  return entries;
+}
+
+export async function disposeManagedWorkspace(workspace, { sessionId } = {}) {
+  await validateManagedWorkspace(workspace, { sessionId });
+  const registeredWorktrees = await listRegisteredWorktrees(workspace.repositoryRoot);
+  if (!registeredWorktrees.includes(workspace.worktreeRoot)) {
+    throw new GitWorkspaceError("workspace_unregistered", "Managed worktree is no longer registered");
+  }
+  await assertCleanWorkspace(workspace, { sessionId });
+  await runGit(workspace.repositoryRoot, ["worktree", "remove", workspace.worktreeRoot]).catch((error) => {
+    throw new GitWorkspaceError("workspace_dispose_failed", "Managed worktree could not be removed", [
+      { kind: "ownership", detail: error.message },
+    ]);
+  });
+  try {
+    await fs.access(workspace.worktreeRoot);
+    throw new GitWorkspaceError("workspace_dispose_failed", "Managed worktree still exists after removal");
+  } catch (error) {
+    if (error instanceof GitWorkspaceError) throw error;
+    if (error.code !== "ENOENT") throw error;
+  }
+  return {
+    removed: true,
+    worktreeRoot: workspace.worktreeRoot,
+  };
 }
 
 async function assertRefAbsent(repositoryRoot, ref) {
