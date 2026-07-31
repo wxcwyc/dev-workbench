@@ -654,6 +654,92 @@ test("bounds oversized text and hunks while classifying binary and malformed UTF
   }
 });
 
+test("rejects every manifest status whose required checkpoint side is missing", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: root,
+    workspaceRoot: managedRoot,
+    sessionId: "session-missing-side",
+    ownershipToken: "owner-missing-side",
+  });
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-missing-side",
+    attemptId: "attempt-1",
+  });
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "keep.txt"), "result\n");
+  await fs.rm(path.join(workspace.worktreeRoot, "app", "remove.txt"));
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "added.txt"), "added\n");
+  const result = await createResultCheckpoint(workspace, {
+    sessionId: "session-missing-side",
+    attemptId: "attempt-1",
+    baseline,
+  });
+  const invalidFiles = [
+    { path: "app/added.txt", oldPath: null, status: "modified", binary: false },
+    { path: "app/remove.txt", oldPath: null, status: "modified", binary: false },
+    { path: "app/missing.txt", oldPath: null, status: "added", binary: false },
+    { path: "app/missing.txt", oldPath: null, status: "deleted", binary: false },
+    { path: "app/keep.txt", oldPath: "app/missing.txt", status: "renamed", binary: false },
+    { path: "app/keep.txt", oldPath: "app/missing.txt", status: "copied", binary: false },
+  ];
+
+  for (const file of invalidFiles) {
+    await assert.rejects(
+      readCheckpointFileDiff(workspace, {
+        sessionId: "session-missing-side",
+        attemptId: "attempt-1",
+        baseline,
+        result,
+        file,
+      }),
+      (error) => error instanceof GitWorkspaceError && error.code === "manifest_mismatch",
+      `${file.status}:${file.oldPath ?? ""}->${file.path}`,
+    );
+  }
+});
+
+test("diff reads reject a foreign repository even when it contains matching checkpoint refs", async (context) => {
+  const root = await makeRepository(context);
+  const foreignRoot = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: root,
+    workspaceRoot: managedRoot,
+    sessionId: "session-owned-diff",
+    ownershipToken: "owner-owned-diff",
+  });
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-owned-diff",
+    attemptId: "attempt-1",
+  });
+  await fs.writeFile(path.join(workspace.worktreeRoot, "app", "keep.txt"), "result\n");
+  const result = await createResultCheckpoint(workspace, {
+    sessionId: "session-owned-diff",
+    attemptId: "attempt-1",
+    baseline,
+  });
+  await git(foreignRoot, "fetch", "--quiet", root, baseline.oid, result.oid);
+  await git(foreignRoot, "update-ref", baseline.ref, baseline.oid);
+  await git(foreignRoot, "update-ref", result.ref, result.oid);
+
+  await assert.rejects(
+    readCheckpointFileDiff(
+      { ...workspace, repositoryRoot: await fs.realpath(foreignRoot) },
+      {
+        sessionId: "session-owned-diff",
+        attemptId: "attempt-1",
+        baseline,
+        result,
+        file: result.files.find((file) => file.path === "app/keep.txt"),
+      },
+    ),
+    (error) => error instanceof GitWorkspaceError && error.code === "ownership_mismatch",
+  );
+});
+
 test("checkpoint mutations reject ref collisions and ownership mismatch", async (context) => {
   const root = await makeRepository(context);
   const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));

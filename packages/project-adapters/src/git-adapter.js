@@ -507,7 +507,16 @@ async function readBlob(repositoryRoot, oid, filePath) {
     return { path: null, exists: false, bytes: 0, text: null, truncated: false };
   }
   const object = `${oid}:${filePath}`;
-  const type = await runGit(repositoryRoot, ["cat-file", "-t", object]).catch(() => null);
+  let type;
+  try {
+    type = await runGit(repositoryRoot, ["cat-file", "-t", object]);
+  } catch (error) {
+    throw new GitWorkspaceError(
+      "manifest_mismatch",
+      "Manifest path is absent from its checkpoint",
+      [{ kind: "git_object", path: filePath, detail: error.message }],
+    );
+  }
   if (type !== "blob") {
     return { path: filePath, exists: true, bytes: 0, text: null, truncated: false, binary: true };
   }
@@ -604,6 +613,7 @@ export async function readCheckpointFileDiff(workspace, {
   }
   assertManifestPath(file.path);
   if (file.oldPath !== null && file.oldPath !== undefined) assertManifestPath(file.oldPath);
+  await assertOwnedWorkspace(workspace, { sessionId });
   await assertCheckpointRef(workspace, baseline, sessionId, attemptId, "baseline");
   await assertCheckpointRef(workspace, result, sessionId, attemptId, "result");
 

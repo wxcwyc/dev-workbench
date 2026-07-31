@@ -1698,6 +1698,13 @@ test("lazy attempt diffs require exact owned manifest evidence and never enter S
   assert.equal(unsupported.status, 405);
   assert.equal(unsupported.headers.get("allow"), "GET");
 
+  const rejected = await postJson(`${sessionUrl}/steps/0/review`, { decision: "reject" });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(rejected.body.attempts[0].status, "failed");
+  const rejectedDiff = await fetch(`${endpoint}?path=keep.txt`);
+  assert.equal(rejectedDiff.status, 200);
+  assert.equal((await rejectedDiff.json()).new.text, `${sentinel}\n世界\n`);
+
   const storedPath = path.join(app.stateRoot, `${created.body.id}.json`);
   const stored = JSON.parse(await fs.readFile(storedPath, "utf8"));
   stored.attempts[0].baseline.ref = `refs/dev-workbench/checkpoints/${created.body.id}/foreign/baseline`;
@@ -1830,6 +1837,11 @@ test("failed checkpointed attempts retain bounded partial evidence and retry res
     failed.attempts[0].snapshot.files.map(({ path, status }) => ({ path, status })),
     [{ path: "partial.txt", status: "added" }],
   );
+  const failedDiff = await fetch(
+    `${sessionUrl}/attempts/${failed.attempts[0].id}/diff?path=partial.txt`,
+  );
+  assert.equal(failedDiff.status, 200);
+  assert.equal((await failedDiff.json()).new.text, "partial\n");
   const stale = await postJson(`${sessionUrl}/steps/0/run`, {
     confirmed: true,
     confirmedRestore: true,
@@ -1917,6 +1929,11 @@ test("cancel signals only the exact active generation and the owning run persist
     persisted.attempts[0].snapshot.files.map(({ path, status }) => ({ path, status })),
     [{ path: "partial.txt", status: "added" }],
   );
+  const cancelledDiff = await fetch(
+    `${sessionUrl}/attempts/${persisted.attempts[0].id}/diff?path=partial.txt`,
+  );
+  assert.equal(cancelledDiff.status, 200);
+  assert.equal((await cancelledDiff.json()).new.text, "cancelled partial\n");
   const afterFinish = await postJson(`${sessionUrl}/steps/0/cancel`, { attempt: 1 });
   assert.equal(afterFinish.response.status, 409);
   assert.equal(afterFinish.body.code, "attempt_not_active");
