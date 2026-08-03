@@ -350,6 +350,28 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
         }],
       });
     }
+    if (requestPath.endsWith("/attempts/attempt-1/diff?path=emoji.txt")) {
+      return new FakeResponse({
+        path: "emoji.txt",
+        oldPath: "emoji.txt",
+        newPath: "emoji.txt",
+        status: "modified",
+        binary: false,
+        truncated: false,
+        old: { text: "before after\n" },
+        new: { text: "before 🙂 after\n" },
+        hunks: [{
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: [
+            hunkLine("deletion", "before after", 1, null),
+            hunkLine("addition", "before 🙂 after", null, 1),
+          ],
+        }],
+      });
+    }
     throw new Error("diff exploded");
   });
   controller.renderSession(migrationSession("diff-mode", {
@@ -359,6 +381,7 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
         files: [
           { path: "demo.html", oldPath: "demo.html", status: "modified", binary: false, additions: 4, deletions: 1 },
           { path: "late-change.js", oldPath: "late-change.js", status: "modified", binary: false, additions: 1, deletions: 1 },
+          { path: "emoji.txt", oldPath: "emoji.txt", status: "modified", binary: false, additions: 1, deletions: 1 },
           { path: "asset.bin", oldPath: "asset.bin", status: "modified", binary: true, additions: 0, deletions: 0 },
           { path: "huge.html", oldPath: "huge.html", status: "modified", binary: false, additions: 800, deletions: 1 },
           { path: "broken.js", oldPath: "broken.js", status: "modified", binary: false, additions: 1, deletions: 1 },
@@ -431,6 +454,20 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
   assert.match(browser.element("migration-view").innerHTML, /OLD_TARGET/);
   assert.match(browser.element("migration-view").innerHTML, /NEW_TARGET/);
   assert.doesNotMatch(browser.element("migration-view").innerHTML, /line-0001/);
+
+  const emojiTarget = new FakeElement(browser.document);
+  emojiTarget.dataset.reviewPath = "emoji.txt";
+  emojiTarget.dataset.reviewAttemptId = "attempt-1";
+  await browser.element("migration-view").onclick({ target: emojiTarget });
+  search.value = "🙂";
+  await browser.element("migration-view").oninput({ target: search });
+  assert.match(browser.element("migration-view").innerHTML, /before <mark>🙂<\/mark> after/);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /before <mark>🙂 <\/mark>after/);
+
+  search.value = "after";
+  await browser.element("migration-view").oninput({ target: search });
+  assert.match(browser.element("migration-view").innerHTML, /🙂 <mark>after<\/mark>/);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /🙂<mark> after<\/mark>/);
 
   const binaryTarget = new FakeElement(browser.document);
   binaryTarget.dataset.reviewPath = "asset.bin";

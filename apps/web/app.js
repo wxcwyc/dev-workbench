@@ -616,8 +616,8 @@ function escapedTextWithBoundaries(text){
   const raw=String(text??"");
   let escaped="";
   const boundaries=[0];
-  for(const character of raw){
-    escaped+=escapeHtml(character);
+  for(let index=0;index<raw.length;index+=1){
+    escaped+=escapeHtml(raw[index]);
     boundaries.push(escaped.length);
   }
   return {escaped,boundaries};
