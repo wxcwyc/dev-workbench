@@ -110,12 +110,16 @@ function resetReviewDiff(){
   state.review.diffLoading=false;
   state.review.diffError="";
 }
-function closeRestoreDialog({focusTrigger=true}={}){
-  const dialog=$("#restore-checkpoint-dialog");
+function clearRestoreDialogState(){
   const trigger=state.review.restore.trigger;
   state.review.restore.target=null;
   state.review.restore.pending=false;
   state.review.restore.trigger=null;
+  return trigger;
+}
+function closeRestoreDialog({focusTrigger=true}={}){
+  const dialog=$("#restore-checkpoint-dialog");
+  const trigger=clearRestoreDialogState();
   if(dialog.open)dialog.close();
   if(focusTrigger&&trigger?.focus)trigger.focus();
 }
@@ -1321,6 +1325,16 @@ $("#migration-view").oninput=(event)=>{
   if(event.target.id!=="review-diff-search")return;
   state.review.diffSearch=event.target.value;
   if(state.active?.workbench==="migration")renderMigration(state.active);
+};
+$("#restore-checkpoint-dialog").oncancel=(event)=>{
+  event.preventDefault?.();
+  if(state.review.restore.pending)return;
+  closeRestoreDialog();
+};
+$("#restore-checkpoint-dialog").onclose=()=>{
+  if(state.review.restore.pending)return;
+  if(!state.review.restore.target&&!state.review.restore.trigger)return;
+  closeRestoreDialog();
 };
 $("#restore-checkpoint-cancel").onclick=()=>{if(!state.review.restore.pending)closeRestoreDialog();};
 $("#restore-checkpoint-confirm").onclick=confirmRestoreDialog;

@@ -114,6 +114,7 @@ test("review markup and styles define labelled regions, restore dialog semantics
   assert.match(indexHtml, /<label id="note-text-label"[^>]*for="note-text"/);
   assert.match(indexHtml, /<dialog id="restore-checkpoint-dialog"[^>]*aria-labelledby="restore-checkpoint-title"[^>]*aria-describedby="restore-checkpoint-description"/);
   assert.match(indexHtml, /id="restore-checkpoint-confirm"[^>]*type="button"/);
+  assert.match(indexHtml, /id="session-status"[^>]*tabindex="-1"/i);
   assert.match(controller, /aria-labelledby="workspace-status"/);
   assert.match(controller, /aria-labelledby="review-files-status"/);
   assert.match(controller, /aria-labelledby="review-diff-status"/);
@@ -605,9 +606,19 @@ test("restore opens a distinct confirmation dialog, cancel is inert, confirm sen
   assert.match(browser.element("restore-checkpoint-description").innerHTML, /cccccccccccccccccccccccccccccccccccccccc/);
   assert.match(browser.element("restore-checkpoint-description").innerHTML, /\/tmp\/dev-workbench\/session-1\/source-app/);
 
-  await browser.element("restore-checkpoint-cancel").onclick();
+  const nativeCancel = browser.element("restore-checkpoint-dialog").cancel();
+  assert.equal(nativeCancel.defaultPrevented, true);
   assert.equal(browser.element("restore-checkpoint-dialog").open, false);
   assert.equal(browser.document.activeElement, trigger);
+  assert.equal(controller.state.review.restore.target, null);
+  assert.equal(controller.state.review.restore.trigger, null);
+
+  await browser.element("migration-view").onclick({ target: trigger });
+  browser.element("restore-checkpoint-dialog").close();
+  assert.equal(browser.element("restore-checkpoint-dialog").open, false);
+  assert.equal(browser.document.activeElement, trigger);
+  assert.equal(controller.state.review.restore.target, null);
+  assert.equal(controller.state.review.restore.trigger, null);
 
   await browser.element("migration-view").onclick({ target: trigger });
   const pending = browser.element("restore-checkpoint-confirm").onclick();
@@ -618,6 +629,10 @@ test("restore opens a distinct confirmation dialog, cancel is inert, confirm sen
     expectedOid: "c".repeat(40),
     expectedExecutionRoot: "/tmp/dev-workbench/session-1/source-app",
   });
+  const pendingCancel = browser.element("restore-checkpoint-dialog").cancel();
+  assert.equal(pendingCancel.defaultPrevented, true);
+  assert.equal(browser.element("restore-checkpoint-dialog").open, true);
+  assert.equal(controller.state.review.restore.target?.checkpointId, "attempt-1");
 
   controller.renderSession(migrationSession("other", {
     workspace: workspace(),
@@ -633,4 +648,32 @@ test("restore opens a distinct confirmation dialog, cancel is inert, confirm sen
 
   assert.equal(controller.state.active.id, "other");
   assert.equal(browser.element("restore-checkpoint-dialog").open, false);
+});
+
+test("successful restore closes the dialog and moves focus to the focusable session status", async (t) => {
+  const restore = deferred();
+  const trigger = new FakeElement(null);
+  const { browser, controller } = await loadController(t, (requestPath, options) => {
+    if (requestPath === "/api/sessions/recover-success/checkpoints/attempt-1/restore" && options.method === "POST") return restore.promise;
+    throw new Error(`Unexpected fetch ${requestPath}`);
+  });
+  trigger.ownerDocument = browser.document;
+  controller.renderSession(migrationSession("recover-success", {
+    workspace: workspace({ currentCheckpointId: "initial" }),
+    attempts: [attempt()],
+    steps: [{ ...migrationSession().steps[0], status: "completed", review: { decision: "accept", reviewedAt: "2026-08-03T09:02:00.000Z" } }],
+  }));
+
+  trigger.dataset.restoreCheckpointId = "attempt-1";
+  await browser.element("migration-view").onclick({ target: trigger });
+  const pending = browser.element("restore-checkpoint-confirm").onclick();
+  restore.resolve(new FakeResponse(migrationSession("recover-success", {
+    workspace: workspace({ currentCheckpointId: "attempt-1" }),
+    attempts: [attempt()],
+    steps: [{ ...migrationSession().steps[0], status: "completed", review: { decision: "accept", reviewedAt: "2026-08-03T09:02:00.000Z" } }],
+  })));
+  await pending;
+
+  assert.equal(browser.element("restore-checkpoint-dialog").open, false);
+  assert.equal(browser.document.activeElement, browser.element("session-status"));
 });

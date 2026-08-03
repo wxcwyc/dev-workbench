@@ -153,6 +153,18 @@ export class FakeElement {
     this.open = true;
   }
 
+  cancel() {
+    const event = {
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+    };
+    this.oncancel?.(event);
+    if (!event.defaultPrevented) this.close();
+    return event;
+  }
+
   close() {
     if (!this.open) return;
     this.open = false;
