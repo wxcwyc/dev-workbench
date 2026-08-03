@@ -178,6 +178,36 @@ test("prepare workspace preserves source identity while exposing execution ident
   assert.match(browser.element("migration-view").innerHTML, /current checkpoint:\s*initial/i);
 });
 
+test("prepared migration session without attempts renders without a diff-search node and hides restore actions until baseline evidence exists", async (t) => {
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  browser.document.elements.delete("review-diff-search");
+
+  assert.doesNotThrow(() => controller.renderSession(migrationSession("prepared-pristine", {
+    cursor: -1,
+    workspace: workspace(),
+    attempts: [],
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "low",
+      dependsOn: [],
+      attempt: 0,
+      status: "pending",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+      review: null,
+    }],
+  })));
+
+  const html = browser.element("migration-view").innerHTML;
+  assert.match(html, /execution workspace ready/i);
+  assert.doesNotMatch(html, /restore initial filesystem/i);
+  assert.doesNotMatch(html, /restore accepted filesystem/i);
+});
+
 test("changed-file review escapes manifest paths, preserves selection, and ignores stale lazy diff responses", async (t) => {
   const firstDiff = deferred();
   const secondDiff = deferred();
@@ -309,8 +339,8 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
     binary: false,
     truncated: false,
     old: { text: "<main>alpha</main>\n" },
-    new: { text: "<main>beta</main>\n<script>alert(1)</script>\n" },
-    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ["-<main>alpha</main>", "+<main>beta</main>", "+<script>alert(1)</script>"] }],
+    new: { text: "<main>beta</main>\n<span>beta</span>\n<script>alert(1)</script>\n" },
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 3, lines: ["-<main>alpha</main>", "+<main>beta</main>", "+<span>beta</span>", "+<script>alert(1)</script>"] }],
   }));
   await demoPending;
 
@@ -321,6 +351,11 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
   search.value = "beta";
   await browser.element("migration-view").oninput({ target: search });
   assert.match(browser.element("migration-view").innerHTML, /<mark>beta<\/mark>/i);
+
+  search.value = "span";
+  await browser.element("migration-view").oninput({ target: search });
+  assert.match(browser.element("migration-view").innerHTML, /&lt;<span class="syntax-tag"><mark>span<\/mark><\/span>&gt;beta&lt;\/<span class="syntax-tag"><mark>span<\/mark><\/span>&gt;/i);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /<<mark>span<\/mark>/i);
 
   const mode = new FakeElement(browser.document);
   mode.dataset.diffMode = "side-by-side";

@@ -52,6 +52,8 @@ function confirmationMessage(session,step,index){
 }
 function migrationAttempts(session){return Array.isArray(session?.attempts)?session.attempts:[];}
 function filesForAttempt(attempt){return Array.isArray(attempt?.snapshot?.files)?attempt.snapshot.files:[];}
+function hasRecordedBaseline(attempt){return typeof attempt?.baseline?.oid==="string"&&attempt.baseline.oid!==""&&typeof attempt?.baseline?.ref==="string"&&attempt.baseline.ref!=="";}
+function hasRestorableResult(attempt){return attempt?.result?.restorable===true&&typeof attempt?.result?.oid==="string"&&attempt.result.oid!==""&&typeof attempt?.result?.ref==="string"&&attempt.result.ref!=="";}
 function latestAttemptForStep(session,stepIndex){
   const step=session?.steps?.[stepIndex];
   if(!step)return null;
@@ -74,17 +76,19 @@ function currentReviewAttempt(session){
 function reviewCheckpointTarget(session,checkpointId){
   if(session?.workbench!=="migration"||!session.workspace)return null;
   if(checkpointId==="initial"){
-    const initial=migrationAttempts(session)[0]?.baseline;
+    const initialAttempt=migrationAttempts(session).find(hasRecordedBaseline);
+    if(!initialAttempt)return null;
+    const initial=initialAttempt.baseline;
     return {
       checkpointId:"initial",
       label:"Initial workspace base",
-      oid:initial?.oid??session.workspace.baseOid,
-      ref:initial?.ref??"Initial workspace base",
+      oid:initial.oid,
+      ref:initial.ref,
       executionRoot:session.workspace.executionRoot,
       stepIndex:-1,
     };
   }
-  const attempt=migrationAttempts(session).find((candidate)=>candidate.id===checkpointId&&candidate.result?.restorable===true);
+  const attempt=migrationAttempts(session).find((candidate)=>candidate.id===checkpointId&&hasRestorableResult(candidate));
   if(!attempt)return null;
   return {
     checkpointId,
@@ -98,7 +102,8 @@ function reviewCheckpointTarget(session,checkpointId){
 function matchingRetryAttempt(session,stepIndex){
   const step=session?.steps?.[stepIndex];
   if(!step||!["failed","cancelled"].includes(step.status))return null;
-  return latestAttemptForStep(session,stepIndex);
+  const attempt=latestAttemptForStep(session,stepIndex);
+  return hasRecordedBaseline(attempt)?attempt:null;
 }
 function resetReviewDiff(){
   state.review.diff=null;
@@ -556,19 +561,61 @@ function reviewLanguage(path){
   if(path.endsWith(".json"))return"json";
   return"plain";
 }
-function highlightEscapedText(text,language){
-  if(language==="html")return text.replace(/(&lt;\/?)([^&]+?)(&gt;)/g,'$1<span class="syntax-tag">$2</span>$3');
-  if(language==="js"||language==="json"){
-    return text
-      .replace(/("(?:\\.|[^"\\])*")/g,'<span class="syntax-string">$1</span>')
-      .replace(/\b(const|let|var|function|return|if|else|true|false|null)\b/g,'<span class="syntax-keyword">$1</span>');
+function syntaxSegments(text,language){
+  const segments=[];
+  const push=(start,end,className="")=>{
+    if(end<=start)return;
+    segments.push({text:text.slice(start,end),className});
+  };
+  if(language==="html"){
+    const pattern=/(&lt;\/?)([^&]+?)(&gt;)/g;
+    let index=0;
+    for(const match of text.matchAll(pattern)){
+      const start=match.index??0;
+      const prefixEnd=start+match[1].length;
+      const tagEnd=prefixEnd+match[2].length;
+      const matchEnd=start+match[0].length;
+      push(index,start);
+      push(start,prefixEnd);
+      push(prefixEnd,tagEnd,"syntax-tag");
+      push(tagEnd,matchEnd);
+      index=matchEnd;
+    }
+    push(index,text.length);
+    return segments;
   }
-  return text;
+  if(language==="js"||language==="json"){
+    const pattern=/("(?:\\.|[^"\\])*")|\b(const|let|var|function|return|if|else|true|false|null)\b/g;
+    let index=0;
+    for(const match of text.matchAll(pattern)){
+      const start=match.index??0;
+      const matchEnd=start+match[0].length;
+      push(index,start);
+      push(start,matchEnd,match[1]?"syntax-string":"syntax-keyword");
+      index=matchEnd;
+    }
+    push(index,text.length);
+    return segments;
+  }
+  return[{text,className:""}];
 }
-function highlightSearch(text,search){
-  if(!search)return text;
-  const escaped=search.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-  return text.replace(new RegExp(escaped,"gi"),(match)=>`<mark>${match}</mark>`);
+function searchRanges(text,search){
+  if(!search)return[];
+  const needle=search.toLowerCase();
+  const haystack=text.toLowerCase();
+  const ranges=[];
+  for(let index=0;index<haystack.length;){
+    const start=haystack.indexOf(needle,index);
+    if(start===-1)break;
+    ranges.push([start,start+needle.length]);
+    index=start+needle.length;
+  }
+  return ranges;
+}
+function renderSyntaxPiece(text,className,marked){
+  if(!text)return"";
+  const content=marked?`<mark>${text}</mark>`:text;
+  return className?`<span class="${className}">${content}</span>`:content;
 }
 function renderReviewText(text,path,search){
   const lines=String(text??"").split("\n");
@@ -577,14 +624,30 @@ function renderReviewText(text,path,search){
   return {
     html:bounded.map((line)=>{
       const escaped=escapeHtml(line);
-      const highlighted=highlightEscapedText(escaped,language);
-      const searched=highlightSearch(highlighted,escapeHtml(search));
-      const matched=search&&line.toLowerCase().includes(search.toLowerCase());
-      return `<span class="review-line${matched?" match":""}">${searched||"&nbsp;"}</span>`;
+      const ranges=searchRanges(escaped,search);
+      let html="";
+      let offset=0;
+      for(const segment of syntaxSegments(escaped,language)){
+        const segmentStart=offset;
+        const segmentEnd=segmentStart+segment.text.length;
+        let cursor=segmentStart;
+        for(const [start,end] of ranges){
+          if(end<=segmentStart||start>=segmentEnd)continue;
+          if(cursor<start)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart,start-segmentStart),segment.className,false);
+          const markedStart=Math.max(cursor,start);
+          const markedEnd=Math.min(segmentEnd,end);
+          if(markedStart<markedEnd)html+=renderSyntaxPiece(segment.text.slice(markedStart-segmentStart,markedEnd-segmentStart),segment.className,true);
+          cursor=markedEnd;
+          if(cursor>=segmentEnd)break;
+        }
+        if(cursor<segmentEnd)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart),segment.className,false);
+        offset=segmentEnd;
+      }
+      return `<span class="review-line${ranges.length?" match":""}">${html||"&nbsp;"}</span>`;
     }).join(""),
     limited:lines.length>reviewRenderLineLimit,
     language,
-    matches:search?lines.filter((line)=>line.toLowerCase().includes(search.toLowerCase())).length:0,
+    matches:search?lines.filter((line)=>escapeHtml(line).toLowerCase().includes(search.toLowerCase())).length:0,
   };
 }
 function renderUnifiedDiff(diff,search){
@@ -638,7 +701,8 @@ function renderMigration(session){
   const attempt=syncReviewSelection(session);
   const command=attempt?.snapshot?.command??session.currentSnapshot?.command;
   $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_"," "))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">Risk: ${escapeHtml(stepRisk(step))}</span></div><div class="step-meta"><span class="step-attempt">Attempt ${escapeHtml(stepAttempt(step))}</span></div><div class="step-dependencies"><strong>Depends on:</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):"none")}</div></div>`;}).join("")}</div></section><div class="preview-workspace">${previewCard(session,"source")}${previewCard(session,"target")}${terminalPanel(session)}</div>${workspaceMarkup(session,attempt)}<section class="panel review-files-panel"><div class="panel-title">Changed files</div><div class="panel-body">${attempt?reviewFilesMarkup(attempt):`<div class="review-empty">No attempt evidence is selected at this checkpoint.</div>`}</div></section><section class="panel review-diff-panel"><div class="panel-title">Diff evidence</div><div class="panel-body">${attempt?reviewDiffMarkup(attempt):`<div class="review-empty">Run a migration step to capture per-file diff evidence.</div>`}</div></section><section class="panel history-terminal"><div class="panel-title">Historical command output</div><div class="panel-body terminal"><pre>${command?`$ ${escapeHtml(command.command.join(" "))}\n${escapeHtml(command.stdout??"")}${escapeHtml(command.stderr??"")}`:"No command executed at this checkpoint."}</pre></div></section></div>`;
-  $("#review-diff-search").value=state.review.diffSearch;
+  const reviewDiffSearch=$("#review-diff-search");
+  if(reviewDiffSearch)reviewDiffSearch.value=state.review.diffSearch;
 }
 
 function isPristineMigration(session){
