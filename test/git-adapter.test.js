@@ -17,6 +17,7 @@ import {
   restoreCheckpoint,
   validateManagedWorkspace,
 } from "../packages/project-adapters/src/git-adapter.js";
+import { checkpointAttemptSnapshot } from "../packages/project-adapters/src/snapshot.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -620,6 +621,111 @@ test("reads structured text diffs for every checkpoint manifest status", async (
       { type: "deletion", text: "regular" },
       { type: "addition", text: "keep.txt" },
     ],
+  );
+});
+
+test("reads project-scoped moved-in and copied-in diffs without exposing outside-project old contents", async (context) => {
+  const root = await makeRepository(context);
+  const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
+  context.after(() => fs.rm(managedRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "sibling"));
+  await fs.writeFile(path.join(root, "sibling", "move-source.txt"), "moved from sibling\n");
+  await fs.writeFile(path.join(root, "sibling", "copy-source.txt"), "copied from sibling\n");
+  await git(root, "add", ".");
+  await git(root, "commit", "--quiet", "-m", "project scoped diff fixture");
+  const workspace = await prepareManagedWorkspace({
+    projectRoot: path.join(root, "app"),
+    workspaceRoot: managedRoot,
+    sessionId: "session-project-diff",
+    ownershipToken: "owner-project-diff",
+  });
+  const baseline = await createBaselineCheckpoint(workspace, {
+    sessionId: "session-project-diff",
+    attemptId: "attempt-1",
+  });
+  await fs.rename(
+    path.join(workspace.worktreeRoot, "sibling", "move-source.txt"),
+    path.join(workspace.executionRoot, "moved-in.txt"),
+  );
+  await fs.copyFile(
+    path.join(workspace.worktreeRoot, "sibling", "copy-source.txt"),
+    path.join(workspace.executionRoot, "copied-in.txt"),
+  );
+  const result = await createResultCheckpoint(workspace, {
+    sessionId: "session-project-diff",
+    attemptId: "attempt-1",
+    baseline,
+  });
+  const projectedResultFiles = checkpointAttemptSnapshot(result.files, null, {
+    projectRelativePath: workspace.projectRelativePath,
+  }).files;
+  const movedInFile = projectedResultFiles.find((file) => file.path === "moved-in.txt");
+  const copiedInFile = checkpointAttemptSnapshot([
+    {
+      path: "app/copied-in.txt",
+      oldPath: "sibling/copy-source.txt",
+      status: "copied",
+      binary: false,
+      additions: 1,
+      deletions: 0,
+    },
+  ], null, {
+    projectRelativePath: workspace.projectRelativePath,
+  }).files[0];
+
+  result.files = [...projectedResultFiles.filter((file) => file.path !== "copied-in.txt"), copiedInFile];
+
+  assert.deepEqual(movedInFile, {
+    path: "moved-in.txt",
+    oldPath: null,
+    status: "renamed",
+    binary: false,
+    additions: 0,
+    deletions: 0,
+  });
+  assert.deepEqual(copiedInFile, {
+    path: "copied-in.txt",
+    oldPath: null,
+    status: "copied",
+    binary: false,
+    additions: 1,
+    deletions: 0,
+  });
+
+  const movedIn = await readCheckpointFileDiff(workspace, {
+    sessionId: "session-project-diff",
+    attemptId: "attempt-1",
+    baseline,
+    result,
+    file: movedInFile,
+  });
+  assert.equal(movedIn.status, "renamed");
+  assert.equal(movedIn.oldPath, null);
+  assert.equal(movedIn.newPath, "moved-in.txt");
+  assert.equal(movedIn.old.exists, false);
+  assert.equal(movedIn.old.text, null);
+  assert.equal(movedIn.new.text, "moved from sibling\n");
+  assert.deepEqual(
+    movedIn.hunks.flatMap((hunk) => hunk.lines).map(({ type, text }) => ({ type, text })),
+    [{ type: "addition", text: "moved from sibling" }],
+  );
+
+  const copiedIn = await readCheckpointFileDiff(workspace, {
+    sessionId: "session-project-diff",
+    attemptId: "attempt-1",
+    baseline,
+    result,
+    file: copiedInFile,
+  });
+  assert.equal(copiedIn.status, "copied");
+  assert.equal(copiedIn.oldPath, null);
+  assert.equal(copiedIn.newPath, "copied-in.txt");
+  assert.equal(copiedIn.old.exists, false);
+  assert.equal(copiedIn.old.text, null);
+  assert.equal(copiedIn.new.text, "copied from sibling\n");
+  assert.deepEqual(
+    copiedIn.hunks.flatMap((hunk) => hunk.lines).map(({ type, text }) => ({ type, text })),
+    [{ type: "addition", text: "copied from sibling" }],
   );
 });
 

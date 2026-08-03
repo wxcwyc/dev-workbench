@@ -625,9 +625,6 @@ export async function readCheckpointFileDiff(workspace, {
     ? null
     : (file.status === "renamed" || file.status === "copied" ? file.oldPath : file.path);
   const newPath = file.status === "deleted" ? null : file.path;
-  if ((file.status === "renamed" || file.status === "copied") && oldPath == null) {
-    throw new GitWorkspaceError("manifest_mismatch", "Renamed and copied files require an old path");
-  }
   const projectPrefix = workspace.projectRelativePath === "." ? "" : `${workspace.projectRelativePath}/`;
   const repositoryOldPath = oldPath === null ? null : `${projectPrefix}${oldPath}`;
   const repositoryNewPath = newPath === null ? null : `${projectPrefix}${newPath}`;
