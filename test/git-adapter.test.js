@@ -683,6 +683,7 @@ test("rejects every manifest status whose required checkpoint side is missing", 
     { path: "app/missing.txt", oldPath: null, status: "deleted", binary: false },
     { path: "app/keep.txt", oldPath: "app/missing.txt", status: "renamed", binary: false },
     { path: "app/keep.txt", oldPath: "app/missing.txt", status: "copied", binary: false },
+    { path: "app/missing.txt", oldPath: null, status: "type-changed", binary: false },
   ];
 
   for (const file of invalidFiles) {
