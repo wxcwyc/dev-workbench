@@ -43,6 +43,7 @@
           <div><span id="workbench-badge" class="badge"></span><h1 id="session-title"></h1><p id="session-path" class="muted"></p></div>
           <div id="session-controls" class="session-controls">
             <span id="session-status"></span>
+            <button id="prepare-workspace" type="button" hidden>Prepare workspace</button>
             <button id="edit-plan" type="button" hidden disabled aria-describedby="edit-plan-reason">Edit plan</button>
             <span id="edit-plan-reason" class="muted">Plan editing is available only before the migration starts.</span>
             <div id="review-controls" class="review-controls hidden">
@@ -62,7 +63,7 @@
         <section class="notes-panel">
           <h2 id="notes-title">Notes</h2>
           <div id="notes"></div>
-          <form id="note-form"><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add note</button></form>
+          <form id="note-form"><label id="note-text-label" for="note-text">Review note</label><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add note</button></form>
         </section>
       </div>
     </main>
@@ -167,6 +168,24 @@
           <button id="plan-editor-cancel" type="button">Cancel</button>
           <button id="plan-editor-save" class="primary" type="button" disabled>Save plan</button>
         </div>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="restore-checkpoint-dialog" aria-labelledby="restore-checkpoint-title" aria-describedby="restore-checkpoint-description">
+    <div class="restore-dialog-shell">
+      <div class="restore-dialog-header">
+        <div>
+          <span class="restore-dialog-kicker">FILESYSTEM RESTORE / DANGEROUS</span>
+          <h1 id="restore-checkpoint-title">Restore managed workspace</h1>
+          <p id="restore-checkpoint-description">Review the exact checkpoint identity before restoring the managed worktree.</p>
+        </div>
+      </div>
+      <div class="restore-dialog-body">
+        <div id="restore-checkpoint-status" class="restore-dialog-status" role="status" aria-live="polite">Restore changes only the managed execution workspace.</div>
+      </div>
+      <div class="restore-dialog-footer">
+        <button id="restore-checkpoint-cancel" type="button">Keep current workspace</button>
+        <button id="restore-checkpoint-confirm" class="danger-button" type="button">Restore filesystem</button>
       </div>
     </div>
   </dialog>

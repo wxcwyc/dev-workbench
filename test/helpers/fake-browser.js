@@ -4,12 +4,17 @@ const elementIds = [
   "allowed-root", "detection-evidence", "detection-facts", "detection-warnings",
   "empty", "execution-view", "health", "latest", "logic-demo", "migration-demo",
   "migration-view", "next", "note-form", "note-text", "notes", "notes-title",
+  "note-text-label",
   "onboarding-close", "onboarding-config", "onboarding-create", "onboarding-detection",
   "onboarding-file", "onboarding-import", "onboarding-inspect", "onboarding-preview",
   "onboarding-preview-action", "onboarding-recent", "onboarding-session-title",
   "onboarding-status", "open-project", "open-project-mobile", "previous",
   "plan-editor", "plan-editor-add", "plan-editor-cancel", "plan-editor-save",
   "plan-editor-status", "plan-editor-steps", "edit-plan",
+  "prepare-workspace", "restore-checkpoint-dialog", "restore-checkpoint-cancel",
+  "restore-checkpoint-confirm", "restore-checkpoint-description", "restore-checkpoint-status",
+  "restore-checkpoint-title", "review-diff-search", "review-diff-status",
+  "review-files-status", "workspace-status",
   "project-inspect-form", "project-onboarding", "project-path", "run-next",
   "review-accept", "review-controls", "review-reject",
   "session-file", "session-path", "session-status", "session-title", "sessions",
@@ -78,6 +83,9 @@ export class FakeElement {
     this.attributes = new Map();
     this.hidden = false;
     this.open = false;
+    this.scrollHeight = 0;
+    this.scrollTop = 0;
+    this.clientHeight = 0;
     this.textContent = "";
     this.value = "";
     this.parentElement = null;
