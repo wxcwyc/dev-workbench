@@ -612,45 +612,139 @@ function searchRanges(text,search){
   }
   return ranges;
 }
+function escapedTextWithBoundaries(text){
+  const raw=String(text??"");
+  let escaped="";
+  const boundaries=[0];
+  for(const character of raw){
+    escaped+=escapeHtml(character);
+    boundaries.push(escaped.length);
+  }
+  return {escaped,boundaries};
+}
+function escapedRangesFromRaw(rawRanges,boundaries){
+  return rawRanges.map(([start,end])=>[boundaries[start],boundaries[end]]);
+}
 function renderSyntaxPiece(text,className,marked){
   if(!text)return"";
   const content=marked?`<mark>${text}</mark>`:text;
   return className?`<span class="${className}">${content}</span>`:content;
 }
-function renderReviewText(text,path,search){
-  const lines=String(text??"").split("\n");
-  const bounded=lines.length>reviewRenderLineLimit?lines.slice(0,reviewRenderLineLimit):lines;
-  const language=reviewLanguage(path);
+function renderEscapedReviewText(escaped,language,escapedRanges){
+  let html="";
+  let offset=0;
+  for(const segment of syntaxSegments(escaped,language)){
+    const segmentStart=offset;
+    const segmentEnd=segmentStart+segment.text.length;
+    let cursor=segmentStart;
+    for(const [start,end] of escapedRanges){
+      if(end<=segmentStart||start>=segmentEnd)continue;
+      if(cursor<start)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart,start-segmentStart),segment.className,false);
+      const markedStart=Math.max(cursor,start);
+      const markedEnd=Math.min(segmentEnd,end);
+      if(markedStart<markedEnd)html+=renderSyntaxPiece(segment.text.slice(markedStart-segmentStart,markedEnd-segmentStart),segment.className,true);
+      cursor=markedEnd;
+      if(cursor>=segmentEnd)break;
+    }
+    if(cursor<segmentEnd)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart),segment.className,false);
+    offset=segmentEnd;
+  }
+  return html;
+}
+function renderReviewRows(rows,defaultPath,search){
+  const normalized=Array.isArray(rows)?rows:[];
+  const bounded=normalized.length>reviewRenderLineLimit?normalized.slice(0,reviewRenderLineLimit):normalized;
+  let matchCount=0;
   return {
-    html:bounded.map((line)=>{
-      const escaped=escapeHtml(line);
-      const ranges=searchRanges(escaped,search);
-      let html="";
-      let offset=0;
-      for(const segment of syntaxSegments(escaped,language)){
-        const segmentStart=offset;
-        const segmentEnd=segmentStart+segment.text.length;
-        let cursor=segmentStart;
-        for(const [start,end] of ranges){
-          if(end<=segmentStart||start>=segmentEnd)continue;
-          if(cursor<start)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart,start-segmentStart),segment.className,false);
-          const markedStart=Math.max(cursor,start);
-          const markedEnd=Math.min(segmentEnd,end);
-          if(markedStart<markedEnd)html+=renderSyntaxPiece(segment.text.slice(markedStart-segmentStart,markedEnd-segmentStart),segment.className,true);
-          cursor=markedEnd;
-          if(cursor>=segmentEnd)break;
-        }
-        if(cursor<segmentEnd)html+=renderSyntaxPiece(segment.text.slice(cursor-segmentStart),segment.className,false);
-        offset=segmentEnd;
-      }
-      return `<span class="review-line${ranges.length?" match":""}">${html||"&nbsp;"}</span>`;
+    html:bounded.map((row)=>{
+      const rawText=String(row?.text??"");
+      const ranges=row?.searchable===false?[]:searchRanges(rawText,search);
+      if(ranges.length)matchCount+=1;
+      const {escaped,boundaries}=escapedTextWithBoundaries(rawText);
+      const escapedRanges=escapedRangesFromRaw(ranges,boundaries);
+      const rowLanguage=reviewLanguage(row?.path??defaultPath);
+      const prefix=typeof row?.prefix==="string"&&row.prefix!==""?`${escapeHtml(row.prefix)} `:"";
+      const content=renderEscapedReviewText(escaped,rowLanguage,escapedRanges);
+      return `<span class="review-line${ranges.length?" match":""}${row?.kind?` ${escapeHtml(row.kind)}`:""}">${prefix}${content||"&nbsp;"}</span>`;
     }).join(""),
-    limited:lines.length>reviewRenderLineLimit,
-    language,
-    matches:search?lines.filter((line)=>escapeHtml(line).toLowerCase().includes(search.toLowerCase())).length:0,
+    limited:normalized.length>reviewRenderLineLimit,
+    language:reviewLanguage(defaultPath),
+    matches:matchCount,
   };
 }
+function renderReviewText(text,path,search){
+  return renderReviewRows(String(text??"").split("\n").map((line)=>({text:line})),path,search);
+}
+function hasStructuredHunkLines(diff){
+  return Array.isArray(diff?.hunks)&&diff.hunks.some((hunk)=>Array.isArray(hunk?.lines)&&hunk.lines.some((line)=>line&&typeof line.text==="string"&&["context","addition","deletion"].includes(line.type)));
+}
+function formatHunkRange(start,count){
+  return `${start}${count===1?"":`,`+count}`;
+}
+function hunkHeaderText(hunk){
+  return `@@ -${formatHunkRange(hunk.oldStart,hunk.oldLines)} +${formatHunkRange(hunk.newStart,hunk.newLines)} @@`;
+}
+function unifiedHunkRows(diff){
+  const rows=[];
+  for(const hunk of diff.hunks){
+    if(!Array.isArray(hunk?.lines)||!hunk.lines.length)continue;
+    rows.push({text:hunkHeaderText(hunk),kind:"review-hunk-header",path:"",searchable:false});
+    for(const line of hunk.lines){
+      const prefix=line.type==="addition"?"+":line.type==="deletion"?"-":" ";
+      rows.push({text:String(line.text??""),prefix,kind:`review-${line.type}`,path:diff.path});
+    }
+  }
+  return rows;
+}
+function pairedHunkRows(diff){
+  const oldRows=[];
+  const newRows=[];
+  const pushPair=(oldRow,newRow)=>{
+    oldRows.push(oldRow);
+    newRows.push(newRow);
+  };
+  const flushChanges=(deletions,additions)=>{
+    const count=Math.max(deletions.length,additions.length);
+    for(let index=0;index<count;index+=1){
+      const deletion=deletions[index];
+      const addition=additions[index];
+      pushPair(
+        deletion?{text:String(deletion.text??""),prefix:"-",kind:"review-deletion",path:diff.oldPath??diff.path}:{text:"",kind:"review-empty",path:diff.oldPath??diff.path,searchable:false},
+        addition?{text:String(addition.text??""),prefix:"+",kind:"review-addition",path:diff.newPath??diff.path}:{text:"",kind:"review-empty",path:diff.newPath??diff.path,searchable:false},
+      );
+    }
+    deletions.length=0;
+    additions.length=0;
+  };
+  for(const hunk of diff.hunks){
+    if(!Array.isArray(hunk?.lines)||!hunk.lines.length)continue;
+    pushPair(
+      {text:hunkHeaderText(hunk),kind:"review-hunk-header",path:"",searchable:false},
+      {text:hunkHeaderText(hunk),kind:"review-hunk-header",path:"",searchable:false},
+    );
+    const deletions=[];
+    const additions=[];
+    for(const line of hunk.lines){
+      if(line.type==="context"){
+        flushChanges(deletions,additions);
+        pushPair(
+          {text:String(line.text??""),prefix:" ",kind:"review-context",path:diff.oldPath??diff.path},
+          {text:String(line.text??""),prefix:" ",kind:"review-context",path:diff.newPath??diff.path},
+        );
+        continue;
+      }
+      if(line.type==="deletion")deletions.push(line);
+      else if(line.type==="addition")additions.push(line);
+    }
+    flushChanges(deletions,additions);
+  }
+  return {oldRows,newRows};
+}
 function renderUnifiedDiff(diff,search){
+  if(hasStructuredHunkLines(diff)){
+    const rendered=renderReviewRows(unifiedHunkRows(diff),diff.path,search);
+    return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${rendered.html}</pre></div>${rendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+  }
   const oldText=String(diff.old?.text??"");
   const newText=String(diff.new?.text??"");
   const oldRendered=renderReviewText(oldText,diff.oldPath??diff.path,search);
@@ -659,6 +753,12 @@ function renderUnifiedDiff(diff,search){
   return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${oldRendered.html}${newRendered.html}</pre></div>${limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
 }
 function renderSideBySideDiff(diff,search){
+  if(hasStructuredHunkLines(diff)){
+    const {oldRows,newRows}=pairedHunkRows(diff);
+    const oldRendered=renderReviewRows(oldRows,diff.oldPath??diff.path,search);
+    const newRendered=renderReviewRows(newRows,diff.newPath??diff.path,search);
+    return `<div class="review-side-by-side"><section><div class="review-pane-title">Baseline</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">Result</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+  }
   const oldRendered=renderReviewText(diff.old?.text??"",diff.oldPath??diff.path,search);
   const newRendered=renderReviewText(diff.new?.text??"",diff.newPath??diff.path,search);
   return `<div class="review-side-by-side"><section><div class="review-pane-title">Baseline</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">Result</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;

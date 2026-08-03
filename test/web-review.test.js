@@ -9,6 +9,10 @@ let importSequence = 0;
 
 const worktreeRoot = path.resolve(".");
 
+function hunkLine(type, text, oldLine, newLine) {
+  return { type, text, oldLine, newLine };
+}
+
 function workspace(overrides = {}) {
   return {
     projectRoot: "/projects/source-app",
@@ -258,7 +262,7 @@ test("changed-file review escapes manifest paths, preserves selection, and ignor
     truncated: false,
     old: { text: "gone\n" },
     new: { text: "" },
-    hunks: [{ oldStart: 1, oldLines: 1, newStart: 0, newLines: 0, lines: ["-gone"] }],
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 0, newLines: 0, lines: [hunkLine("deletion", "gone", 1, null)] }],
   }));
   await secondPending;
   firstDiff.resolve(new FakeResponse({
@@ -270,7 +274,7 @@ test("changed-file review escapes manifest paths, preserves selection, and ignor
     truncated: false,
     old: { text: "old\n" },
     new: { text: "new\n" },
-    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] }],
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: [hunkLine("deletion", "old", 1, null), hunkLine("addition", "new", null, 1)] }],
   }));
   await firstPending;
 
@@ -309,7 +313,41 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
         truncated: true,
         old: { text: "<h1>Before</h1>\n" },
         new: { text: `<main>${"line\n".repeat(800)}</main>` },
-        hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 800, lines: ["-<h1>Before</h1>", "+<main>"] }],
+        hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 800, lines: [hunkLine("deletion", "<h1>Before</h1>", 1, null), hunkLine("addition", "<main>", null, 1)] }],
+      });
+    }
+    if (requestPath.endsWith("/attempts/attempt-1/diff?path=late-change.js")) {
+      const oldLines = Array.from({ length: 1000 }, (_, index) => {
+        const lineNumber = String(index + 1).padStart(4, "0");
+        return index === 899 ? "const marker = 'OLD_TARGET';" : `line-${lineNumber}`;
+      }).join("\n");
+      const newLines = Array.from({ length: 1000 }, (_, index) => {
+        const lineNumber = String(index + 1).padStart(4, "0");
+        return index === 899 ? "const marker = 'NEW_TARGET';" : `line-${lineNumber}`;
+      }).join("\n");
+      return new FakeResponse({
+        path: "late-change.js",
+        oldPath: "late-change.js",
+        newPath: "late-change.js",
+        status: "modified",
+        binary: false,
+        truncated: false,
+        old: { text: `${oldLines}\n` },
+        new: { text: `${newLines}\n` },
+        hunks: [{
+          oldStart: 898,
+          oldLines: 5,
+          newStart: 898,
+          newLines: 5,
+          lines: [
+            hunkLine("context", "line-0898", 898, 898),
+            hunkLine("context", "line-0899", 899, 899),
+            hunkLine("deletion", "const marker = 'OLD_TARGET';", 900, null),
+            hunkLine("addition", "const marker = 'NEW_TARGET';", null, 900),
+            hunkLine("context", "line-0901", 901, 901),
+            hunkLine("context", "line-0902", 902, 902),
+          ],
+        }],
       });
     }
     throw new Error("diff exploded");
@@ -320,6 +358,7 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
       snapshot: {
         files: [
           { path: "demo.html", oldPath: "demo.html", status: "modified", binary: false, additions: 4, deletions: 1 },
+          { path: "late-change.js", oldPath: "late-change.js", status: "modified", binary: false, additions: 1, deletions: 1 },
           { path: "asset.bin", oldPath: "asset.bin", status: "modified", binary: true, additions: 0, deletions: 0 },
           { path: "huge.html", oldPath: "huge.html", status: "modified", binary: false, additions: 800, deletions: 1 },
           { path: "broken.js", oldPath: "broken.js", status: "modified", binary: false, additions: 1, deletions: 1 },
@@ -343,7 +382,18 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
     truncated: false,
     old: { text: "<main>alpha</main>\n" },
     new: { text: "<main>beta</main>\n<span>beta</span>\n<script>alert(1)</script>\n" },
-    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 3, lines: ["-<main>alpha</main>", "+<main>beta</main>", "+<span>beta</span>", "+<script>alert(1)</script>"] }],
+    hunks: [{
+      oldStart: 1,
+      oldLines: 1,
+      newStart: 1,
+      newLines: 3,
+      lines: [
+        hunkLine("deletion", "<main>alpha</main>", 1, null),
+        hunkLine("addition", "<main>beta</main>", null, 1),
+        hunkLine("addition", "<span>beta</span>", null, 2),
+        hunkLine("addition", "<script>alert(1)</script>", null, 3),
+      ],
+    }],
   }));
   await demoPending;
 
@@ -360,10 +410,27 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
   assert.match(browser.element("migration-view").innerHTML, /&lt;<span class="syntax-tag"><mark>span<\/mark><\/span>&gt;beta&lt;\/<span class="syntax-tag"><mark>span<\/mark><\/span>&gt;/i);
   assert.doesNotMatch(browser.element("migration-view").innerHTML, /<<mark>span<\/mark>/i);
 
+  search.value = "<script>";
+  await browser.element("migration-view").oninput({ target: search });
+  assert.match(browser.element("migration-view").innerHTML, /<mark>&lt;<\/mark><span class="syntax-tag"><mark>script<\/mark><\/span><mark>&gt;<\/mark>alert\(1\)&lt;\/<span class="syntax-tag">script<\/span>&gt;/i);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /<script>alert/);
+
+  const farTarget = new FakeElement(browser.document);
+  farTarget.dataset.reviewPath = "late-change.js";
+  farTarget.dataset.reviewAttemptId = "attempt-1";
+  await browser.element("migration-view").onclick({ target: farTarget });
+  assert.match(browser.element("migration-view").innerHTML, /@@ -898,5 \+898,5 @@/);
+  assert.match(browser.element("migration-view").innerHTML, /OLD_TARGET/);
+  assert.match(browser.element("migration-view").innerHTML, /NEW_TARGET/);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /line-0001/);
+
   const mode = new FakeElement(browser.document);
   mode.dataset.diffMode = "side-by-side";
   await browser.element("migration-view").onclick({ target: mode });
   assert.match(browser.element("migration-view").innerHTML, /review-side-by-side/i);
+  assert.match(browser.element("migration-view").innerHTML, /OLD_TARGET/);
+  assert.match(browser.element("migration-view").innerHTML, /NEW_TARGET/);
+  assert.doesNotMatch(browser.element("migration-view").innerHTML, /line-0001/);
 
   const binaryTarget = new FakeElement(browser.document);
   binaryTarget.dataset.reviewPath = "asset.bin";
@@ -376,7 +443,7 @@ test("loaded diffs support search, side-by-side mode, binary/truncated/error sta
   truncatedTarget.dataset.reviewAttemptId = "attempt-1";
   await browser.element("migration-view").onclick({ target: truncatedTarget });
   assert.match(browser.element("migration-view").innerHTML, /truncated/i);
-  assert.match(browser.element("migration-view").innerHTML, /rendered first/i);
+  assert.match(browser.element("migration-view").innerHTML, /@@ -1 \+1,800 @@/);
 
   const errorTarget = new FakeElement(browser.document);
   errorTarget.dataset.reviewPath = "broken.js";
