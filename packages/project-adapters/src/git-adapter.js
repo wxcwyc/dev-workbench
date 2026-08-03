@@ -555,6 +555,10 @@ function parseHunks(patchText, patchTruncated) {
   let oldLine = 0;
   let newLine = 0;
   for (const rawLine of patchText.split("\n")) {
+    if (rawLine.startsWith("diff --git ")) {
+      current = null;
+      continue;
+    }
     const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(rawLine);
     if (match) {
       if (hunks.length >= MAX_DIFF_HUNKS) {

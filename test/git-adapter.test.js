@@ -605,6 +605,22 @@ test("reads structured text diffs for every checkpoint manifest status", async (
       { type: "addition", text: "after 世界" },
     ],
   );
+  const typeChanged = await readCheckpointFileDiff(workspace, {
+    sessionId: "session-diff",
+    attemptId: "attempt-1",
+    baseline,
+    result,
+    file: result.files.find((file) => file.path === "app/type.txt"),
+  });
+  assert.equal(typeChanged.status, "type-changed");
+  assert.equal(typeChanged.hunks.length, 2);
+  assert.deepEqual(
+    typeChanged.hunks.flatMap((hunk) => hunk.lines).map(({ type, text }) => ({ type, text })),
+    [
+      { type: "deletion", text: "regular" },
+      { type: "addition", text: "keep.txt" },
+    ],
+  );
 });
 
 test("bounds oversized text and hunks while classifying binary and malformed UTF-8", async (context) => {
