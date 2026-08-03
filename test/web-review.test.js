@@ -233,6 +233,9 @@ test("changed-file review escapes manifest paths, preserves selection, and ignor
   controller.renderSession(session);
 
   const initialHtml = browser.element("migration-view").innerHTML;
+  assert.match(initialHtml, /id="workspace-status"/);
+  assert.match(initialHtml, /id="review-files-status"/);
+  assert.match(initialHtml, /id="review-diff-status"/);
   assert.match(initialHtml, /src\/old-name\.js/);
   assert.match(initialHtml, /obsolete\.txt/);
   assert.doesNotMatch(initialHtml, /<script>/);
