@@ -695,10 +695,34 @@ async function closeServer(server) {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
+async function waitForPortRelease(port) {
+  const deadline = Date.now() + 1000;
+  while (true) {
+    const released = await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: "127.0.0.1", port });
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.once("error", (error) => {
+        socket.destroy();
+        if (error.code === "ECONNREFUSED") resolve(true);
+        else reject(error);
+      });
+    });
+    if (released) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for port ${port} to be released`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function unusedPort() {
   const server = net.createServer();
   const port = await listen(server);
   await closeServer(server);
+  await waitForPortRelease(port);
   return port;
 }
 
