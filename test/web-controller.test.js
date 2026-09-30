@@ -140,6 +140,398 @@ test("Migration owns session and runtime streams while Execution owns only sessi
   assert.equal(controller.state.runtime.source, null);
 });
 
+test("annotations create notes and durable bookmarks and filter rendered tags", async (t) => {
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...migrationSession().steps[0], attempt: 1, status: "completed" }],
+    attempts: [{
+      id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed",
+      snapshot: { files: [{ path: "src/app.js", status: "modified", additions: 1, deletions: 0 }], command: { command: ["node", "change.js"], stdout: "ok", stderr: "" } },
+    }],
+    annotations: [],
+  });
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration/annotations" && options.method === "POST") {
+      return new FakeResponse({ ...active, annotations: [{ id: "bookmark-1", ...JSON.parse(options.body), createdAt: "2026-08-01T00:00:00.000Z" }] });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+  controller.state.review.selectedAttemptId = "attempt-1";
+  controller.state.review.selectedPath = "src/app.js";
+  browser.element("annotation-kind").value = "bookmark";
+  browser.element("annotation-tags").value = "review, frontend";
+  browser.element("annotation-target-type").value = "diff";
+  browser.element("annotation-target-line").value = "2";
+  browser.element("note-text").value = "**Inspect** this";
+
+  await controller.submitAnnotation();
+
+  const request = browser.requests.find(({ path }) => path.endsWith("/annotations"));
+  assert.deepEqual(JSON.parse(request.options.body), {
+    stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "**Inspect** this",
+    tags: ["review", "frontend"], target: { type: "diff", path: "src/app.js", line: 2 },
+  });
+  assert.match(browser.element("notes").innerHTML, /<strong>Inspect<\/strong>/);
+  browser.element("annotation-kind").value = "bookmark";
+  browser.element("annotation-target-type").value = "file";
+  browser.element("annotation-target-line").value = "99";
+  browser.element("note-text").value = "File only";
+  await controller.submitAnnotation();
+  const annotationRequests = browser.requests.filter(({ path }) => path.endsWith("/annotations"));
+  assert.deepEqual(JSON.parse(annotationRequests[1].options.body).target, { type: "file", path: "src/app.js", line: 99 });
+  browser.element("annotation-tag-filter").value = "missing";
+  controller.renderAnnotations(controller.state.active);
+  assert.doesNotMatch(browser.element("notes").innerHTML, /Inspect/);
+});
+
+test("annotation jumps seek before selecting lazy evidence, then focus and scroll", async (t) => {
+  const seekResponse = deferred();
+  const diffResponse = deferred();
+  const target = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...migrationSession().steps[0], attempt: 2, status: "completed" }],
+    attempts: [
+      { id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed", snapshot: { files: [{ path: "src/app.js", status: "modified", additions: 1, deletions: 0 }] } },
+      { id: "attempt-2", stepIndex: 0, attempt: 2, status: "completed", snapshot: { files: [] } },
+    ],
+    annotations: [{ id: "bookmark-1", stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "Jump", tags: [], target: { type: "file", path: "src/app.js", line: 7 }, createdAt: "2026-08-01T00:00:00.000Z" }],
+  });
+  const order = [];
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/migration/seek") { order.push("seek"); return seekResponse.promise; }
+    if (path.includes("/attempts/attempt-1/diff")) { order.push("diff"); return diffResponse.promise; }
+    throw new Error(`Unexpected fetch ${path} ${options.method ?? "GET"}`);
+  });
+  controller.renderSession(target);
+  const evidenceLine = new FakeElement(browser.document);
+  browser.document.setQuerySelector('[data-review-evidence-line="7"]', evidenceLine);
+  const jumping = controller.jumpToAnnotation(target.annotations[0]);
+  seekResponse.resolve(new FakeResponse(target));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["seek", "diff"]);
+  diffResponse.resolve(new FakeResponse({
+    path: "src/app.js", binary: false, truncated: false,
+    hunks: [{ oldStart: 6, oldLines: 1, newStart: 7, newLines: 1, lines: [{ type: "addition", text: "new line", oldLine: null, newLine: 7 }] }],
+  }));
+  await jumping;
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-1");
+  assert.equal(controller.state.review.selectedPath, "src/app.js");
+  assert.match(browser.element("migration-view").innerHTML, /id="review-diff-status" tabindex="-1"/);
+  assert.match(browser.element("migration-view").innerHTML, /data-review-evidence-line="7" tabindex="-1"/);
+  assert.equal(browser.document.activeElement, evidenceLine);
+  assert.equal(evidenceLine.scrollIntoViewCalls, 1);
+});
+
+test("rapid same-session annotation jumps serialize seeks and only the latest jump wins", async (t) => {
+  const firstSeek = deferred();
+  const secondSeek = deferred();
+  const attempts = [
+    { id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed", snapshot: { files: [{ path: "first.js", status: "modified", additions: 1, deletions: 0 }] } },
+    { id: "attempt-2", stepIndex: 0, attempt: 2, status: "completed", snapshot: { files: [{ path: "second.js", status: "modified", additions: 1, deletions: 0 }] } },
+  ];
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...migrationSession().steps[0], attempt: 2, status: "completed" }],
+    attempts,
+  });
+  const first = { id: "first", stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "First", target: { type: "file", path: "first.js" } };
+  const second = { id: "second", stepIndex: 0, attemptId: "attempt-2", kind: "bookmark", text: "Second", target: { type: "file", path: "second.js" } };
+  let seekCalls = 0;
+  let activeSeeks = 0;
+  let maxActiveSeeks = 0;
+  let controller;
+  const loaded = await loadController(t, (path) => {
+    if (path !== "/api/sessions/migration/seek") throw new Error(`Unexpected fetch ${path}`);
+    seekCalls += 1;
+    activeSeeks += 1;
+    maxActiveSeeks = Math.max(maxActiveSeeks, activeSeeks);
+    controller.renderSession(active);
+    const response = seekCalls === 1 ? firstSeek.promise : secondSeek.promise;
+    return response.finally(() => { activeSeeks -= 1; });
+  });
+  const { browser } = loaded;
+  controller = loaded.controller;
+  controller.renderSession(active);
+  const secondFile = new FakeElement(browser.document);
+  secondFile.dataset.reviewAttemptId = "attempt-2";
+  secondFile.dataset.reviewPath = "second.js";
+  browser.document.setQuerySelectorAll("[data-review-attempt-id][data-review-path]", [secondFile]);
+
+  const firstJump = controller.jumpToAnnotation(first);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seekCalls, 1);
+  const secondJump = controller.jumpToAnnotation(second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seekCalls, 1, "second seek must wait for the first claim to settle");
+
+  firstSeek.resolve(new FakeResponse({ error: "session operation already active" }, { ok: false }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seekCalls, 2);
+  assert.notEqual(controller.state.review.selectedAttemptId, "attempt-1");
+  assert.doesNotMatch(browser.element("health").textContent, /already active/);
+  secondSeek.resolve(new FakeResponse(active));
+  await Promise.all([firstJump, secondJump]);
+
+  assert.equal(maxActiveSeeks, 1);
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-2");
+  assert.equal(controller.state.review.selectedPath, "second.js");
+  assert.equal(browser.document.activeElement, secondFile);
+  assert.equal(secondFile.scrollIntoViewCalls, 1);
+});
+
+test("annotation jumps report broken targets and stale jumps cannot replace another session", async (t) => {
+  const firstSeek = deferred();
+  const broken = migrationSession("first", {
+    cursor: 0,
+    annotations: [{ id: "broken", stepIndex: 0, attemptId: "gone", kind: "bookmark", text: "Gone", target: { type: "file", path: "gone.js" } }],
+  });
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/first/seek") return firstSeek.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(broken);
+  const stale = controller.jumpToAnnotation(broken.annotations[0]);
+  controller.renderSession(session("second"));
+  firstSeek.resolve(new FakeResponse(broken));
+  await stale;
+  assert.equal(controller.state.active.id, "second");
+  assert.notEqual(browser.element("health").textContent, "evidence jump failed: bookmarked evidence is unavailable");
+
+  controller.renderSession(broken);
+  const brokenJump = controller.jumpToAnnotation(broken.annotations[0]);
+  firstSeek.resolve(new FakeResponse(broken));
+  await brokenJump;
+  assert.match(browser.element("health").textContent, /bookmarked evidence is unavailable/);
+});
+
+test("manual file selection invalidates a pending annotation jump", async (t) => {
+  const seekResponse = deferred();
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...migrationSession().steps[0], attempt: 1, status: "completed" }],
+    attempts: [{
+      id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed",
+      snapshot: { files: [
+        { path: "first.js", status: "modified", additions: 1, deletions: 0 },
+        { path: "manual.js", status: "modified", additions: 1, deletions: 0 },
+      ] },
+    }],
+  });
+  const bookmark = { id: "bookmark", stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "First", target: { type: "file", path: "first.js" } };
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration/seek") return seekResponse.promise;
+    if (path.includes("/attempts/attempt-1/diff?path=manual.js")) return new FakeResponse({ path: "manual.js", hunks: [] });
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+  const staleFile = new FakeElement(browser.document);
+  staleFile.dataset.reviewAttemptId = "attempt-1";
+  staleFile.dataset.reviewPath = "first.js";
+  browser.document.setQuerySelectorAll("[data-review-attempt-id][data-review-path]", [staleFile]);
+
+  const jumping = controller.jumpToAnnotation(bookmark);
+  await new Promise((resolve) => setImmediate(resolve));
+  const manualFile = new FakeElement(browser.document);
+  manualFile.dataset.reviewAttemptId = "attempt-1";
+  manualFile.dataset.reviewPath = "manual.js";
+  await browser.element("migration-view").onclick({ target: manualFile });
+  seekResponse.resolve(new FakeResponse(active));
+  await jumping;
+
+  assert.equal(controller.state.review.selectedPath, "manual.js");
+  assert.notEqual(browser.document.activeElement, staleFile);
+});
+
+test("manual timeline seek queues behind a pending annotation seek and wins", async (t) => {
+  const bookmarkSeek = deferred();
+  const manualSeek = deferred();
+  const step = migrationSession().steps[0];
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...step, attempt: 1, status: "completed" }, { ...step, id: "step-2", attempt: 1, status: "completed" }],
+    snapshots: [{}, {}],
+    attempts: [
+      { id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed", snapshot: { files: [{ path: "first.js", status: "modified", additions: 1, deletions: 0 }] } },
+      { id: "attempt-2", stepIndex: 1, attempt: 1, status: "completed", snapshot: { files: [{ path: "second.js", status: "modified", additions: 1, deletions: 0 }] } },
+    ],
+  });
+  const manual = { ...active, cursor: 1 };
+  const bookmark = { id: "bookmark", stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "First", target: { type: "file", path: "first.js" } };
+  let calls = 0;
+  let activeSeeks = 0;
+  let maxActiveSeeks = 0;
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path !== "/api/sessions/migration/seek") throw new Error(`Unexpected fetch ${path}`);
+    calls += 1;
+    activeSeeks += 1;
+    maxActiveSeeks = Math.max(maxActiveSeeks, activeSeeks);
+    const response = calls === 1 ? bookmarkSeek.promise : manualSeek.promise;
+    return response.finally(() => { activeSeeks -= 1; });
+  });
+  controller.renderSession(active);
+
+  const jumping = controller.jumpToAnnotation(bookmark);
+  await new Promise((resolve) => setImmediate(resolve));
+  const seeking = browser.element("next").onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  bookmarkSeek.resolve(new FakeResponse(active));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  manualSeek.resolve(new FakeResponse(manual));
+  await Promise.all([jumping, seeking]);
+
+  assert.equal(maxActiveSeeks, 1);
+  assert.equal(controller.state.active.cursor, 1);
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-2");
+  assert.equal(controller.state.review.selectedPath, "second.js");
+});
+
+test("opening a session invalidates a pending annotation jump before GET resolves", async (t) => {
+  const seekResponse = deferred();
+  const openResponse = deferred();
+  const active = migrationSession("first", {
+    cursor: 0,
+    steps: [{ ...migrationSession().steps[0], attempt: 1, status: "completed" }],
+    attempts: [{ id: "attempt-1", stepIndex: 0, attempt: 1, status: "completed", snapshot: { files: [{ path: "first.js", status: "modified", additions: 1, deletions: 0 }] } }],
+  });
+  const bookmark = { id: "bookmark", stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "First", target: { type: "file", path: "first.js" } };
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/first/seek") return seekResponse.promise;
+    if (path === "/api/sessions/second") return openResponse.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+  const staleFile = new FakeElement(browser.document);
+  staleFile.dataset.reviewAttemptId = "attempt-1";
+  staleFile.dataset.reviewPath = "first.js";
+  browser.document.setQuerySelectorAll("[data-review-attempt-id][data-review-path]", [staleFile]);
+
+  const jumping = controller.jumpToAnnotation(bookmark);
+  await new Promise((resolve) => setImmediate(resolve));
+  const opening = controller.openSession("second");
+  seekResponse.resolve(new FakeResponse(active));
+  await jumping;
+  assert.notEqual(browser.document.activeElement, staleFile);
+
+  openResponse.resolve(new FakeResponse(session("second")));
+  await opening;
+  assert.equal(controller.state.active.id, "second");
+});
+
+test("annotation submission serializes with navigation and the newer seek wins", async (t) => {
+  const annotationResponse = deferred();
+  const seekResponse = deferred();
+  const step = migrationSession().steps[0];
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...step, status: "completed" }, { ...step, id: "step-2", status: "completed" }],
+    snapshots: [{}, {}],
+  });
+  const navigated = { ...active, cursor: 1 };
+  let activeClaims = 0;
+  let maxActiveClaims = 0;
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration/annotations") {
+      activeClaims += 1;
+      maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+      return annotationResponse.promise.finally(() => { activeClaims -= 1; });
+    }
+    if (path === "/api/sessions/migration/seek") {
+      activeClaims += 1;
+      maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+      return seekResponse.promise.finally(() => { activeClaims -= 1; });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+  browser.element("note-text").value = "Remember this";
+
+  const annotating = controller.submitAnnotation();
+  const navigating = browser.element("next").onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(browser.requests.filter(({ path }) => path.endsWith("/seek")).length, 0);
+  annotationResponse.resolve(new FakeResponse({ ...active, annotations: [{ id: "note-1", stepIndex: 0, text: "Remember this" }] }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(browser.requests.filter(({ path }) => path.endsWith("/seek")).length, 1);
+  seekResponse.resolve(new FakeResponse(navigated));
+  await Promise.all([annotating, navigating]);
+
+  assert.equal(maxActiveClaims, 1);
+  assert.equal(controller.state.active.cursor, 1);
+});
+
+test("a delayed annotation response cannot replace newer same-session state", async (t) => {
+  const annotationResponse = deferred();
+  const active = migrationSession("migration", { cursor: 0 });
+  const newer = { ...active, title: "newer SSE", updatedAt: "2026-08-02T00:00:00.000Z" };
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration/annotations") return annotationResponse.promise;
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+  browser.element("note-text").value = "Slow note";
+  const annotating = controller.submitAnnotation();
+  controller.renderSession(newer);
+  annotationResponse.resolve(new FakeResponse({ ...active, title: "stale annotation response", annotations: [{ id: "note-1", stepIndex: 0, text: "Slow note" }] }));
+  await annotating;
+
+  assert.equal(controller.state.active.title, "newer SSE");
+  assert.equal(browser.element("note-text").value, "Slow note");
+});
+
+test("annotation SSE acknowledgement clears only the submitted unchanged input", async (t) => {
+  const firstResponse = deferred();
+  const secondResponse = deferred();
+  const active = migrationSession("migration", { cursor: 0, annotations: [] });
+  let posts = 0;
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path !== "/api/sessions/migration/annotations") throw new Error(`Unexpected fetch ${path}`);
+    posts += 1;
+    return posts === 1 ? firstResponse.promise : secondResponse.promise;
+  });
+  controller.renderSession(active);
+
+  browser.element("note-text").value = "Submitted note";
+  const first = controller.submitAnnotation();
+  await new Promise((resolve) => setImmediate(resolve));
+  const createdOne = { id: "note-1", stepIndex: 0, kind: "note", text: "Submitted note", tags: [] };
+  controller.renderSession({ ...active, title: "newer SSE one", annotations: [createdOne] });
+  firstResponse.resolve(new FakeResponse({ ...active, title: "older HTTP one", annotations: [createdOne] }));
+  await first;
+  assert.equal(controller.state.active.title, "newer SSE one");
+  assert.equal(browser.element("note-text").value, "");
+
+  browser.element("note-text").value = "Second submitted note";
+  const second = controller.submitAnnotation();
+  await new Promise((resolve) => setImmediate(resolve));
+  const createdTwo = { id: "note-2", stepIndex: 0, kind: "note", text: "Second submitted note", tags: [] };
+  controller.renderSession({ ...active, title: "newer SSE two", annotations: [createdOne, createdTwo] });
+  browser.element("note-text").value = "User edited draft";
+  secondResponse.resolve(new FakeResponse({ ...active, title: "older HTTP two", annotations: [createdOne, createdTwo] }));
+  await second;
+  assert.equal(controller.state.active.title, "newer SSE two");
+  assert.equal(browser.element("note-text").value, "User edited draft");
+});
+
+test("timeline click handlers consume queued seek failures", async (t) => {
+  const step = migrationSession().steps[0];
+  const active = migrationSession("migration", {
+    cursor: 0,
+    steps: [{ ...step, status: "completed" }, { ...step, id: "step-2", status: "completed" }],
+    snapshots: [{}, {}],
+  });
+  const { browser, controller } = await loadController(t, (path) => {
+    if (path === "/api/sessions/migration/seek") return new FakeResponse({ error: "seek failed" }, { ok: false });
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(active);
+
+  await assert.doesNotReject(() => browser.element("next").onclick());
+  assert.deepEqual(browser.alerts, ["seek failed"]);
+});
+
 test("migration previews ignore metadata URLs while awaiting supervised runtime", async (t) => {
   const imported = migrationSession("migration", {
     metadata: {
@@ -1060,6 +1452,38 @@ test("migration runtime shows status, risk, dependencies, attempts, and awaiting
   assert.equal(browser.element("review-reject").hidden, false);
   assert.match(browser.element("review-accept").textContent, /Accept step 1/i);
   assert.match(browser.element("review-reject").textContent, /Reject step 1/i);
+});
+
+test("historical evidence disables review actions until the current attempt is restored", async (t) => {
+  const step = migrationSession().steps[0];
+  const historical = { id: "attempt-1", stepIndex: 0, attempt: 1, status: "failed", snapshot: { files: [{ path: "old.js", status: "modified", additions: 1, deletions: 0 }] } };
+  const current = { id: "attempt-2", stepIndex: 0, attempt: 2, status: "awaiting_review", snapshot: { files: [{ path: "current.js", status: "modified", additions: 1, deletions: 0 }] } };
+  const { browser, controller } = await loadController(t, () => {
+    throw new Error("Unexpected fetch");
+  });
+  controller.renderSession(migrationSession("review", {
+    status: "failed", cursor: 0,
+    steps: [{ ...step, attempt: 1, status: "failed" }],
+    attempts: [historical],
+  }));
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-1");
+
+  controller.renderSession(migrationSession("review", {
+    status: "awaiting_review", cursor: 0,
+    steps: [{ ...step, attempt: 2, status: "awaiting_review" }],
+    attempts: [historical, current],
+  }));
+
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-1");
+  assert.equal(browser.element("review-accept").disabled, true);
+  assert.equal(browser.element("review-reject").disabled, true);
+  assert.equal(browser.element("review-return-current").hidden, false);
+  assert.match(browser.element("review-evidence-warning").textContent, /historical/i);
+
+  browser.element("review-return-current").onclick();
+  assert.equal(controller.state.review.selectedAttemptId, "attempt-2");
+  assert.equal(browser.element("review-accept").disabled, false);
+  assert.equal(browser.element("review-reject").disabled, false);
 });
 
 test("accept review sends the exact decision body, locks controls, and ignores stale responses", async (t) => {

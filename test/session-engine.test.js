@@ -106,6 +106,86 @@ test("execution session records immutable checkpoints, seeks and annotations", (
   assert.equal(session.events.filter((event) => event.type === "step.completed").length, 2);
 });
 
+test("annotations preserve legacy notes and attach validated durable migration evidence", () => {
+  const engine = new SessionEngine();
+  const legacy = engine.create({
+    title: "Trace",
+    workbench: "execution",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Inspect", traceState: { value: 1 } }]
+  });
+  const plain = engine.annotate(legacy, { stepIndex: 0, text: "  Existing plain note  " });
+  assert.equal(plain.text, "Existing plain note");
+  assert.equal(plain.kind, "note");
+  assert.deepEqual(plain.tags, []);
+
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "Change" }]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    snapshot: {
+      files: [{ path: "src/app.js", oldPath: null, status: "modified", binary: false, additions: 1, deletions: 0 }],
+      command: { command: ["node", "change.js"], cwd: "/tmp/example", stdout: "first\nsecond\n", stderr: "" }
+    }
+  });
+
+  const bookmark = engine.annotate(session, {
+    stepIndex: 0,
+    attemptId: "attempt-1",
+    kind: "bookmark",
+    text: "**Review** this change",
+    tags: ["review", "frontend"],
+    target: { type: "diff", path: "src/app.js", line: 2 }
+  });
+  assert.deepEqual(
+    { kind: bookmark.kind, attemptId: bookmark.attemptId, tags: bookmark.tags, target: bookmark.target },
+    { kind: "bookmark", attemptId: "attempt-1", tags: ["review", "frontend"], target: { type: "diff", path: "src/app.js", line: 2 } }
+  );
+});
+
+test("annotations reject non-persisted evidence and malformed metadata without mutation", () => {
+  const engine = new SessionEngine();
+  const session = engine.create({
+    title: "Migration",
+    workbench: "migration",
+    projectRoot: "/tmp/example",
+    steps: [{ title: "First" }, { title: "Second" }]
+  });
+  prepareWorkspace(session);
+  startMigrationAttempt(engine, session, 0, { attemptId: "attempt-1" });
+  completeMigrationAttempt(engine, session, 0, {
+    attemptId: "attempt-1",
+    snapshot: {
+      files: [{ path: "src/app.js", oldPath: null, status: "modified", binary: false, additions: 1, deletions: 0 }],
+      command: { command: ["node", "change.js"], cwd: "/tmp/example", stdout: "one\ntwo", stderr: "warning" }
+    }
+  });
+
+  const invalid = [
+    { stepIndex: 1, attemptId: "attempt-1", kind: "bookmark", text: "foreign", target: { type: "file", path: "src/app.js" } },
+    { stepIndex: 0, attemptId: "missing", kind: "bookmark", text: "missing", target: { type: "file", path: "src/app.js" } },
+    { stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "path", target: { type: "diff", path: "src/missing.js" } },
+    { stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "stream", target: { type: "command", stream: "combined", line: 1 } },
+    { stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "line", target: { type: "command", stream: "stdout", line: 3 } },
+    { stepIndex: 0, attemptId: "attempt-1", kind: "bookmark", text: "runtime", target: { type: "command", stream: "stdout", sequence: 7 } },
+    { stepIndex: 0, kind: "bookmark", text: "target required" },
+    { stepIndex: 0, kind: "note", text: "duplicate", tags: ["same", "same"] },
+    { stepIndex: 0, kind: "note", text: "large", tags: ["x".repeat(65)] },
+    { stepIndex: 0, kind: "note", text: "unknown", extra: true }
+  ];
+  for (const input of invalid) {
+    const before = structuredClone(session);
+    assert.throws(() => engine.annotate(session, input));
+    assert.deepEqual(session, before);
+  }
+});
+
 test("migration steps must execute in a valid state", () => {
   const engine = new SessionEngine();
   const session = engine.create({ title: "Migration", workbench: "migration", projectRoot: "/tmp/example", steps: [{ title: "Initialize" }] });

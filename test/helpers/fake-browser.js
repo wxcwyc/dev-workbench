@@ -4,7 +4,9 @@ const elementIds = [
   "allowed-root", "detection-evidence", "detection-facts", "detection-warnings",
   "empty", "execution-view", "health", "latest", "logic-demo", "migration-demo",
   "migration-view", "next", "note-form", "note-text", "notes", "notes-title",
-  "note-text-label",
+  "note-text-label", "annotation-kind", "annotation-tags", "annotation-tag-filter",
+  "annotation-target-type", "annotation-target-line", "annotation-command-stream",
+  "historical-command-output",
   "onboarding-close", "onboarding-config", "onboarding-create", "onboarding-detection",
   "onboarding-file", "onboarding-import", "onboarding-inspect", "onboarding-preview",
   "onboarding-preview-action", "onboarding-recent", "onboarding-session-title",
@@ -17,6 +19,7 @@ const elementIds = [
   "review-files-status", "workspace-status",
   "project-inspect-form", "project-onboarding", "project-path", "run-next",
   "review-accept", "review-controls", "review-reject",
+  "review-return-current", "review-evidence-warning",
   "session-file", "session-path", "session-status", "session-title", "sessions",
   "step-counter", "timeline", "workbench", "workbench-badge",
 ];
@@ -89,6 +92,7 @@ export class FakeElement {
     this.textContent = "";
     this.value = "";
     this.parentElement = null;
+    this.scrollIntoViewCalls = 0;
   }
 
   get innerHTML() {
@@ -133,6 +137,10 @@ export class FakeElement {
     this.ownerDocument.activeElement = this;
   }
 
+  scrollIntoView() {
+    this.scrollIntoViewCalls += 1;
+  }
+
   reset() {}
 
   replaceChildren(...children) {
@@ -175,6 +183,8 @@ export class FakeElement {
 class FakeDocument {
   constructor() {
     this.elements = new Map(elementIds.map((id) => [id, new FakeElement(this, id)]));
+    this.selectorResults = new Map();
+    this.selectorAllResults = new Map();
     this.workbenches = ["execution", "migration"].map((value) => {
       const input = new FakeElement(this);
       input.value = value;
@@ -185,6 +195,7 @@ class FakeDocument {
 
   querySelector(selector) {
     if (selector.startsWith("#")) return this.elements.get(selector.slice(1)) ?? null;
+    if (this.selectorResults.has(selector)) return this.selectorResults.get(selector);
     if (selector === 'input[name="onboarding-workbench"]:checked') {
       return this.workbenches.find((input) => input.checked) ?? null;
     }
@@ -195,7 +206,15 @@ class FakeDocument {
 
   querySelectorAll(selector) {
     if (selector === 'input[name="onboarding-workbench"]') return this.workbenches;
-    return [];
+    return this.selectorAllResults.get(selector) ?? [];
+  }
+
+  setQuerySelector(selector, element) {
+    this.selectorResults.set(selector, element);
+  }
+
+  setQuerySelectorAll(selector, elements) {
+    this.selectorAllResults.set(selector, elements);
   }
 }
 

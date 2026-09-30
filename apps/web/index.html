@@ -49,6 +49,8 @@
             <div id="review-controls" class="review-controls hidden">
               <button id="review-accept" class="primary" type="button" hidden>Accept step</button>
               <button id="review-reject" type="button" hidden>Reject step</button>
+              <span id="review-evidence-warning" class="muted" role="status" hidden></span>
+              <button id="review-return-current" type="button" hidden>Return to current attempt</button>
             </div>
             <button id="run-next" class="primary" type="button">Run next step</button>
           </div>
@@ -61,9 +63,12 @@
           <div class="timeline-actions"><button id="previous">‹ Previous</button><button id="next">Next ›</button><button id="latest">Latest</button></div>
         </section>
         <section class="notes-panel">
-          <h2 id="notes-title">Notes</h2>
+          <div class="notes-heading"><h2 id="notes-title">Notes</h2><label>Filter tags<input id="annotation-tag-filter" type="search" placeholder="review"></label></div>
           <div id="notes"></div>
-          <form id="note-form"><label id="note-text-label" for="note-text">Review note</label><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add note</button></form>
+          <form id="note-form">
+            <div class="annotation-fields"><label>Type<select id="annotation-kind"><option value="note">Note</option><option value="bookmark">Bookmark</option></select></label><label>Tags<input id="annotation-tags" placeholder="review, frontend"></label><label>Evidence<select id="annotation-target-type"><option value="diff">Diff</option><option value="file">File</option><option value="command">Command output</option></select></label><label>Stream<select id="annotation-command-stream"><option value="stdout">stdout</option><option value="stderr">stderr</option></select></label><label>Line<input id="annotation-target-line" type="number" min="1"></label></div>
+            <label id="note-text-label" for="note-text">Review note (Markdown)</label><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add annotation</button>
+          </form>
         </section>
       </div>
     </main>

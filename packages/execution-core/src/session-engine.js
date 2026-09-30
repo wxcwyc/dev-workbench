@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  assertAnnotation,
   assertAttempt,
   assertPlanInput,
   assertWorkbench,
@@ -51,6 +52,17 @@ function migrationRuntime(session) {
     attempts: session.attempts ?? [],
     workspace: Object.hasOwn(session, "workspace") ? session.workspace : null
   };
+}
+
+function filesForAnnotationAttempt(attempt) {
+  return Array.isArray(attempt?.snapshot?.files) ? attempt.snapshot.files : [];
+}
+
+function persistedLineCount(output) {
+  if (output === "") return 0;
+  const lines = output.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines.length;
 }
 
 function cloneSnapshot(snapshot, index) {
@@ -739,12 +751,47 @@ export class SessionEngine {
     return publicSession(session);
   }
 
-  annotate(session, { stepIndex, text }) {
-    if (!text?.trim()) throw new Error("Annotation text is required");
+  annotate(session, input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Annotation must be an object");
+    const inputKeys = ["stepIndex", "attemptId", "kind", "text", "tags", "target"];
+    const unknownKey = Object.keys(input).find((key) => !inputKeys.includes(key));
+    if (unknownKey) throw new Error(`Unknown annotation field: ${unknownKey}`);
+    const { stepIndex, attemptId, kind = "note", text, tags = [], target } = input;
     if (!Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= session.steps.length) throw new Error("Invalid annotation step");
-    const annotation = { id: randomUUID(), stepIndex, text: text.trim(), createdAt: timestamp() };
+    const annotation = {
+      id: randomUUID(),
+      stepIndex,
+      kind,
+      text: typeof text === "string" ? text.trim() : text,
+      tags: structuredClone(tags),
+      createdAt: timestamp()
+    };
+    if (attemptId !== undefined) annotation.attemptId = attemptId;
+    if (target !== undefined) annotation.target = structuredClone(target);
+    assertAnnotation(annotation);
+
+    if (kind === "bookmark" && target == null) throw new Error("Bookmark target is required");
+    let attempt = null;
+    if (attemptId !== undefined) {
+      attempt = migrationRuntime(session).attempts.find((candidate) => candidate.id === attemptId);
+      if (!attempt || attempt.stepIndex !== stepIndex) throw new Error("Annotation attempt must belong to its step");
+    }
+    if (target != null) {
+      if (!attempt?.snapshot) throw new Error("Annotation target requires persisted attempt evidence");
+      if (["file", "diff"].includes(target.type)) {
+        if (!filesForAnnotationAttempt(attempt).some((file) => file.path === target.path)) {
+          throw new Error("Annotation path is not present in the attempt manifest");
+        }
+      } else if (target.type === "command") {
+        const output = attempt.snapshot.command?.[target.stream];
+        if (typeof output !== "string") throw new Error("Annotation command stream was not persisted");
+        if (target.line !== undefined && target.line > persistedLineCount(output)) {
+          throw new Error("Annotation command line is outside persisted output");
+        }
+      }
+    }
     session.annotations.push(annotation);
-    session.events.push(event("annotation.added", { stepIndex, annotationId: annotation.id }));
+    session.events.push(event("annotation.added", { stepIndex, annotationId: annotation.id, kind }));
     this.touch(session);
     return annotation;
   }

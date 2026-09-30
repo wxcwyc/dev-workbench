@@ -697,6 +697,29 @@ test("PUT /api/sessions/:id/plan rejects non-pristine sessions without changing 
   }
 });
 
+test("POST /api/sessions/:id/annotations keeps plain notes compatible and rejects unknown fields atomically", async (t) => {
+  const app = await startTestApp(t);
+  await makeSampleProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Annotations",
+    workbench: "execution",
+    projectRoot: "sample",
+    steps: [{ title: "Inspect", traceState: { value: 1 } }],
+  });
+  const sessionUrl = `${app.url}/api/sessions/${created.body.id}`;
+  const accepted = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "  Plain note  " });
+  assert.equal(accepted.response.status, 201);
+  assert.deepEqual(
+    { kind: accepted.body.annotations[0].kind, text: accepted.body.annotations[0].text, tags: accepted.body.annotations[0].tags },
+    { kind: "note", text: "Plain note", tags: [] },
+  );
+
+  const before = await (await fetch(sessionUrl)).json();
+  const rejected = await postJson(`${sessionUrl}/annotations`, { stepIndex: 0, text: "Bad", sequence: 4 });
+  assert.equal(rejected.response.status, 400);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), before);
+});
+
 test("PUT /api/sessions/:id/plan returns 409 during an active operation and never runs a command", async (t) => {
   let releaseCommand;
   let signalCommandStarted;
