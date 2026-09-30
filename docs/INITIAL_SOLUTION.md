@@ -123,12 +123,13 @@ Adapter 产生 trace
 → 展示下一步命令和预期结果
 → 可选启动/重启 source 与 target preview
 → 用户确认
-→ 捕获执行前快照
-→ 运行 argv command
+→ 准备工作台拥有的隔离 Git worktree
+→ 捕获 attempt baseline checkpoint
+→ 在 execution root 中运行 argv command
 → 通过 runtime SSE 推送 preview / step stdout、stderr
-→ 捕获执行后文件树、Git 状态和 command 结果
-→ 保存 snapshot
-→ 用户检查后进入下一步
+→ 捕获 result checkpoint、文件 manifest 和 command 结果
+→ 用户按需检查逐文件 diff，并 Accept / Reject
+→ 失败或取消后从精确 baseline 重试，或恢复到已接受 checkpoint
 ```
 
 ## 已完成的 MVP
@@ -143,6 +144,10 @@ Adapter 产生 trace
 - argv 命令执行与逐步确认；
 - Preview Process Supervisor、runtime snapshot 和 runtime SSE；
 - TerminalBuffer 实时输出聚合；
+- 工作台拥有的 detached Git worktree、attempt baseline/result refs 和 accepted checkpoint restore；
+- Reject/Retry、精确 attempt Cancel、partial evidence 和源仓库不变性保护；
+- 按需逐文件 unified/side-by-side diff、搜索、历史 attempt 证据；
+- 安全 Markdown 注释、标签、file/diff/command 书签和证据跳转；
 - 单 session 运行互斥；
 - HTTP API 与 SSE；
 - Execution Explorer UI；
@@ -164,8 +169,8 @@ Adapter 产生 trace
 - 预览运行时没有 PTY，也不支持向 step 或 preview 进程写入 input；
 - preview 日志只保存在内存中的 runtime buffer，没有独立持久化 preview log；
 - 创建 session 后还不能在 UI 中编辑 preview 配置；
-- 文件树能显示文件变化，但没有内置代码编辑器和逐文件 diff；
-- Git snapshot 不是可恢复 checkpoint；
+- 当前提供审查型逐文件 diff，但没有内置代码编辑器；
+- JSON SessionStore 不能在服务崩溃后可靠恢复进行中的操作，preview/terminal runtime 也仍是进程内状态；
 - JSON 存储不适合大型 trace；
 - 没有 remote worker 或隔离执行环境；
 - 本地命令仍拥有当前用户权限；

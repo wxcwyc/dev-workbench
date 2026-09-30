@@ -7,14 +7,14 @@
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 验证共享时间线与两个工作台的产品形态 | 已完成 |
-| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1 与 Milestone 2 已完成；Milestone 3+ 待完成） |
+| Phase 1 | 接入真实项目，形成可用开发闭环 | 进行中（Milestone 1–3 已完成；Milestone 4 待完成） |
 | Phase 2 | 增强恢复、隔离和长任务可靠性 | 计划中 |
 | Phase 3 | 建立 Adapter/Plugin 生态 | 计划中 |
 | Phase 4 | 支持团队协作和远程 Worker | 远期 |
 
-## 当前开发进度（2026-07-28）
+## 当前开发进度（2026-09-30）
 
-Phase 1 的 Milestone 1 与 Milestone 2 已完成。Milestone 2 当前包含 UI 项目接入、迁移计划编辑器首版、review lifecycle、Preview Process Supervisor，以及实时终端输出：
+Phase 1 的 Milestone 1、Milestone 2 与 Milestone 3 已完成。除项目接入、计划编辑、review lifecycle、preview 与实时终端外，Migration 现在具备可恢复审查闭环：
 
 - 固化 v1 Session、Step、Snapshot、Artifact、Adapter Manifest 和 Trace Event JSON Schema；
 - 提供 Adapter SDK、manifest/capability discovery、Trace Event 构造与 NDJSON 编解码；
@@ -28,8 +28,12 @@ Phase 1 的 Milestone 1 与 Milestone 2 已完成。Milestone 2 当前包含 UI 
 - Preview 与 step 的 `stdout`/`stderr` 都会进入 runtime SSE；`TerminalBuffer` 为每个 session 保留最近 256 KiB UTF-8 输出，step 完成后的 command snapshot 最多保留 8 MiB 结果证据；
 - `/api/sessions/:id/runtime` 和 `/api/sessions/:id/runtime/events` 已提供独立于 Session SSE 的 runtime snapshot/SSE；preview lifecycle 与 terminal tail 是 ephemeral runtime，不写入持久化 Session；
 - managed shutdown 会 abort active step、关闭 session/runtime SSE、stop owned previews，再等待 step 请求收尾并关闭 HTTP，避免遗留受管子进程。
+- Migration action 在工作台拥有的 detached Git worktree 中执行；每个 attempt 保留 baseline/result refs、文件 manifest、command snapshot 与 review/cancel evidence，源分支和源工作树不被执行命令直接修改；
+- failed/cancelled retry 会校验前一 attempt 与 execution root 后恢复精确 baseline；accepted checkpoint restore 要求精确 OID/路径确认，并保留 append-only 历史；
+- Web 已提供历史 attempt 文件选择、按需 unified/side-by-side diff、搜索、取消/重试/恢复控制，以及安全 Markdown notes、tags、durable evidence bookmarks 与竞态保护；
+- 真实迁移 E2E 已通过临时 Git 仓库覆盖 HTTP、SSE、preview、命令、review/retry/cancel、diff、bookmark 和 restore，并验证源仓库 HEAD、status、index、tracked files 与 sentinel 不变。
 
-当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、项目探测与边界、最近项目、浏览器接入辅助逻辑、Prolog runtime、Preview Process Supervisor、TerminalBuffer，以及 runtime SSE。
+当前自动化回归覆盖协议、SDK、NDJSON、SessionEngine、Git workspace/checkpoint adapter、项目探测与边界、最近项目、浏览器控制器逻辑、Prolog runtime、Preview Process Supervisor、TerminalBuffer、runtime/session SSE，以及真实 Git 迁移恢复流程。
 
 ## Phase 0：交互与架构验证
 
@@ -225,15 +229,19 @@ Prolog adapter 至少产生：
 
 ### Milestone 3：可恢复审查闭环
 
+状态：已完成。
+
 1. Git checkpoint/worktree；
 2. 逐文件代码 diff；
 3. 失败重试、取消和恢复；
 4. 注释、书签和证据跳转；
 5. 端到端迁移示例。
 
-交付结果：用户可以安全审查并恢复一次完整迁移。
+交付结果：用户可以在不改动源工作树的前提下执行、审查、拒绝/重试、取消并恢复一次完整迁移；逐文件 diff、历史 evidence、Markdown annotations 与 durable bookmarks 已进入同一闭环。真实临时 Git 仓库 E2E 验证了完整流程。
 
 ### Milestone 4：可靠持久化
+
+状态：待开始。Milestone 3 仍使用 JSON SessionStore；服务崩溃恢复、海量 trace、独立 artifact/event 存储和性能故障测试属于本里程碑。
 
 1. SQLite event store；
 2. 服务重启恢复；

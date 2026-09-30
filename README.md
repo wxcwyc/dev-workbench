@@ -5,7 +5,7 @@
 项目共享一个事件溯源执行内核，并提供两个工作台：
 
 - **Execution Explorer**：回放解释器、规则引擎、算法或 Agent 的结构化 trace，查看程序位置、目标、堆栈、绑定和每步注释。
-- **Migration Center**：逐步编辑并运行迁移计划，成功执行的步骤先进入 review gate；高风险步骤每次 run 和 retry 都需要显式确认，再由 Accept/Reject 推进。计划编辑首版只允许 pristine Migration session 整体替换步骤，保存时不会执行命令。
+- **Migration Center**：在工作台管理的隔离 Git worktree 中逐步运行迁移计划，成功步骤先进入 review gate；可以检查逐文件 diff、拒绝并从基线重试、取消长任务、保存证据书签，以及把真实文件恢复到已接受 checkpoint。源分支和源工作树不会被迁移命令直接修改。
 
 ## 项目文档
 
@@ -39,7 +39,7 @@ DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
 3. 在创建前检查规范化后的步骤、argv 参数、工作目录、影响分类和允许目录边界；Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
 4. 确认安全预览后创建会话。
 
-最近成功创建的项目会出现在 **Recent projects** 中；重新打开时仍会再次探测路径和项目事实，不会复用旧计划。接入和创建会话本身不会运行任何命令。Migration 步骤中的实际命令仍需逐步在 UI 中明确确认后才会执行。
+最近成功创建的项目会出现在 **Recent projects** 中；重新打开时仍会再次探测路径和项目事实，不会复用旧计划。接入和创建会话本身不会运行任何命令。Migration 需要先由用户点击 **Prepare workspace** 创建受管 Git worktree，随后每个实际命令仍需逐步明确确认。失败或取消后的 retry 会先校验并恢复该 attempt 的基线；Accept、Reject 和真实 checkpoint restore 是不同操作，restore 还会显示并校验精确的 OID 与 execution root。
 
 ## 高级入口：直接导入会话 JSON
 
@@ -124,6 +124,9 @@ node packages/prolog-adapter/src/cli.js \
 - 两个独立工作台和可导入协议；
 - 真实项目只读探测、安全预览和最近项目入口；
 - Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
+- Migration 命令只在工作台拥有的 Git worktree 中执行；每次 attempt 保存基线、结果 checkpoint、文件 manifest 和命令证据；
+- 失败/取消后的基线恢复重试、精确 attempt 取消，以及 accepted checkpoint 的二次确认恢复；
+- 按需加载的逐文件 unified/side-by-side diff、搜索、历史 attempt 审查和安全的 Markdown 注释、标签、持久证据书签；
 - 内置 Prolog runtime trace 与框架迁移示例。
 
 ## 测试
@@ -131,5 +134,7 @@ node packages/prolog-adapter/src/cli.js \
 ```bash
 npm test
 ```
+
+其中 `test/migration-recovery-e2e.test.js` 会创建真实临时 Git 仓库，通过实际 HTTP、SSE、命令、preview、review、retry、cancel、diff、bookmark 和 restore 路径验证完整恢复闭环，并断言源仓库 HEAD、index、status 和 tracked files 保持不变。
 
 下一步开发范围和验收条件见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。

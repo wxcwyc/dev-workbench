@@ -31,6 +31,18 @@ Migration Center 的首版计划编辑器只作用于 pristine Migration session
 
 Migration 的成功执行会先进入 `awaiting_review`，再由 accept/reject 推进；reject 会把步骤标记为可重试的 `failed`，下一次 retry/start 才会递增 `attempt`。execution-time editing、downstream invalidation、revision conflict 和并发修订控制都留给后续工作。
 
+## Recoverable migration workspace
+
+真实 Migration action 不在用户源工作树中执行。用户显式准备 workspace 后，Git adapter 会从干净源仓库创建工作台拥有的 detached worktree，并在每次 attempt 前后写入专属 refs：
+
+- baseline 与 result OID、ref、文件 manifest、命令结果和 review 状态作为 append-only attempt evidence 持久化；
+- Reject 保留结果证据；failed/cancelled retry 必须提交前一 attempt ID、baseline OID 和 execution root，并先恢复精确基线；
+- Cancel 只向当前 step/attempt 的受管子进程发信号，由原 run 请求负责捕获 partial evidence 并完成持久化；
+- Accept 先重新校验受管 worktree 的 HEAD 和 clean 状态，再把 result 标记为可恢复边界；
+- Restore 只接受 initial 或已 accepted checkpoint，要求精确 OID/execution-root 二次确认，并拒绝 active command 或 preview；历史 attempts、diff refs、annotations 和 events 不会被删除。
+
+逐文件 diff 通过 attempt ID 与 manifest path 按需读取，不把完整 patch 放入 Session JSON/SSE。Web projection 支持 unified/side-by-side、搜索和稳定焦点。注释可保存 bounded tags 与 file/diff/command target；Markdown 只渲染小型白名单语法，先转义 HTML，并拒绝危险链接协议。Preview sequence 等 ephemeral runtime 标识不能作为书签目标。
+
 ## Preview runtime
 
 Migration session 现在可以在 `metadata.previewServices.source|target` 中声明 preview 进程。每个 slot 只接受 `command`、`cwd`、`port`、`healthPath` 和 `previewPath`，并由 `PreviewProcessSupervisor` 解析成 loopback-only 的 `actualUrl` / `healthUrl`：
@@ -91,6 +103,7 @@ The first runtime adapter is a zero-dependency interpreter for the pure Horn-cla
 - command 必须是字符串数组，由 `spawn(..., shell=false)` 直接执行；executable 和参数中的 shell 元字符只作为字面字符传递，不会被 shell 解析；
 - preview supervisor 同样使用 `spawn(..., shell=false)`，并把 preview URL/health URL 限制为本机 loopback；
 - 有 action 的步骤必须提交 `confirmed=true`；
+- Migration action 还必须先准备并校验受管 Git worktree；高风险 run/retry、retry baseline restore 和真实 checkpoint restore 分别要求精确确认字段；
 - 一个 session 同时最多运行一个步骤；
 - HTTP JSON body 限制为 1 MB；
 - 文件树跳过 `.git`、`node_modules` 和 `.dev-workbench`。
@@ -100,7 +113,6 @@ The first runtime adapter is a zero-dependency interpreter for the pure Horn-cla
 ## Next adapters
 
 1. Prolog runtime adapter：从解释器事件直接生成 rule/unification/backtracking trace；
-2. Git checkpoint adapter：每步生成可恢复 commit 或 worktree；
-3. Test adapter：把失败用例、覆盖率和日志映射到时间轴；
-4. Container worker：在一次性隔离环境中执行迁移步骤；
-5. Preview runtime 扩展：PTY/input、持久 preview logs、创建后 preview config 编辑器和远程 worker。
+2. Test adapter：把失败用例、覆盖率和日志映射到时间轴；
+3. Container worker：在一次性隔离环境中执行迁移步骤；
+4. Preview runtime 扩展：PTY/input、持久 preview logs、创建后 preview config 编辑器和远程 worker。

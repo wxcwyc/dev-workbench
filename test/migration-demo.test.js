@@ -90,6 +90,7 @@ test("migration demo session exposes stable ids, risk, and earlier-step dependen
     { id: "create-application-shell", risk: "medium", dependsOn: ["reset-target-workspace"] },
     { id: "migrate-content", risk: "medium", dependsOn: ["create-application-shell"] },
     { id: "migrate-styles", risk: "low", dependsOn: ["migrate-content"] },
+    { id: "verify-migration", risk: "low", dependsOn: ["migrate-styles"] },
   ]);
 });
 
@@ -164,6 +165,8 @@ test("reset preserves the target server and recreates its preview page", async (
   const target = path.join(copiedDemo, "target");
   await fs.writeFile(path.join(target, "index.html"), "stale preview");
   await fs.writeFile(path.join(target, "app.js"), "stale generated asset");
+  await fs.writeFile(path.join(target, "verified.txt"), "stale verification");
+  await fs.writeFile(path.join(target, "verification-in-progress.txt"), "stale progress");
 
   const child = spawn(process.execPath, [path.join(copiedDemo, "step-runner.js"), "reset"], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -178,4 +181,32 @@ test("reset preserves the target server and recreates its preview page", async (
   assert.match(await fs.readFile(path.join(target, "server.js"), "utf8"), /createServer/);
   assert.match(await fs.readFile(path.join(target, "index.html"), "utf8"), /Modern site preview/);
   await assert.rejects(fs.access(path.join(target, "app.js")), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(target, "verified.txt")), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(target, "verification-in-progress.txt")), { code: "ENOENT" });
+});
+
+test("verification emits progress before writing its durable result", async (context) => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "migration-demo-verify-"));
+  context.after(() => fs.rm(tempRoot, { recursive: true, force: true }));
+  const copiedDemo = path.join(tempRoot, "migration-demo");
+  await fs.cp(new URL("../examples/migration-demo/", import.meta.url), copiedDemo, { recursive: true });
+
+  const child = spawn(process.execPath, [path.join(copiedDemo, "step-runner.js"), "verify"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  context.after(() => stopChild(child));
+  const stdout = capture(child.stdout);
+  const stderr = capture(child.stderr);
+
+  await waitForOutput(stdout, /Verification started\./);
+  await assert.rejects(fs.access(path.join(copiedDemo, "target", "verified.txt")), { code: "ENOENT" });
+  assert.equal(
+    await fs.readFile(path.join(copiedDemo, "target", "verification-in-progress.txt"), "utf8"),
+    "Verification is in progress.\n",
+  );
+  const [exitCode] = await once(child, "exit");
+  assert.equal(exitCode, 0, stderr());
+  assert.match(stdout(), /Migration verified\./);
+  await assert.rejects(fs.access(path.join(copiedDemo, "target", "verification-in-progress.txt")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(path.join(copiedDemo, "target", "verified.txt"), "utf8"), "Migration verified.\n");
 });
