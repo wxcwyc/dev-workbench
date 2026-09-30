@@ -627,7 +627,7 @@ export class SessionEngine {
           ...session.events,
           event(
             decision === "accept" ? "step.review.accepted" : "step.review.rejected",
-            { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+            { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt, at: reviewedAt }
           )
         ],
         updatedAt: timestamp()
@@ -675,7 +675,7 @@ export class SessionEngine {
         ...session.events,
         event(
           decision === "accept" ? "step.review.accepted" : "step.review.rejected",
-          { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt }
+          { stepIndex: index, stepId: candidateStep.id, attempt: candidateStep.attempt, at: reviewedAt }
         )
       ],
       updatedAt: timestamp()

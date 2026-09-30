@@ -980,6 +980,7 @@ test("restore can rebuild accepted projections after moving backward and then fo
   completeMigrationAttempt(engine, session, 0, { attemptId: "attempt-1", resultOid: "b".repeat(40), snapshot: { files: [] } });
   engine.reviewStep(session, 0, "accept");
   const firstReview = session.steps[0].review.reviewedAt;
+  assert.equal(session.events.at(-1).at, firstReview);
   const firstStartedAt = session.steps[0].startedAt;
   const firstCompletedAt = session.steps[0].completedAt;
 
@@ -987,6 +988,7 @@ test("restore can rebuild accepted projections after moving backward and then fo
   completeMigrationAttempt(engine, session, 1, { attemptId: "attempt-2", resultOid: "c".repeat(40), snapshot: { files: [] } });
   engine.reviewStep(session, 1, "accept");
   const secondReview = session.steps[1].review.reviewedAt;
+  assert.equal(session.events.at(-1).at, secondReview);
   const secondStartedAt = session.steps[1].startedAt;
   const secondCompletedAt = session.steps[1].completedAt;
 
