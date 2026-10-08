@@ -1733,6 +1733,91 @@ test("same-session intermediate SSE still converges to final action state withou
   assert.equal(browser.element("health").textContent, "session refresh failed: refetch unavailable");
 });
 
+test("an intentionally cancelled run refreshes the cancelled session without an error alert", async (t) => {
+  const initial = migrationSession("cancel-run", {
+    steps: [{ ...migrationSession().steps[0], attempt: 0, status: "pending" }],
+  });
+  const cancelled = migrationSession("cancel-run", {
+    status: "failed",
+    steps: [{ ...migrationSession().steps[0], attempt: 1, status: "cancelled" }],
+  });
+  let sessionReads = 0;
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/cancel-run") {
+      sessionReads += 1;
+      return new FakeResponse(sessionReads === 1 ? initial : cancelled);
+    }
+    if (path === "/api/sessions/cancel-run/steps/0/run" && options.method === "POST") {
+      return new FakeResponse({ error: "Command aborted" }, { ok: false });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  await controller.openSession("cancel-run");
+
+  await browser.element("run-next").onclick();
+
+  assert.equal(controller.state.active.steps[0].status, "cancelled");
+  assert.match(browser.element("run-next").textContent, /Retry step 1/i);
+  assert.deepEqual(browser.alerts, []);
+});
+
+test("a cancelled retry failure remains visible when no new attempt was created", async (t) => {
+  const cancelled = migrationSession("cancelled-retry", {
+    status: "failed",
+    workspace: { executionRoot: "/tmp/cancelled-retry" },
+    attempts: [{
+      id: "attempt-1",
+      stepIndex: 0,
+      attempt: 1,
+      status: "cancelled",
+      baseline: {
+        oid: "b".repeat(40),
+        ref: "refs/dev-workbench/checkpoints/cancelled-retry/attempt-1/baseline",
+      },
+    }],
+    steps: [{ ...migrationSession().steps[0], attempt: 1, status: "cancelled" }],
+  });
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/cancelled-retry") return new FakeResponse(cancelled);
+    if (path === "/api/sessions/cancelled-retry/steps/0/run" && options.method === "POST") {
+      return new FakeResponse({ error: "Retry confirmation expired" }, { ok: false });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  globalThis.confirm = () => true;
+  controller.renderSession(cancelled);
+
+  await browser.element("run-next").onclick();
+
+  assert.deepEqual(browser.alerts, ["Retry confirmation expired"]);
+  assert.equal(controller.state.active.steps[0].attempt, 1);
+  assert.equal(controller.state.active.steps[0].status, "cancelled");
+});
+
+test("a failed mutation still reports its error when the recovery refresh also fails", async (t) => {
+  const initial = migrationSession("double-failure", {
+    workspace: {
+      executionRoot: "/tmp/double-failure",
+      currentCheckpointId: "initial",
+      baseOid: "a".repeat(40),
+    },
+  });
+  const { browser, controller } = await loadController(t, (path, options) => {
+    if (path === "/api/sessions/double-failure") throw new Error("refetch unavailable");
+    if (path === "/api/sessions/double-failure/steps/0/run" && options.method === "POST") {
+      return new FakeResponse({ error: "Run failed" }, { ok: false });
+    }
+    throw new Error(`Unexpected fetch ${path}`);
+  });
+  controller.renderSession(initial);
+
+  await browser.element("run-next").onclick();
+
+  assert.deepEqual(browser.alerts, ["Run failed"]);
+  assert.equal(browser.element("run-next").disabled, false);
+  assert.equal(browser.element("health").textContent, "session refresh failed: refetch unavailable");
+});
+
 test("high-risk execution confirmation is precise, cancellation is inert, and retry labels are visible", async (t) => {
   const { browser, controller } = await loadController(t, (path, options) => {
     if (path === "/api/sessions/high/steps/0/run" && options.method === "POST") {
@@ -1795,4 +1880,27 @@ test("high-risk execution confirmation is precise, cancellation is inert, and re
     confirmed: true,
     confirmedRisk: true,
   });
+
+  controller.renderSession(migrationSession("cancelled", {
+    status: "failed",
+    cursor: 0,
+    steps: [{
+      id: "prepare-project",
+      title: "Prepare project",
+      description: "Read files",
+      expected: "Ready",
+      risk: "high",
+      dependsOn: [],
+      attempt: 1,
+      status: "cancelled",
+      action: { command: ["node", "prepare.js"], cwd: "." },
+    }],
+  }));
+  assert.match(browser.element("run-next").textContent, /Retry step 1/i);
+  globalThis.confirm = (message) => {
+    confirms.push(message);
+    return false;
+  };
+  await browser.element("run-next").onclick();
+  assert.match(confirms.at(-1), /^Retry high-risk migration step\?/);
 });

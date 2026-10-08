@@ -8,6 +8,7 @@ const terminalClientLimit=256*1024;
 const reviewRenderLineLimit=400;
 const previewStates=new Set(["unconfigured","stopped","starting","running","conflict","exited","stopping"]);
 const sessionOperationQueues=new Map();
+const restoreCloseIntents=[];
 
 async function api(path,options={}){
   const response=await fetch(path,{headers:{"content-type":"application/json",...(options.headers??{})},...options});
@@ -36,18 +37,18 @@ function nextRunnableIndex(session){
   if(!session)return-1;
   if(session.workbench==="migration"){
     if(awaitingReviewIndex(session)!==-1||session.steps.some((step)=>step.status==="running"))return-1;
-    return session.steps.findIndex((step)=>["pending","failed"].includes(step.status)&&dependenciesSatisfied(session,step));
+    return session.steps.findIndex((step)=>["pending","failed","cancelled"].includes(step.status)&&dependenciesSatisfied(session,step));
   }
-  return session.steps.findIndex((step)=>["pending","failed"].includes(step.status));
+  return session.steps.findIndex((step)=>["pending","failed","cancelled"].includes(step.status));
 }
 function runButtonLabel(session,index){
   if(index<0)return"Plan completed";
-  return `${session.steps[index].status==="failed"?"Retry":"Run"} step ${index+1}`;
+  return `${["failed","cancelled"].includes(session.steps[index].status)?"Retry":"Run"} step ${index+1}`;
 }
 function confirmationMessage(session,step,index){
   const command=step.action?.command?.join(" ");
   if(stepRisk(step)==="high"){
-    return `${step.status==="failed"?"Retry":"Run"} high-risk migration step?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nRisk: high${command?`\nCommand: ${command}\nProject root: ${session.projectRoot}`:"\nObservation only"}\n\nProceed?`;
+    return `${["failed","cancelled"].includes(step.status)?"Retry":"Run"} high-risk migration step?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nRisk: high${command?`\nCommand: ${command}\nProject root: ${session.projectRoot}`:"\nObservation only"}\n\nProceed?`;
   }
   if(command)return `Run this command?\n\n${command}\n\nin ${session.projectRoot}`;
   return `Run step ${index+1}?`;
@@ -119,11 +120,18 @@ function clearRestoreDialogState(){
   state.review.restore.trigger=null;
   return trigger;
 }
-function closeRestoreDialog({focusTrigger=true}={}){
+function closeRestoreDialog({focusTrigger=true,focusSessionId=null}={}){
   const dialog=$("#restore-checkpoint-dialog");
   const trigger=clearRestoreDialogState();
-  if(dialog.open)dialog.close();
-  if(focusTrigger&&trigger?.focus)trigger.focus();
+  const intent={trigger:focusTrigger?trigger:null,focusSessionId};
+  if(dialog.open){
+    restoreCloseIntents.push(intent);
+    dialog.close();
+    if(focusTrigger)trigger?.focus?.();
+    return;
+  }
+  if(intent.focusSessionId&&state.active?.id===intent.focusSessionId)$("#session-status").focus?.();
+  else intent.trigger?.focus?.();
 }
 function syncReviewSelection(session){
   if(state.review.sessionId!==session.id){
@@ -1089,6 +1097,9 @@ function refreshPreview(slot){
 async function mutateActiveSession(path,body){
   const sessionId=state.active?.id;
   if(!sessionId||state.sessionAction.pending)return;
+  const runIndexMatch=path.match(/\/steps\/(\d+)\/run$/);
+  const runIndex=runIndexMatch?Number(runIndexMatch[1]):-1;
+  const runAttemptBefore=runIndex>=0?stepAttempt(state.active?.steps[runIndex]):-1;
   const request=++state.sessionAction.request;
   state.sessionAction.pending=true;
   state.sessionAction.sessionId=sessionId;
@@ -1100,7 +1111,20 @@ async function mutateActiveSession(path,body){
   catch(error){mutationError=error;}
   if(request===state.sessionAction.request)state.sessionAction.pending=false;
   if(state.active?.id!==sessionId){if(state.active)renderSession(state.active);return;}
-  if(mutationError){alert(mutationError.message);await openSession(sessionId);return;}
+  if(mutationError){
+    try{
+      await openSession(sessionId);
+    }catch(refreshError){
+      if(state.active?.id===sessionId)renderSession(state.active);
+      alert(mutationError.message);
+      $("#health").textContent=`session refresh failed: ${refreshError.message}`;
+      return;
+    }
+    const currentStep=runIndex>=0?state.active?.steps[runIndex]:null;
+    const expectedCancellation=currentStep?.status==="cancelled"&&stepAttempt(currentStep)>runAttemptBefore;
+    if(!expectedCancellation)alert(mutationError.message);
+    return;
+  }
   if(state.activeGeneration!==renderGeneration){
     try{await openSession(sessionId);}
     catch(error){
@@ -1200,9 +1224,8 @@ async function confirmRestoreDialog(){
     $("#restore-checkpoint-status").textContent=restoreError.message;
     return;
   }
-  closeRestoreDialog({focusTrigger:false});
+  closeRestoreDialog({focusTrigger:false,focusSessionId:session.id});
   renderSession(restored);
-  $("#session-status").focus?.();
 }
 async function runCurrentStep(){
   const index=Number($("#run-next").dataset.index);
@@ -1483,8 +1506,19 @@ $("#migration-view").onclick=async(event)=>{
   }
   const reviewFile=event.target.closest("[data-review-path]");
   if(reviewFile){
+    const restoreFocus=document.activeElement===reviewFile;
+    const attemptId=reviewFile.dataset.reviewAttemptId;
+    const reviewPath=reviewFile.dataset.reviewPath;
     state.annotationJump.request+=1;
-    await loadReviewDiff(reviewFile.dataset.reviewAttemptId,reviewFile.dataset.reviewPath);
+    const loading=loadReviewDiff(attemptId,reviewPath);
+    const focusOwner=document.activeElement;
+    await loading;
+    if(
+      restoreFocus
+      && document.activeElement===focusOwner
+      && state.review.selectedAttemptId===attemptId
+      && state.review.selectedPath===reviewPath
+    )reviewFileEvidence(attemptId,reviewPath)?.focus?.();
     return;
   }
   const restoreControl=event.target.closest("[data-restore-checkpoint-id]");
@@ -1514,6 +1548,13 @@ $("#restore-checkpoint-dialog").oncancel=(event)=>{
   closeRestoreDialog();
 };
 $("#restore-checkpoint-dialog").onclose=()=>{
+  const intent=restoreCloseIntents.shift();
+  if(intent){
+    if($("#restore-checkpoint-dialog").open)return;
+    if(intent.focusSessionId&&state.active?.id===intent.focusSessionId)$("#session-status").focus?.();
+    else intent.trigger?.focus?.();
+    return;
+  }
   if(state.review.restore.pending)return;
   if(!state.review.restore.target&&!state.review.restore.trigger)return;
   closeRestoreDialog();

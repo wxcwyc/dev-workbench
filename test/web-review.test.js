@@ -112,6 +112,7 @@ test("review markup and styles define labelled regions, restore dialog semantics
   ]);
 
   assert.match(indexHtml, /<label id="note-text-label"[^>]*for="note-text"/);
+  assert.match(indexHtml, /<link rel="icon" href="data:,"/);
   assert.match(indexHtml, /<dialog id="restore-checkpoint-dialog"[^>]*aria-labelledby="restore-checkpoint-title"[^>]*aria-describedby="restore-checkpoint-description"/);
   assert.match(indexHtml, /id="restore-checkpoint-confirm"[^>]*type="button"/);
   assert.match(indexHtml, /id="session-status"[^>]*tabindex="-1"/i);
@@ -283,6 +284,82 @@ test("changed-file review escapes manifest paths, preserves selection, and ignor
   assert.match(browser.element("migration-view").innerHTML, /data-review-path="obsolete\.txt" aria-pressed="true"/);
   controller.renderSession({ ...session, updatedAt: "2026-08-03T09:03:00.000Z" });
   assert.match(browser.element("migration-view").innerHTML, /data-review-path="obsolete\.txt" aria-pressed="true"/);
+});
+
+test("keyboard file selection restores focus to the selected file after lazy diff rendering", async (t) => {
+  const { browser, controller } = await loadController(t, (requestPath) => {
+    if (requestPath.endsWith("/attempts/attempt-1/diff?path=src%2Fnew-name.js")) {
+      return new FakeResponse({
+        path: "src/new-name.js",
+        oldPath: "src/old-name.js",
+        newPath: "src/new-name.js",
+        status: "renamed",
+        binary: false,
+        truncated: false,
+        old: { text: "old\n" },
+        new: { text: "new\n" },
+        hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: [hunkLine("deletion", "old", 1, null), hunkLine("addition", "new", null, 1)] }],
+      });
+    }
+    throw new Error(`Unexpected fetch ${requestPath}`);
+  });
+  controller.renderSession(migrationSession("keyboard-review", {
+    workspace: workspace({ currentCheckpointId: "attempt-1" }),
+    attempts: [attempt()],
+  }));
+
+  const activatedFile = new FakeElement(browser.document);
+  activatedFile.dataset.reviewPath = "src/new-name.js";
+  activatedFile.dataset.reviewAttemptId = "attempt-1";
+  activatedFile.focus();
+
+  const renderedFile = new FakeElement(browser.document);
+  renderedFile.dataset.reviewPath = "src/new-name.js";
+  renderedFile.dataset.reviewAttemptId = "attempt-1";
+  browser.document.setQuerySelectorAll("[data-review-attempt-id][data-review-path]", [renderedFile]);
+
+  await browser.element("migration-view").onclick({ target: activatedFile });
+
+  assert.equal(browser.document.activeElement, renderedFile);
+});
+
+test("lazy diff completion does not steal focus after the user moves elsewhere", async (t) => {
+  const response = deferred();
+  const { browser, controller } = await loadController(t, (requestPath) => {
+    if (requestPath.endsWith("/attempts/attempt-1/diff?path=src%2Fnew-name.js")) return response.promise;
+    throw new Error(`Unexpected fetch ${requestPath}`);
+  });
+  controller.renderSession(migrationSession("keyboard-review", {
+    workspace: workspace({ currentCheckpointId: "attempt-1" }),
+    attempts: [attempt()],
+  }));
+
+  const activatedFile = new FakeElement(browser.document);
+  activatedFile.dataset.reviewPath = "src/new-name.js";
+  activatedFile.dataset.reviewAttemptId = "attempt-1";
+  activatedFile.focus();
+  const renderedFile = new FakeElement(browser.document);
+  renderedFile.dataset.reviewPath = "src/new-name.js";
+  renderedFile.dataset.reviewAttemptId = "attempt-1";
+  browser.document.setQuerySelectorAll("[data-review-attempt-id][data-review-path]", [renderedFile]);
+  const pending = browser.element("migration-view").onclick({ target: activatedFile });
+  const otherControl = new FakeElement(browser.document);
+  otherControl.focus();
+
+  response.resolve(new FakeResponse({
+    path: "src/new-name.js",
+    oldPath: "src/old-name.js",
+    newPath: "src/new-name.js",
+    status: "renamed",
+    binary: false,
+    truncated: false,
+    old: { text: "old\n" },
+    new: { text: "new\n" },
+    hunks: [],
+  }));
+  await pending;
+
+  assert.equal(browser.document.activeElement, otherControl);
 });
 
 test("loaded diffs support search, side-by-side mode, binary/truncated/error states, and bounded safe highlighting", async (t) => {
@@ -666,6 +743,18 @@ test("successful restore closes the dialog and moves focus to the focusable sess
 
   trigger.dataset.restoreCheckpointId = "attempt-1";
   await browser.element("migration-view").onclick({ target: trigger });
+  const dialog = browser.element("restore-checkpoint-dialog");
+  const nativeCloseEvents = [];
+  dialog.close = () => {
+    if (!dialog.open) return;
+    dialog.open = false;
+    nativeCloseEvents.push(() => {
+      trigger.focus();
+      dialog.onclose?.();
+    });
+  };
+  browser.element("restore-checkpoint-cancel").onclick();
+  await browser.element("migration-view").onclick({ target: trigger });
   const pending = browser.element("restore-checkpoint-confirm").onclick();
   restore.resolve(new FakeResponse(migrationSession("recover-success", {
     workspace: workspace({ currentCheckpointId: "attempt-1" }),
@@ -673,7 +762,10 @@ test("successful restore closes the dialog and moves focus to the focusable sess
     steps: [{ ...migrationSession().steps[0], status: "completed", review: { decision: "accept", reviewedAt: "2026-08-03T09:02:00.000Z" } }],
   })));
   await pending;
+  assert.equal(nativeCloseEvents.length, 2);
+  nativeCloseEvents.shift()();
+  nativeCloseEvents.shift()();
 
-  assert.equal(browser.element("restore-checkpoint-dialog").open, false);
+  assert.equal(dialog.open, false);
   assert.equal(browser.document.activeElement, browser.element("session-status"));
 });

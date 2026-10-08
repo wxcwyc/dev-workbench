@@ -2041,6 +2041,123 @@ test("restore requires exact accepted evidence, inactive previews, and reports p
   assert.equal(foreign.body.code, "ownership_mismatch");
 });
 
+test("preview lifecycle rejects while restore owns the session restore barrier", async (t) => {
+  let restoreClaimed;
+  let releaseRestore;
+  const claimed = new Promise((resolve) => { restoreClaimed = resolve; });
+  const blocked = new Promise((resolve) => { releaseRestore = resolve; });
+  const previews = new FakePreviewSupervisor();
+  previews.states.source.state = "stopped";
+  previews.states.target.state = "stopped";
+  const app = await startTestApp(t, {
+    previews,
+    workspaceRoot: ({ temporaryRoot }) => path.join(temporaryRoot, "workspaces"),
+    afterSessionClaim: async ({ operation }) => {
+      if (operation !== "restore") return;
+      restoreClaimed();
+      await blocked;
+    },
+  });
+  t.after(() => releaseRestore());
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Restore excludes preview lifecycle",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Create restorable evidence",
+      action: {
+        command: [process.execPath, "-e", "require('node:fs').writeFileSync('keep.txt','changed\\n')"],
+      },
+    }],
+  });
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, { confirmed: true });
+  await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/review`, { decision: "accept" });
+  const restore = postJson(
+    `${app.url}/api/sessions/${created.body.id}/checkpoints/initial/restore`,
+    {
+      confirmed: true,
+      expectedOid: prepared.workspace.baseOid,
+      expectedExecutionRoot: prepared.workspace.executionRoot,
+    },
+  );
+  await withTimeout(claimed, "restore claim");
+
+  let preview;
+  try {
+    preview = await postJson(
+      `${app.url}/api/sessions/${created.body.id}/previews/source/start`,
+      {},
+    );
+  } finally {
+    releaseRestore();
+  }
+  assert.equal(preview.response.status, 409);
+  assert.equal(preview.body.code, "operation_active");
+
+  assert.equal((await withTimeout(restore, "restore completion")).response.status, 200);
+});
+
+test("restore rejects while a preview lifecycle operation is in flight", async (t) => {
+  let previewClaimed;
+  let releasePreview;
+  const claimed = new Promise((resolve) => { previewClaimed = resolve; });
+  const blocked = new Promise((resolve) => { releasePreview = resolve; });
+  const previews = new FakePreviewSupervisor();
+  previews.states.source.state = "stopped";
+  previews.states.target.state = "stopped";
+  previews.start = async (session, slot) => {
+    previews.calls.push(["start", session.id, slot]);
+    previewClaimed();
+    await blocked;
+    return previews.states[slot];
+  };
+  const app = await startTestApp(t, {
+    previews,
+    workspaceRoot: ({ temporaryRoot }) => path.join(temporaryRoot, "workspaces"),
+  });
+  t.after(() => releasePreview());
+  await makeGitMigrationProject(app.allowedRoot);
+  const created = await postJson(`${app.url}/api/sessions`, {
+    title: "Preview lifecycle excludes restore",
+    workbench: "migration",
+    projectRoot: "git-sample/app",
+    steps: [{
+      title: "Create restorable evidence",
+      action: {
+        command: [process.execPath, "-e", "require('node:fs').writeFileSync('keep.txt','changed\\n')"],
+      },
+    }],
+  });
+  const prepared = await prepareSessionWorkspace(app, created.body.id);
+  await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/run`, { confirmed: true });
+  await postJson(`${app.url}/api/sessions/${created.body.id}/steps/0/review`, { decision: "accept" });
+  const preview = postJson(
+    `${app.url}/api/sessions/${created.body.id}/previews/source/start`,
+    {},
+  );
+  await withTimeout(claimed, "preview lifecycle claim");
+
+  let restore;
+  try {
+    restore = await postJson(
+      `${app.url}/api/sessions/${created.body.id}/checkpoints/initial/restore`,
+      {
+        confirmed: true,
+        expectedOid: prepared.workspace.baseOid,
+        expectedExecutionRoot: prepared.workspace.executionRoot,
+      },
+    );
+  } finally {
+    releasePreview();
+  }
+  assert.equal(restore.response.status, 409);
+  assert.equal(restore.body.code, "preview_active");
+
+  assert.equal((await withTimeout(preview, "preview lifecycle completion")).response.status, 200);
+});
+
 test("restore save failure reports the intended and observed checkpoint without a second Git mutation", async (t) => {
   const managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dev-workbench-managed-"));
   t.after(() => fs.rm(managedRoot, { recursive: true, force: true }));

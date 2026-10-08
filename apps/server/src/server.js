@@ -256,6 +256,8 @@ export async function createApp(options = {}) {
   const recentProjects = new RecentProjectStore(path.join(runtime.stateRoot, "..", "recent-projects.json"), { warn: runtime.warn });
   const events = new EventEmitter();
   const runningSessions = new Set();
+  const restoringSessions = new Set();
+  const activePreviewOperations = new Map();
   const activeStepControllers = new Map();
   const activeStepRequests = new Set();
   const activeSseStreams = new Set();
@@ -268,6 +270,37 @@ export async function createApp(options = {}) {
     if (runningSessions.has(id)) { const error = new Error(message); error.statusCode = 409; throw error; }
     runningSessions.add(id);
     return () => runningSessions.delete(id);
+  };
+  const claimPreviewOperation = (id) => {
+    if (restoringSessions.has(id)) {
+      throw structuredError(
+        "Cannot change preview lifecycle while a restore is active",
+        409,
+        "operation_active",
+      );
+    }
+    activePreviewOperations.set(id, (activePreviewOperations.get(id) ?? 0) + 1);
+    return () => {
+      const remaining = (activePreviewOperations.get(id) ?? 1) - 1;
+      if (remaining > 0) activePreviewOperations.set(id, remaining);
+      else activePreviewOperations.delete(id);
+    };
+  };
+  const claimRestore = (id) => {
+    const releaseSession = claimSession(id);
+    if ((activePreviewOperations.get(id) ?? 0) > 0) {
+      releaseSession();
+      throw structuredError(
+        "Cannot restore while a preview lifecycle operation is active",
+        409,
+        "preview_active",
+      );
+    }
+    restoringSessions.add(id);
+    return () => {
+      restoringSessions.delete(id);
+      releaseSession();
+    };
   };
   const requireSession = async (id) => {
     const session = await store.get(id);
@@ -651,10 +684,15 @@ export async function createApp(options = {}) {
         requireExactEmptyObject(body, "Preview lifecycle body must be an empty object");
         const session = await requireMigrationSession(id);
         requirePreparedWorkspace(session, "A prepared workspace is required before preview lifecycle actions");
-        const result = action === "stop"
-          ? await previews.stop(session.id, slot)
-          : await previews[action](session, slot);
-        return sendJson(response, 200, result);
+        const release = claimPreviewOperation(id);
+        try {
+          const result = action === "stop"
+            ? await previews.stop(session.id, slot)
+            : await previews[action](session, slot);
+          return sendJson(response, 200, result);
+        } finally {
+          release();
+        }
       }
 
       const traceMatch = pathname.match(/^\/api\/sessions\/([a-f0-9-]+)\/trace$/i);
@@ -799,7 +837,7 @@ export async function createApp(options = {}) {
       if (request.method === "POST" && restoreMatch) {
         const id = restoreMatch[1];
         const checkpointId = restoreMatch[2];
-        const release = claimSession(id);
+        const release = claimRestore(id);
         try {
           if (options.afterSessionClaim) await options.afterSessionClaim({ id, operation: "restore" });
           const body = await readJson(request);
