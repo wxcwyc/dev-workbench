@@ -4,3 +4,22 @@
 node_modules/
 .DS_Store
 *.log
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local assistant state and working notes
+/.omx/
+/.claude/
+/.codex/
+/.agents/
+/AGENTS.md
+/task_plan.md
+/findings.md
+/progress.md
+/111.png
+/222.png

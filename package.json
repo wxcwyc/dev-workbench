@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "description": "Self-guided execution explorer and migration command center",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wxcwyc/dev-workbench.git"
+  },
   "scripts": {
     "start": "node apps/server/src/server.js",
     "dev": "node --watch apps/server/src/server.js",
