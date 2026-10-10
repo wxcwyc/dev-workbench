@@ -45,7 +45,7 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.ok(createHandler.indexOf("state.onboarding.recentRequest+=1") < createHandler.indexOf('await api("/api/sessions"'));
   assert.match(createHandler, /finally\{\n    if\(request===state\.onboarding\.creationRequest\)state\.onboarding\.creating=false;\n    if\(generation!==state\.onboarding\.dialogGeneration&&request===state\.onboarding\.creationRequest\)setOnboardingCreating\(false\);\n  }/);
   assert.equal(createHandler.match(/refreshRecentProjects\(false\)/g)?.length,3);
-  assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{\n    if\(\$\("#project-onboarding"\)\.open\)setOnboardingStatus\(creationError\?`Session creation failed: \$\{creationError\.message}`:"Session created\. You can inspect another project\.",creationError\?"error":"success"\);/);
+  assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{\n    if\(\$\("#project-onboarding"\)\.open\)setOnboardingStatus\(creationError\?t`Session creation failed: \$\{creationError\.message}`:t\("Session created\. You can inspect another project\."\),creationError\?"error":"success"\);/);
   assert.match(createHandler, /if\(generation!==state\.onboarding\.dialogGeneration\)\{[\s\S]*?refreshRecentProjects\(false\)/);
   const recentHandler = app.slice(app.indexOf("async function refreshRecentProjects"), app.indexOf("function resetOnboarding"));
   assert.match(recentHandler, /const request=\+\+state\.onboarding\.recentRequest;/);
@@ -79,17 +79,15 @@ test("onboarding dialog exposes labeled stages and actions", async () => {
   assert.match(runtimeUi, /<iframe class="preview"[^>]+sandbox="allow-scripts allow-forms"/);
   assert.doesNotMatch(runtimeUi, /allow-same-origin|allow-top-navigation|allow-popups/);
   assert.match(runtimeUi, /aria-live="polite"/);
-  assert.match(runtimeUi, /aria-label="\$\{slot==="source"\?"Source":"Target"\} preview status"/);
-  assert.match(runtimeUi, /aria-label="Start \$\{slot\} preview"/);
-  assert.match(runtimeUi, /aria-label="Stop \$\{slot\} preview"/);
-  assert.match(runtimeUi, /aria-label="Restart \$\{slot\} preview"/);
-  assert.match(runtimeUi, /aria-label="Refresh \$\{slot\} preview"/);
-  assert.match(runtimeUi, /\["all","All live output"\]/);
-  assert.match(runtimeUi, /\["source","Source preview"\]/);
-  assert.match(runtimeUi, /\["target","Target preview"\]/);
-  assert.match(runtimeUi, /\["step","Current step"\]/);
+  assert.ok(runtimeUi.includes('aria-label="${t`${slot==="source"?t("Source"):t("Target")} preview status`}"'));
+  for (const action of ["Start", "Stop", "Restart", "Refresh"]) {
+    assert.ok(runtimeUi.includes('aria-label="${t`' + action + ' ${t(slot)} preview`}"'));
+  }
+  for (const [filter, label] of [["all", "All live output"], ["source", "Source preview"], ["target", "Target preview"], ["step", "Current step"]]) {
+    assert.ok(runtimeUi.includes(`['${filter}',t('${label}')]`.replaceAll("'", '"')));
+  }
   assert.match(runtimeUi, /data-terminal-filter="\$\{value\}"/);
-  assert.match(runtimeUi, /aria-label="Live runtime terminal output"/);
+  assert.ok(runtimeUi.includes('aria-label="${t("Live runtime terminal output")}"'));
   assert.match(styles, /\.preview-workspace\{/);
   assert.match(styles, /@media\(max-width:900px\)\{[^\n]*\.preview-workspace/);
   assert.match(styles, /@media\(prefers-reduced-motion:reduce\)\{[^}]*\.preview-card/);

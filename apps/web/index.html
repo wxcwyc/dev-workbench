@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -10,65 +10,65 @@
 </head>
 <body>
   <header>
-    <div><span class="brand-mark">◆</span> DEV WORKBENCH <span class="muted">/ explainable execution</span></div>
-    <button id="open-project-mobile" class="mobile-project-button" type="button">Open project</button>
-    <div id="health">connecting…</div>
+    <div><span class="brand-mark">◆</span> DEV WORKBENCH <span class="muted">/ <span data-i18n="explainable execution">explainable execution</span></span></div>
+    <button id="open-project-mobile" class="mobile-project-button" type="button" data-i18n="Open project">Open project</button>
+    <div id="health" data-i18n="connecting…">connecting…</div>
   </header>
   <div class="layout">
     <aside>
       <section>
-        <h2>Start</h2>
-        <button id="open-project" class="primary">Open local project</button>
-        <button id="logic-demo">Open logic debugger</button>
-        <button id="migration-demo">Open migration center</button>
-        <label class="file-button">Import session JSON<input id="session-file" type="file" accept="application/json,.json"></label>
+        <h2 data-i18n="Start">Start</h2>
+        <button id="open-project" class="primary" data-i18n="Open local project">Open local project</button>
+        <button id="logic-demo" data-i18n="Open logic debugger">Open logic debugger</button>
+        <button id="migration-demo" data-i18n="Open migration center">Open migration center</button>
+        <label class="file-button"><span data-i18n="Import session JSON">Import session JSON</span><input id="session-file" type="file" accept="application/json,.json"></label>
       </section>
       <section class="grow">
-        <h2>Sessions</h2>
+        <h2 data-i18n="Sessions">Sessions</h2>
         <div id="sessions" class="session-list"></div>
       </section>
       <section class="boundary">
-        <h2>Execution boundary</h2>
+        <h2 data-i18n="Execution boundary">Execution boundary</h2>
         <p id="allowed-root" class="muted"></p>
-        <p class="muted">Commands run only after confirmation and never through a shell string.</p>
+        <p class="muted" data-i18n="Commands run only after confirmation and never through a shell string.">Commands run only after confirmation and never through a shell string.</p>
       </section>
     </aside>
     <main>
       <div id="empty" class="empty">
         <div class="empty-icon">◇</div>
-        <h1>Build understanding by operating the system</h1>
-        <p>Replay an execution trace or advance a migration one visible checkpoint at a time.</p>
+        <h1 data-i18n="Build understanding by operating the system">Build understanding by operating the system</h1>
+        <p data-i18n="Replay an execution trace or advance a migration one visible checkpoint at a time.">Replay an execution trace or advance a migration one visible checkpoint at a time.</p>
       </div>
       <div id="workbench" class="hidden">
         <div class="session-header">
           <div><span id="workbench-badge" class="badge"></span><h1 id="session-title"></h1><p id="session-path" class="muted"></p></div>
           <div id="session-controls" class="session-controls">
             <span id="session-status" tabindex="-1"></span>
-            <button id="prepare-workspace" type="button" hidden>Prepare workspace</button>
-            <button id="edit-plan" type="button" hidden disabled aria-describedby="edit-plan-reason">Edit plan</button>
-            <span id="edit-plan-reason" class="muted">Plan editing is available only before the migration starts.</span>
+            <button id="prepare-workspace" type="button" hidden data-i18n="Prepare workspace">Prepare workspace</button>
+            <button id="edit-plan" type="button" hidden disabled aria-describedby="edit-plan-reason" data-i18n="Edit plan">Edit plan</button>
+            <span id="edit-plan-reason" class="muted" data-i18n="Plan editing is available only before the migration starts.">Plan editing is available only before the migration starts.</span>
             <div id="review-controls" class="review-controls hidden">
-              <button id="review-accept" class="primary" type="button" hidden>Accept step</button>
-              <button id="review-reject" type="button" hidden>Reject step</button>
+              <button id="review-accept" class="primary" type="button" hidden data-i18n="Accept step">Accept step</button>
+              <button id="review-reject" type="button" hidden data-i18n="Reject step">Reject step</button>
               <span id="review-evidence-warning" class="muted" role="status" hidden></span>
-              <button id="review-return-current" type="button" hidden>Return to current attempt</button>
+              <button id="review-return-current" type="button" hidden data-i18n="Return to current attempt">Return to current attempt</button>
             </div>
-            <button id="run-next" class="primary" type="button">Run next step</button>
+            <button id="run-next" class="primary" type="button" data-i18n="Run next step">Run next step</button>
           </div>
         </div>
         <div id="execution-view" class="hidden"></div>
         <div id="migration-view" class="hidden"></div>
         <section class="timeline-panel">
-          <div class="timeline-heading"><strong>Timeline</strong><span id="step-counter"></span></div>
+          <div class="timeline-heading"><strong data-i18n="Timeline">Timeline</strong><span id="step-counter"></span></div>
           <div id="timeline" class="timeline"></div>
-          <div class="timeline-actions"><button id="previous">‹ Previous</button><button id="next">Next ›</button><button id="latest">Latest</button></div>
+          <div class="timeline-actions"><button id="previous" data-i18n="‹ Previous">‹ Previous</button><button id="next" data-i18n="Next ›">Next ›</button><button id="latest" data-i18n="Latest">Latest</button></div>
         </section>
         <section class="notes-panel">
-          <div class="notes-heading"><h2 id="notes-title">Notes</h2><label>Filter tags<input id="annotation-tag-filter" type="search" placeholder="review"></label></div>
+          <div class="notes-heading"><h2 id="notes-title" data-i18n="Notes">Notes</h2><label><span data-i18n="Filter tags">Filter tags</span><input id="annotation-tag-filter" type="search" placeholder="review"></label></div>
           <div id="notes"></div>
           <form id="note-form">
-            <div class="annotation-fields"><label>Type<select id="annotation-kind"><option value="note">Note</option><option value="bookmark">Bookmark</option></select></label><label>Tags<input id="annotation-tags" placeholder="review, frontend"></label><label>Evidence<select id="annotation-target-type"><option value="diff">Diff</option><option value="file">File</option><option value="command">Command output</option></select></label><label>Stream<select id="annotation-command-stream"><option value="stdout">stdout</option><option value="stderr">stderr</option></select></label><label>Line<input id="annotation-target-line" type="number" min="1"></label></div>
-            <label id="note-text-label" for="note-text">Review note (Markdown)</label><textarea id="note-text" placeholder="Write down what you understood at this step…"></textarea><button>Add annotation</button>
+            <div class="annotation-fields"><label><span data-i18n="Type">Type</span><select id="annotation-kind"><option value="note" data-i18n="Note">Note</option><option value="bookmark" data-i18n="Bookmark">Bookmark</option></select></label><label><span data-i18n="Tags">Tags</span><input id="annotation-tags" placeholder="review, frontend"></label><label><span data-i18n="Evidence">Evidence</span><select id="annotation-target-type"><option value="diff" data-i18n="Diff">Diff</option><option value="file" data-i18n="File">File</option><option value="command" data-i18n="Command output">Command output</option></select></label><label><span data-i18n="Stream">Stream</span><select id="annotation-command-stream"><option value="stdout">stdout</option><option value="stderr">stderr</option></select></label><label><span data-i18n="Line">Line</span><input id="annotation-target-line" type="number" min="1"></label></div>
+            <label id="note-text-label" for="note-text" data-i18n="Review note (Markdown)">Review note (Markdown)</label><textarea id="note-text" placeholder="Write down what you understood at this step…" data-i18n-placeholder="Write down what you understood at this step…"></textarea><button data-i18n="Add annotation">Add annotation</button>
           </form>
         </section>
       </div>
@@ -78,71 +78,71 @@
     <div class="onboarding-shell">
       <div class="onboarding-header">
         <div>
-          <span class="onboarding-kicker">PROJECT INTAKE / SAFETY REVIEW</span>
-          <h1 id="onboarding-title">Open a local project</h1>
-          <p>Inspect the boundary, review the normalized plan, then create a session.</p>
+          <span class="onboarding-kicker" data-i18n="PROJECT INTAKE / SAFETY REVIEW">PROJECT INTAKE / SAFETY REVIEW</span>
+          <h1 id="onboarding-title" data-i18n="Open a local project">Open a local project</h1>
+          <p data-i18n="Inspect the boundary, review the normalized plan, then create a session.">Inspect the boundary, review the normalized plan, then create a session.</p>
         </div>
-        <button id="onboarding-close" class="icon-button" type="button" aria-label="Close project onboarding">×</button>
+        <button id="onboarding-close" class="icon-button" type="button" aria-label="Close project onboarding" data-i18n-aria-label="Close project onboarding">×</button>
       </div>
 
       <div class="onboarding-body">
         <section class="onboarding-stage" aria-labelledby="project-path-title">
-          <div class="stage-heading"><span>01</span><h2 id="project-path-title">Project boundary</h2></div>
+          <div class="stage-heading"><span>01</span><h2 id="project-path-title" data-i18n="Project boundary">Project boundary</h2></div>
           <form id="project-inspect-form">
-            <label for="project-path">Local project path</label>
+            <label for="project-path" data-i18n="Local project path">Local project path</label>
             <div class="path-inspect-row">
               <input id="project-path" name="projectRoot" type="text" required autocomplete="off" spellcheck="false" placeholder="/path/inside/allowed/root">
-              <button id="onboarding-inspect" type="submit">Inspect</button>
+              <button id="onboarding-inspect" type="submit" data-i18n="Inspect">Inspect</button>
             </div>
           </form>
           <div class="recent-projects-region" aria-labelledby="recent-projects-title">
-            <h3 id="recent-projects-title">Recent projects</h3>
-            <div id="onboarding-recent" class="recent-projects" aria-live="polite"><span class="muted">Loading recent projects…</span></div>
+            <h3 id="recent-projects-title" data-i18n="Recent projects">Recent projects</h3>
+            <div id="onboarding-recent" class="recent-projects" aria-live="polite"><span class="muted" data-i18n="Loading recent projects…">Loading recent projects…</span></div>
           </div>
         </section>
 
         <section id="onboarding-detection" class="onboarding-stage hidden" aria-labelledby="detection-title">
-          <div class="stage-heading"><span>02</span><h2 id="detection-title">Detected project</h2></div>
+          <div class="stage-heading"><span>02</span><h2 id="detection-title" data-i18n="Detected project">Detected project</h2></div>
           <div id="detection-facts" class="detection-facts"></div>
           <div id="detection-evidence" class="detection-evidence"></div>
           <div id="detection-warnings" class="detection-warnings"></div>
         </section>
 
         <section class="onboarding-stage" aria-labelledby="session-draft-title">
-          <div class="stage-heading"><span>03</span><h2 id="session-draft-title">Session draft</h2></div>
+          <div class="stage-heading"><span>03</span><h2 id="session-draft-title" data-i18n="Session draft">Session draft</h2></div>
           <fieldset id="onboarding-config" disabled>
             <div class="onboarding-field-grid">
               <fieldset class="workbench-fieldset">
-                <legend class="field-label">Workbench</legend>
+                <legend class="field-label" data-i18n="Workbench">Workbench</legend>
                 <div class="workbench-options">
-                  <label><input type="radio" name="onboarding-workbench" value="execution" checked> Execution</label>
-                  <label><input type="radio" name="onboarding-workbench" value="migration"> Migration</label>
+                  <label><input type="radio" name="onboarding-workbench" value="execution" checked> <span data-i18n="Execution">Execution</span></label>
+                  <label><input type="radio" name="onboarding-workbench" value="migration"> <span data-i18n="Migration">Migration</span></label>
                 </div>
               </fieldset>
               <div>
-                <label for="onboarding-session-title">Session title</label>
+                <label for="onboarding-session-title" data-i18n="Session title">Session title</label>
                 <input id="onboarding-session-title" type="text" required autocomplete="off">
               </div>
             </div>
-            <label for="onboarding-import">Optional session or plan JSON</label>
-            <textarea id="onboarding-import" rows="5" spellcheck="false" placeholder="Paste a session object to review its steps or trace…"></textarea>
-            <label class="file-button onboarding-file">Load JSON file<input id="onboarding-file" type="file" accept="application/json,.json"></label>
+            <label for="onboarding-import" data-i18n="Optional session or plan JSON">Optional session or plan JSON</label>
+            <textarea id="onboarding-import" rows="5" spellcheck="false" placeholder="Paste a session object to review its steps or trace…" data-i18n-placeholder="Paste a session object to review its steps or trace…"></textarea>
+            <label class="file-button onboarding-file"><span data-i18n="Load JSON file">Load JSON file</span><input id="onboarding-file" type="file" accept="application/json,.json"></label>
           </fieldset>
         </section>
 
         <section class="onboarding-stage safety-stage" aria-labelledby="safety-title">
-          <div class="stage-heading"><span>04</span><h2 id="safety-title">Plan &amp; safety gate</h2></div>
+          <div class="stage-heading"><span>04</span><h2 id="safety-title" data-i18n="Plan &amp; safety gate">Plan &amp; safety gate</h2></div>
           <div id="onboarding-preview" class="onboarding-preview" aria-live="polite">
-            <p class="muted">Inspect a project and preview the normalized session before creation.</p>
+            <p class="muted" data-i18n="Inspect a project and preview the normalized session before creation.">Inspect a project and preview the normalized session before creation.</p>
           </div>
         </section>
       </div>
 
       <div class="onboarding-footer">
-        <div id="onboarding-status" class="onboarding-status" role="status" aria-live="polite">Waiting for project inspection.</div>
+        <div id="onboarding-status" class="onboarding-status" role="status" aria-live="polite" data-i18n="Waiting for project inspection.">Waiting for project inspection.</div>
         <div class="onboarding-actions">
-          <button id="onboarding-preview-action" type="button" disabled>Preview safety gate</button>
-          <button id="onboarding-create" class="primary" type="button" disabled>Create session</button>
+          <button id="onboarding-preview-action" type="button" disabled data-i18n="Preview safety gate">Preview safety gate</button>
+          <button id="onboarding-create" class="primary" type="button" disabled data-i18n="Create session">Create session</button>
         </div>
       </div>
     </div>
@@ -151,28 +151,28 @@
     <div class="plan-editor-shell">
       <div class="plan-editor-header">
         <div>
-          <span class="plan-editor-kicker">MIGRATION FLIGHT PLAN / PRISTINE SESSION</span>
-          <h1 id="plan-editor-title">Edit pristine plan</h1>
-          <p id="plan-editor-description">Reorder and refine checkpoints before migration begins. Saving updates the plan only and does not execute commands.</p>
+          <span class="plan-editor-kicker" data-i18n="MIGRATION FLIGHT PLAN / PRISTINE SESSION">MIGRATION FLIGHT PLAN / PRISTINE SESSION</span>
+          <h1 id="plan-editor-title" data-i18n="Edit pristine plan">Edit pristine plan</h1>
+          <p id="plan-editor-description" data-i18n="Reorder and refine checkpoints before migration begins. Saving updates the plan only and does not execute commands.">Reorder and refine checkpoints before migration begins. Saving updates the plan only and does not execute commands.</p>
         </div>
       </div>
 
       <div class="plan-editor-body">
         <div class="plan-editor-toolbar">
           <div>
-            <h2>Flight sequence</h2>
-            <p>Steps run from top to bottom after you leave the editor.</p>
+            <h2 data-i18n="Flight sequence">Flight sequence</h2>
+            <p data-i18n="Steps run from top to bottom after you leave the editor.">Steps run from top to bottom after you leave the editor.</p>
           </div>
-          <button id="plan-editor-add" type="button">+ Add step</button>
+          <button id="plan-editor-add" type="button" data-i18n="+ Add step">+ Add step</button>
         </div>
         <div id="plan-editor-steps"></div>
       </div>
 
       <div class="plan-editor-footer">
-        <div id="plan-editor-status" role="status" aria-live="polite">Review the pristine plan before saving.</div>
+        <div id="plan-editor-status" role="status" aria-live="polite" data-i18n="Review the pristine plan before saving.">Review the pristine plan before saving.</div>
         <div class="plan-editor-actions">
-          <button id="plan-editor-cancel" type="button">Cancel</button>
-          <button id="plan-editor-save" class="primary" type="button" disabled>Save plan</button>
+          <button id="plan-editor-cancel" type="button" data-i18n="Cancel">Cancel</button>
+          <button id="plan-editor-save" class="primary" type="button" disabled data-i18n="Save plan">Save plan</button>
         </div>
       </div>
     </div>
@@ -181,17 +181,17 @@
     <div class="restore-dialog-shell">
       <div class="restore-dialog-header">
         <div>
-          <span class="restore-dialog-kicker">FILESYSTEM RESTORE / DANGEROUS</span>
-          <h1 id="restore-checkpoint-title">Restore managed workspace</h1>
-          <p id="restore-checkpoint-description">Review the exact checkpoint identity before restoring the managed worktree.</p>
+          <span class="restore-dialog-kicker" data-i18n="FILESYSTEM RESTORE / DANGEROUS">FILESYSTEM RESTORE / DANGEROUS</span>
+          <h1 id="restore-checkpoint-title" data-i18n="Restore managed workspace">Restore managed workspace</h1>
+          <p id="restore-checkpoint-description" data-i18n="Review the exact checkpoint identity before restoring the managed worktree.">Review the exact checkpoint identity before restoring the managed worktree.</p>
         </div>
       </div>
       <div class="restore-dialog-body">
-        <div id="restore-checkpoint-status" class="restore-dialog-status" role="status" aria-live="polite">Restore changes only the managed execution workspace.</div>
+        <div id="restore-checkpoint-status" class="restore-dialog-status" role="status" aria-live="polite" data-i18n="Restore changes only the managed execution workspace.">Restore changes only the managed execution workspace.</div>
       </div>
       <div class="restore-dialog-footer">
-        <button id="restore-checkpoint-cancel" type="button">Keep current workspace</button>
-        <button id="restore-checkpoint-confirm" class="danger-button" type="button">Restore filesystem</button>
+        <button id="restore-checkpoint-cancel" type="button" data-i18n="Keep current workspace">Keep current workspace</button>
+        <button id="restore-checkpoint-confirm" class="danger-button" type="button" data-i18n="Restore filesystem">Restore filesystem</button>
       </div>
     </div>
   </dialog>

@@ -1,6 +1,9 @@
+import { t, localizeDocument } from "./i18n.js";
 import { buildOnboardingInput, formatApiError, parseSessionImport, safePreviewUrl, summarizeOnboarding } from "./onboarding.js";
 import { addCommandArgument, addPlanStep, createPlanDraft, movePlanStep, removeCommandArgument, removePlanStep, toPlanInput, updateCommandArgument, updatePlanStep, validatePlanDraft } from "./plan-editor.js";
 import { renderAnnotationMarkdown } from "./annotation-markdown.js";
+
+localizeDocument(document);
 
 const state={sessions:[],sessionsRequest:0,openSessionRequest:0,active:null,activeGeneration:0,events:null,annotation:{request:0},annotationJump:{request:0},runtime:{sessionId:null,source:null,target:null,events:[],latestSequence:0,filter:"all",eventSource:null,requests:{source:0,target:0},pending:{source:false,target:false},refresh:{source:0,target:0}},sessionAction:{request:0,pending:false,sessionId:null},onboarding:{inspection:null,draft:null,recent:[],allowedRoot:"",inspectRequest:0,importRequest:0,recentRequest:0,creationRequest:0,dialogGeneration:0,creating:false},planEditor:{draft:null,sessionId:null,dialogGeneration:0,saveRequest:0,saving:false,stale:false,issues:[]},review:{sessionId:null,selectedAttemptId:null,selectedPath:"",diff:null,diffRequest:0,diffLoading:false,diffError:"",diffMode:"unified",diffSearch:"",cancel:{request:0,pending:false,sessionId:null,stepIndex:-1,attempt:null,requested:false},restore:{target:null,request:0,pending:false,trigger:null}}};
 const $=(selector)=>document.querySelector(selector);
@@ -42,16 +45,16 @@ function nextRunnableIndex(session){
   return session.steps.findIndex((step)=>["pending","failed","cancelled"].includes(step.status));
 }
 function runButtonLabel(session,index){
-  if(index<0)return"Plan completed";
-  return `${["failed","cancelled"].includes(session.steps[index].status)?"Retry":"Run"} step ${index+1}`;
+  if(index<0)return t("Plan completed");
+  return t`${["failed","cancelled"].includes(session.steps[index].status)?t("Retry"):t("Run")} step ${index+1}`;
 }
 function confirmationMessage(session,step,index){
   const command=step.action?.command?.join(" ");
   if(stepRisk(step)==="high"){
-    return `${["failed","cancelled"].includes(step.status)?"Retry":"Run"} high-risk migration step?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nRisk: high${command?`\nCommand: ${command}\nProject root: ${session.projectRoot}`:"\nObservation only"}\n\nProceed?`;
+    return t`${["failed","cancelled"].includes(step.status)?t("Retry"):t("Run")} high-risk migration step?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nRisk: high${command?t`\nCommand: ${command}\nProject root: ${session.projectRoot}`:t("\nObservation only")}\n\nProceed?`;
   }
-  if(command)return `Run this command?\n\n${command}\n\nin ${session.projectRoot}`;
-  return `Run step ${index+1}?`;
+  if(command)return t`Run this command?\n\n${command}\n\nin ${session.projectRoot}`;
+  return t`Run step ${index+1}?`;
 }
 function migrationAttempts(session){return Array.isArray(session?.attempts)?session.attempts:[];}
 function filesForAttempt(attempt){return Array.isArray(attempt?.snapshot?.files)?attempt.snapshot.files:[];}
@@ -84,7 +87,7 @@ function reviewCheckpointTarget(session,checkpointId){
     const initial=initialAttempt.baseline;
     return {
       checkpointId:"initial",
-      label:"Initial workspace base",
+      label:t("Initial workspace base"),
       oid:initial.oid,
       ref:initial.ref,
       executionRoot:session.workspace.executionRoot,
@@ -95,7 +98,7 @@ function reviewCheckpointTarget(session,checkpointId){
   if(!attempt)return null;
   return {
     checkpointId,
-    label:`Accepted result · Step ${attempt.stepIndex+1} · Attempt ${attempt.attempt}`,
+    label:t`Accepted result · Step ${attempt.stepIndex+1} · Attempt ${attempt.attempt}`,
     oid:attempt.result.oid,
     ref:attempt.result.ref,
     executionRoot:session.workspace.executionRoot,
@@ -176,12 +179,12 @@ function syncCancelState(session){
 }
 function prepareWorkspaceMessage(session){
   if(session.workspace){
-    return `Managed workspace ready.\n\nExecution workspace: ${session.workspace.executionRoot}\nCurrent checkpoint: ${session.workspace.currentCheckpointId??"initial"}\nBase OID: ${session.workspace.baseOid}`;
+    return t`Managed workspace ready.\n\nExecution workspace: ${session.workspace.executionRoot}\nCurrent checkpoint: ${session.workspace.currentCheckpointId??"initial"}\nBase OID: ${session.workspace.baseOid}`;
   }
-  return `Prepare isolated workspace before previews, retries, or filesystem restore.\n\nSource project: ${session.projectRoot}`;
+  return t`Prepare isolated workspace before previews, retries, or filesystem restore.\n\nSource project: ${session.projectRoot}`;
 }
 function retryConfirmationMessage(session,step,index,attempt){
-  return `Restore baseline and retry?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nAttempt: ${attempt.id}\nBaseline OID: ${attempt.baseline.oid}\nExecution root: ${session.workspace?.executionRoot??session.projectRoot}\n\nThe partial result remains as historical evidence.\nProceed?`;
+  return t`Restore baseline and retry?\n\nTarget: Step ${index+1} · ${step.title} [${step.id}]\nAttempt: ${attempt.id}\nBaseline OID: ${attempt.baseline.oid}\nExecution root: ${session.workspace?.executionRoot??session.projectRoot}\n\nThe partial result remains as historical evidence.\nProceed?`;
 }
 function setOnboardingStatus(message,kind=""){
   const status=$("#onboarding-status");
@@ -192,22 +195,22 @@ function setOnboardingStatus(message,kind=""){
 function clearOnboardingPreview(){
   state.onboarding.draft=null;
   $("#onboarding-create").disabled=true;
-  $("#onboarding-preview").innerHTML=`<p class="muted">Inspect a project and preview the normalized session before creation.</p>`;
+  $("#onboarding-preview").innerHTML=`<p class="muted">${t("Inspect a project and preview the normalized session before creation.")}</p>`;
 }
 
 function invalidateOnboardingPreview(){
   clearOnboardingPreview();
-  if(state.onboarding.inspection)setOnboardingStatus("Draft changed. Preview the safety gate again before creating.","warning");
+  if(state.onboarding.inspection)setOnboardingStatus(t("Draft changed. Preview the safety gate again before creating."),"warning");
 }
 
 function renderRecentProjects(){
   const container=$("#onboarding-recent");
   const recent=Array.isArray(state.onboarding.recent)?state.onboarding.recent:[];
-  if(!recent.length){container.innerHTML=`<span class="muted">No recent projects yet.</span>`;return;}
+  if(!recent.length){container.innerHTML=`<span class="muted">${t("No recent projects yet.")}</span>`;return;}
   container.innerHTML=recent.map((entry,index)=>{
-    const root=typeof entry?.projectRoot==="string"?entry.projectRoot:"Unknown path";
+    const root=typeof entry?.projectRoot==="string"?entry.projectRoot:t("Unknown path");
     const workbench=typeof entry?.workbench==="string"?entry.workbench:"unknown";
-    return `<button type="button" class="recent-project" data-index="${index}" ${state.onboarding.creating?"disabled":""}><span>${escapeHtml(root)}</span><small>${escapeHtml(workbench)}</small></button>`;
+    return `<button type="button" class="recent-project" data-index="${index}" ${state.onboarding.creating?"disabled":""}><span>${escapeHtml(root)}</span><small>${escapeHtml(t(workbench))}</small></button>`;
   }).join("");
   container.querySelectorAll(".recent-project").forEach((button)=>{
     button.onclick=()=>{
@@ -223,7 +226,7 @@ async function refreshRecentProjects(reportError=true){
   const generation=state.onboarding.dialogGeneration;
   const request=++state.onboarding.recentRequest;
   const container=$("#onboarding-recent");
-  container.innerHTML=`<span class="muted">Loading recent projects…</span>`;
+  container.innerHTML=`<span class="muted">${t("Loading recent projects…")}</span>`;
   try{
     const recent=await api("/api/projects/recent");
     if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return;
@@ -233,7 +236,7 @@ async function refreshRecentProjects(reportError=true){
     if(generation!==state.onboarding.dialogGeneration||request!==state.onboarding.recentRequest)return;
     state.onboarding.recent=[];
     container.innerHTML=`<span class="inline-error">${escapeHtml(error.message)}</span>`;
-    if(reportError&&!state.onboarding.creating&&$("#project-onboarding").open)setOnboardingStatus(`Could not load recent projects: ${error.message}`,"error");
+    if(reportError&&!state.onboarding.creating&&$("#project-onboarding").open)setOnboardingStatus(t`Could not load recent projects: ${error.message}`,"error");
   }
 }
 
@@ -255,7 +258,7 @@ function resetOnboarding(){
   $("#detection-warnings").replaceChildren();
   clearOnboardingPreview();
   setOnboardingCreating(state.onboarding.creating);
-  setOnboardingStatus(state.onboarding.creating?"Session creation is still in progress. You may close this dialog safely.":"Waiting for project inspection.",state.onboarding.creating?"loading":"");
+  setOnboardingStatus(state.onboarding.creating?t("Session creation is still in progress. You may close this dialog safely."):t("Waiting for project inspection."),state.onboarding.creating?"loading":"");
   renderRecentProjects();
 }
 
@@ -272,24 +275,24 @@ function renderInspection(inspection){
   const evidence=stringValues(inspection?.evidence);
   const warnings=stringValues(inspection?.warnings);
   const facts=[
-    ["Git",inspection?.git===true?"repository":"not detected"],
-    ["Package",typeof inspection?.packageManager==="string"?inspection.packageManager:"not detected"],
-    ["Languages",languages.join(", ")||"not detected"],
-    ["Frameworks",frameworks.join(", ")||"not detected"],
+    [t("Git"),inspection?.git===true?t("repository"):t("not detected")],
+    [t("Package"),typeof inspection?.packageManager==="string"?inspection.packageManager:t("not detected")],
+    [t("Languages"),languages.join(", ")||t("not detected")],
+    [t("Frameworks"),frameworks.join(", ")||t("not detected")],
   ];
   $("#detection-facts").innerHTML=facts.map(([label,value])=>`<span class="detection-chip"><small>${label}</small>${escapeHtml(value)}</span>`).join("");
-  $("#detection-evidence").innerHTML=evidence.length?`<strong>Evidence</strong><div>${evidence.map((item)=>`<code>${escapeHtml(item)}</code>`).join("")}</div>`:`<span class="muted">No manifest evidence detected.</span>`;
-  $("#detection-warnings").innerHTML=warnings.length?`<strong>Inspection warnings</strong><ul>${warnings.map((warning)=>`<li>${escapeHtml(warning)}</li>`).join("")}</ul>`:"";
+  $("#detection-evidence").innerHTML=evidence.length?`<strong>${t("Evidence")}</strong><div>${evidence.map((item)=>`<code>${escapeHtml(item)}</code>`).join("")}</div>`:`<span class="muted">${t("No manifest evidence detected.")}</span>`;
+  $("#detection-warnings").innerHTML=warnings.length?`<strong>${t("Inspection warnings")}</strong><ul>${warnings.map((warning)=>`<li>${escapeHtml(warning)}</li>`).join("")}</ul>`:"";
   $("#onboarding-detection").classList.remove("hidden");
 }
 
 function defaultSessionTitle(projectRoot){
-  return String(projectRoot??"").split(/[\\/]/).filter(Boolean).at(-1)||"Local project";
+  return String(projectRoot??"").split(/[\\/]/).filter(Boolean).at(-1)||t("Local project");
 }
 
 async function inspectOnboardingProject(projectRoot){
   const candidate=typeof projectRoot==="string"?projectRoot.trim():"";
-  if(!candidate){setOnboardingStatus("Enter a local project path to inspect.","error");return;}
+  if(!candidate){setOnboardingStatus(t("Enter a local project path to inspect."),"error");return;}
   const request=++state.onboarding.inspectRequest;
   state.onboarding.inspection=null;
   $("#onboarding-config").disabled=true;
@@ -297,7 +300,7 @@ async function inspectOnboardingProject(projectRoot){
   $("#onboarding-detection").classList.add("hidden");
   clearOnboardingPreview();
   $("#onboarding-inspect").disabled=true;
-  setOnboardingStatus("Inspecting project boundary…","loading");
+  setOnboardingStatus(t("Inspecting project boundary…"),"loading");
   try{
     const inspection=await api("/api/projects/inspect",{method:"POST",body:JSON.stringify({projectRoot:candidate})});
     if(request!==state.onboarding.inspectRequest)return;
@@ -306,7 +309,7 @@ async function inspectOnboardingProject(projectRoot){
     $("#onboarding-session-title").value=defaultSessionTitle(inspection.projectRoot);
     $("#onboarding-config").disabled=false;
     $("#onboarding-preview-action").disabled=false;
-    setOnboardingStatus("Inspection complete. Configure the session, then review the safety gate.","success");
+    setOnboardingStatus(t("Inspection complete. Configure the session, then review the safety gate."),"success");
   }catch(error){
     if(request!==state.onboarding.inspectRequest)return;
     setOnboardingStatus(error.message,"error");
@@ -331,8 +334,8 @@ function setOnboardingCreating(creating){
 
 function renderOnboardingPreview(input){
   const summary=summarizeOnboarding(input);
-  const rows=summary.steps.map((step,index)=>`<div class="plan-row"><div class="plan-index">${String(index+1).padStart(2,"0")}</div><div class="plan-detail"><strong>${escapeHtml(step.title)}</strong><code>${escapeHtml(step.command||"No command — observation only")}</code><small>cwd: ${escapeHtml(step.cwd)}</small></div><span class="impact impact-${step.impact==="project-changing"?"change":"observe"}">${escapeHtml(step.impact)}</span></div>`).join("")||`<div class="plan-empty">No plan steps imported. This session starts empty.</div>`;
-  $("#onboarding-preview").innerHTML=`<div class="safety-gate"><div><span class="gate-status">BOUNDARY VERIFIED</span><strong>Creation is inert</strong></div><p>Creating this session executes no commands.</p></div><dl class="normalized-session"><div><dt>Title</dt><dd>${escapeHtml(input.title)}</dd></div><div><dt>Workbench</dt><dd>${escapeHtml(input.workbench)}</dd></div><div><dt>Project root</dt><dd>${escapeHtml(input.projectRoot)}</dd></div><div><dt>Allowed root</dt><dd>${escapeHtml(state.onboarding.allowedRoot||"Unavailable")}</dd></div></dl><div class="plan-heading"><strong>Command &amp; observation manifest</strong><span>${summary.steps.length} item${summary.steps.length===1?"":"s"}</span></div><div class="plan-list">${rows}</div>`;
+  const rows=summary.steps.map((step,index)=>`<div class="plan-row"><div class="plan-index">${String(index+1).padStart(2,"0")}</div><div class="plan-detail"><strong>${escapeHtml(step.title)}</strong><code>${escapeHtml(step.command||t("No command — observation only"))}</code><small>${t`cwd: ${escapeHtml(step.cwd)}`}</small></div><span class="impact impact-${step.impact==="project-changing"?"change":"observe"}">${escapeHtml(t(step.impact))}</span></div>`).join("")||`<div class="plan-empty">${t("No plan steps imported. This session starts empty.")}</div>`;
+  $("#onboarding-preview").innerHTML=`<div class="safety-gate"><div><span class="gate-status">${t("BOUNDARY VERIFIED")}</span><strong>${t("Creation is inert")}</strong></div><p>${t("Creating this session executes no commands.")}</p></div><dl class="normalized-session"><div><dt>${t("Title")}</dt><dd>${escapeHtml(input.title)}</dd></div><div><dt>${t("Workbench")}</dt><dd>${escapeHtml(t(input.workbench))}</dd></div><div><dt>${t("Project root")}</dt><dd>${escapeHtml(input.projectRoot)}</dd></div><div><dt>${t("Allowed root")}</dt><dd>${escapeHtml(state.onboarding.allowedRoot||t("Unavailable"))}</dd></div></dl><div class="plan-heading"><strong>${t("Command &amp; observation manifest")}</strong><span>${t(summary.steps.length===1?"{0} item":"{0} items",summary.steps.length)}</span></div><div class="plan-list">${rows}</div>`;
 }
 
 function previewOnboarding(){
@@ -348,7 +351,7 @@ function previewOnboarding(){
     state.onboarding.draft=input;
     renderOnboardingPreview(input);
     $("#onboarding-create").disabled=false;
-    setOnboardingStatus("Safety gate reviewed. Session creation is unlocked.","success");
+    setOnboardingStatus(t("Safety gate reviewed. Session creation is unlocked."),"success");
   }catch(error){
     setOnboardingStatus(error.message,"error");
   }
@@ -362,7 +365,7 @@ async function createOnboardingSession(){
   const request=++state.onboarding.creationRequest;
   state.onboarding.recentRequest+=1;
   setOnboardingCreating(true);
-  setOnboardingStatus("Creating session without executing commands…","loading");
+  setOnboardingStatus(t("Creating session without executing commands…"),"loading");
   let session;
   let creationError;
   try{
@@ -374,7 +377,7 @@ async function createOnboardingSession(){
     if(generation!==state.onboarding.dialogGeneration&&request===state.onboarding.creationRequest)setOnboardingCreating(false);
   }
   if(generation!==state.onboarding.dialogGeneration){
-    if($("#project-onboarding").open)setOnboardingStatus(creationError?`Session creation failed: ${creationError.message}`:"Session created. You can inspect another project.",creationError?"error":"success");
+    if($("#project-onboarding").open)setOnboardingStatus(creationError?t`Session creation failed: ${creationError.message}`:t("Session created. You can inspect another project."),creationError?"error":"success");
     await Promise.allSettled([refreshSessions(),refreshRecentProjects(false)]);
     return;
   }
@@ -390,7 +393,7 @@ async function createOnboardingSession(){
     return;
   }
   $("#project-onboarding").close();
-  try{await openSession(session.id);}catch(error){$("#health").textContent=`session created; open failed: ${error.message}`;}
+  try{await openSession(session.id);}catch(error){$("#health").textContent=t`session created; open failed: ${error.message}`;}
 }
 function currentTrace(session){return session.currentSnapshot?.trace??session.steps[session.cursor]?.traceState??null;}
 function annotations(session){return (Array.isArray(session?.annotations)?session.annotations:[]).filter((note)=>note.stepIndex===session.cursor);}
@@ -401,20 +404,20 @@ function renderAnnotations(session){
   $("#notes").innerHTML=visible.map((annotation)=>{
     const kind=annotation.kind??"note";
     const tags=(Array.isArray(annotation.tags)?annotation.tags:[]).map((tag)=>`<span class="annotation-tag">${escapeHtml(tag)}</span>`).join("");
-    const jump=annotation.target?`<button type="button" class="annotation-jump" data-annotation-id="${escapeHtml(annotation.id)}">Open evidence</button>`:"";
-    return `<article class="note annotation-${escapeHtml(kind)}"><div class="annotation-markdown">${renderAnnotationMarkdown(annotation.text)}</div><footer><span>${escapeHtml(kind)}</span>${tags}<small>${annotation.createdAt?` · ${escapeHtml(new Date(annotation.createdAt).toLocaleString())}`:""}</small>${jump}</footer></article>`;
-  }).join("")||`<span class="muted">No notes for this step${filter?" and tag filter":""}.</span>`;
+    const jump=annotation.target?`<button type="button" class="annotation-jump" data-annotation-id="${escapeHtml(annotation.id)}">${t("Open evidence")}</button>`:"";
+    return `<article class="note annotation-${escapeHtml(kind)}"><div class="annotation-markdown">${renderAnnotationMarkdown(annotation.text)}</div><footer><span>${escapeHtml(t(kind))}</span>${tags}<small>${annotation.createdAt?` · ${escapeHtml(new Date(annotation.createdAt).toLocaleString())}`:""}</small>${jump}</footer></article>`;
+  }).join("")||`<span class="muted">${t`No notes for this step${filter?t(" and tag filter"):""}.`}</span>`;
 }
 
 function renderSessions(){
-  $("#sessions").innerHTML=state.sessions.map((session)=>`<button class="session-item ${state.active?.id===session.id?"active":""}" data-id="${session.id}">${escapeHtml(session.title)}<small>${session.workbench} · ${session.status}</small></button>`).join("")||`<span class="muted">No sessions yet.</span>`;
+  $("#sessions").innerHTML=state.sessions.map((session)=>`<button class="session-item ${state.active?.id===session.id?"active":""}" data-id="${session.id}">${escapeHtml(session.title)}<small>${escapeHtml(t(session.workbench))} · ${escapeHtml(t(session.status))}</small></button>`).join("")||`<span class="muted">${t("No sessions yet.")}</span>`;
   document.querySelectorAll(".session-item").forEach((button)=>button.onclick=()=>openSession(button.dataset.id));
 }
 
 function renderTimeline(session){
-  $("#timeline").innerHTML=session.steps.map((step,index)=>`<button title="${escapeHtml(step.traceKind?`${step.traceKind}: ${step.title}`:step.title)}" class="${step.status} trace-${escapeHtml(step.traceKind??"")} ${index===session.cursor?"current":""}" data-index="${index}" ${!session.snapshots[index]&&!step.traceState?"disabled":""}></button>`).join("");
+  $("#timeline").innerHTML=session.steps.map((step,index)=>`<button title="${escapeHtml(step.traceKind?`${t(step.traceKind)}: ${step.title}`:step.title)}" class="${step.status} trace-${escapeHtml(step.traceKind??"")} ${index===session.cursor?"current":""}" data-index="${index}" ${!session.snapshots[index]&&!step.traceState?"disabled":""}></button>`).join("");
   document.querySelectorAll("#timeline button:not(:disabled)").forEach((button)=>button.onclick=()=>handleSeek(Number(button.dataset.index)));
-  $("#step-counter").textContent=session.cursor<0?`Before start · ${session.steps.length} steps`:`Step ${session.cursor+1} of ${session.steps.length}`;
+  $("#step-counter").textContent=session.cursor<0?t`Before start · ${session.steps.length} steps`:t`Step ${session.cursor+1} of ${session.steps.length}`;
   $("#previous").disabled=session.cursor<=0;
   $("#next").disabled=session.cursor<0||session.cursor>=session.steps.length-1||(!session.snapshots[session.cursor+1]&&!session.steps[session.cursor+1]?.traceState);
   const lastRecorded=session.steps.reduce((last,step,index)=>(session.snapshots[index]||step.traceState)?index:last,-1);
@@ -426,15 +429,15 @@ function renderExecution(session){
   const trace=currentTrace(session)??{};
   const step=session.steps[session.cursor];
   const program=trace.program??[];
-  const unification=trace.unification?`<div class="goal"><strong>Unification ${trace.unification.succeeded?"succeeded":"failed"}</strong><div>${escapeHtml(trace.unification.goal)} ⇔ ${escapeHtml(trace.unification.head)}</div><div>Before: ${escapeHtml(JSON.stringify(trace.unification.before))}</div><div>After: ${escapeHtml(JSON.stringify(trace.unification.after))}</div></div>`:"";
-  const choicePoint=trace.choicePoint?`<div class="goal"><strong>Choice point: ${escapeHtml(trace.choicePoint.goal)}</strong>${trace.choicePoint.candidates.map((candidate)=>`<div>Line ${candidate.line}: ${escapeHtml(candidate.rule)}</div>`).join("")}</div>`:"";
-  const backtracking=trace.backtracking?`<div class="goal"><strong>Backtracking</strong><div>From: ${escapeHtml(trace.backtracking.fromRule)}</div><div>Reason: ${escapeHtml(trace.backtracking.reason)}</div></div>`:"";
-  $("#execution-view").innerHTML=`${step?.traceKind?`<div class="trace-heading trace-${escapeHtml(step.traceKind)}"><strong>${escapeHtml(step.traceKind)}</strong> ${escapeHtml(step.title)}${step.description?` · ${escapeHtml(step.description)}`:""}</div>`:""}<div class="grid-two"><section class="panel"><div class="panel-title">Program</div><div class="panel-body">${program.map((line,index)=>`<div class="code-line ${trace.currentLine===index+1?"active":""}">${String(index+1).padStart(2,"0")} ${escapeHtml(line)}</div>`).join("")||`<span class="muted">No program state</span>`}</div></section><section class="panel"><div class="panel-title">Stack, goals & evidence</div><div class="panel-body">${(trace.stack??[]).map((frame,index)=>`<div class="goal"><strong>R${(trace.stack.length-index)} ${escapeHtml(frame.rule)}</strong><div>Goals: ${escapeHtml((frame.goals??[]).join(", ")||"✓ complete")}</div><div>Bindings: ${escapeHtml(JSON.stringify(frame.bindings??{}))}</div></div>`).join("")}<p>Current goals: <strong>${escapeHtml((trace.goals??[]).join(", ")||"none")}</strong></p><p>Query bindings: <strong>${escapeHtml(JSON.stringify(trace.bindings??{}))}</strong></p>${unification}${choicePoint}${backtracking}${trace.failureReason?`<div class="goal"><strong>Failure: ${escapeHtml(trace.failureReason)}</strong></div>`:""}${trace.result?`<div class="result">Result: ${escapeHtml(trace.result)}</div>`:""}</div></section></div>`;
+  const unification=trace.unification?`<div class="goal"><strong>${t`Unification ${t(trace.unification.succeeded?"succeeded":"failed")}`}</strong><div>${escapeHtml(trace.unification.goal)} ⇔ ${escapeHtml(trace.unification.head)}</div><div>${t`Before: ${escapeHtml(JSON.stringify(trace.unification.before))}`}</div><div>${t`After: ${escapeHtml(JSON.stringify(trace.unification.after))}`}</div></div>`:"";
+  const choicePoint=trace.choicePoint?`<div class="goal"><strong>${t`Choice point: ${escapeHtml(trace.choicePoint.goal)}`}</strong>${trace.choicePoint.candidates.map((candidate)=>`<div>${t`Line ${candidate.line}: ${escapeHtml(candidate.rule)}`}</div>`).join("")}</div>`:"";
+  const backtracking=trace.backtracking?`<div class="goal"><strong>${t("Backtracking")}</strong><div>${t`From: ${escapeHtml(trace.backtracking.fromRule)}`}</div><div>${t`Reason: ${escapeHtml(trace.backtracking.reason)}`}</div></div>`:"";
+  $("#execution-view").innerHTML=`${step?.traceKind?`<div class="trace-heading trace-${escapeHtml(step.traceKind)}"><strong>${escapeHtml(t(step.traceKind))}</strong> ${escapeHtml(step.title)}${step.description?` · ${escapeHtml(step.description)}`:""}</div>`:""}<div class="grid-two"><section class="panel"><div class="panel-title">${t("Program")}</div><div class="panel-body">${program.map((line,index)=>`<div class="code-line ${trace.currentLine===index+1?"active":""}">${String(index+1).padStart(2,"0")} ${escapeHtml(line)}</div>`).join("")||`<span class="muted">${t("No program state")}</span>`}</div></section><section class="panel"><div class="panel-title">${t("Stack, goals & evidence")}</div><div class="panel-body">${(trace.stack??[]).map((frame,index)=>`<div class="goal"><strong>R${trace.stack.length-index} ${escapeHtml(frame.rule)}</strong><div>${t`Goals: ${escapeHtml((frame.goals??[]).join(", ")||t("✓ complete"))}`}</div><div>${t`Bindings: ${escapeHtml(JSON.stringify(frame.bindings??{}))}`}</div></div>`).join("")}<p>${t("Current goals:")} <strong>${escapeHtml((trace.goals??[]).join(", ")||t("none"))}</strong></p><p>${t("Query bindings:")} <strong>${escapeHtml(JSON.stringify(trace.bindings??{}))}</strong></p>${unification}${choicePoint}${backtracking}${trace.failureReason?`<div class="goal"><strong>${t`Failure: ${escapeHtml(trace.failureReason)}`}</strong></div>`:""}${trace.result?`<div class="result">${t`Result: ${escapeHtml(trace.result)}`}</div>`:""}</div></section></div>`;
 }
 
 function renderTree(snapshot){
   const changes=new Map((snapshot?.treeChanges??[]).map((change)=>[change.path,change.status]));
-  return (snapshot?.tree?.entries??[]).map((entry)=>`<div class="${entry.type} change-${changes.get(entry.path)??""}">${entry.type==="directory"?"▸":"·"} ${escapeHtml(entry.path)} ${changes.has(entry.path)?`[${changes.get(entry.path)}]`:""}</div>`).join("")||`<span class="muted">Run a step to capture the file tree.</span>`;
+  return (snapshot?.tree?.entries??[]).map((entry)=>`<div class="${entry.type} change-${changes.get(entry.path)??""}">${entry.type==="directory"?"▸":"·"} ${escapeHtml(entry.path)} ${changes.has(entry.path)?`[${changes.get(entry.path)}]`:""}</div>`).join("")||`<span class="muted">${t("Run a step to capture the file tree.")}</span>`;
 }
 
 function utf8Bytes(text){return new TextEncoder().encode(text).length;}
@@ -549,16 +552,16 @@ function previewRequiresWorkspace(session){
 }
 function previewCardContent(session,slot){
   const preview=previewDetails(session,slot);
-  const label=session.metadata[`${slot}Label`]??(slot==="source"?"Source":"Target");
-  const command=preview.config?.command?.join(" ")??"No preview service configured";
+  const label=session.metadata[`${slot}Label`]??(slot==="source"?t("Source"):t("Target"));
+  const command=preview.config?.command?.join(" ")??t("No preview service configured");
   const cwd=preview.config?.cwd??".";
   const pending=state.runtime.pending[slot];
   const unavailable=preview.state==="unconfigured";
   const active=["starting","running","stopping"].includes(preview.state);
   const needsWorkspace=previewRequiresWorkspace(session);
   const url=safePreviewUrl(preview.actualUrl);
-  const diagnostic=needsWorkspace?"Prepare workspace to enable managed previews.":preview.diagnostic??preview.error?.message??"No runtime diagnostic.";
-  return `<div class="panel-title preview-card-title"><span>${escapeHtml(label)}</span><span class="preview-status state-${escapeHtml(preview.state)}" role="status" aria-live="polite" aria-label="${slot==="source"?"Source":"Target"} preview status">${escapeHtml(preview.state)}</span></div><div class="preview-card-meta"><code>${escapeHtml(command)}</code><small>cwd: ${escapeHtml(cwd)}</small><small>${escapeHtml(diagnostic)}</small><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div><div class="preview-actions"><button type="button" data-preview-action="start" data-slot="${slot}" aria-label="Start ${slot} preview" ${needsWorkspace||pending||active||unavailable?"disabled":""}>Start</button><button type="button" data-preview-action="stop" data-slot="${slot}" aria-label="Stop ${slot} preview" ${needsWorkspace||pending||!active?"disabled":""}>Stop</button><button type="button" data-preview-action="restart" data-slot="${slot}" aria-label="Restart ${slot} preview" ${needsWorkspace||pending||unavailable?"disabled":""}>Restart</button><button type="button" data-preview-action="refresh" data-slot="${slot}" aria-label="Refresh ${slot} preview" ${url==="about:blank"?"disabled":""}>Refresh</button></div><iframe class="preview" data-preview="${slot}" title="${escapeHtml(label)} preview" sandbox="allow-scripts allow-forms" src="${escapeHtml(url)}"></iframe>`;
+  const diagnostic=needsWorkspace?t("Prepare workspace to enable managed previews."):preview.diagnostic??preview.error?.message??t("No runtime diagnostic.");
+  return `<div class="panel-title preview-card-title"><span>${escapeHtml(label)}</span><span class="preview-status state-${escapeHtml(preview.state)}" role="status" aria-live="polite" aria-label="${t`${slot==="source"?t("Source"):t("Target")} preview status`}">${escapeHtml(t(preview.state))}</span></div><div class="preview-card-meta"><code>${escapeHtml(command)}</code><small>${t`cwd: ${escapeHtml(cwd)}`}</small><small>${escapeHtml(diagnostic)}</small><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div><div class="preview-actions"><button type="button" data-preview-action="start" data-slot="${slot}" aria-label="${t`Start ${t(slot)} preview`}" ${needsWorkspace||pending||active||unavailable?"disabled":""}>${t("Start")}</button><button type="button" data-preview-action="stop" data-slot="${slot}" aria-label="${t`Stop ${t(slot)} preview`}" ${needsWorkspace||pending||!active?"disabled":""}>${t("Stop")}</button><button type="button" data-preview-action="restart" data-slot="${slot}" aria-label="${t`Restart ${t(slot)} preview`}" ${needsWorkspace||pending||unavailable?"disabled":""}>${t("Restart")}</button><button type="button" data-preview-action="refresh" data-slot="${slot}" aria-label="${t`Refresh ${t(slot)} preview`}" ${url==="about:blank"?"disabled":""}>${t("Refresh")}</button></div><iframe class="preview" data-preview="${slot}" title="${t`${escapeHtml(label)} preview`}" sandbox="allow-scripts allow-forms" src="${escapeHtml(url)}"></iframe>`;
 }
 function filteredTerminalEvents(session){
   const filter=state.runtime.filter;
@@ -569,9 +572,9 @@ function filteredTerminalEvents(session){
 }
 function terminalPanelContent(session){
   const events=filteredTerminalEvents(session);
-  const filters=[["all","All live output"],["source","Source preview"],["target","Target preview"],["step","Current step"]];
+  const filters=[["all",t("All live output")],["source",t("Source preview")],["target",t("Target preview")],["step",t("Current step")]];
   const lines=events.map((event)=>`<span class="terminal-line ${event.stream}"><span class="terminal-prefix">[${escapeHtml(event.source)}][${escapeHtml(event.stream)}]</span> ${escapeHtml(event.text)}</span>`).join("");
-  return `<div class="panel-title terminal-heading"><span>Live runtime output</span><span>${state.runtime.latestSequence?`SEQ ${state.runtime.latestSequence}`:"WAITING"}</span></div><div class="terminal-filters" role="group" aria-label="Filter live terminal output">${filters.map(([value,label])=>`<button type="button" data-terminal-filter="${value}" aria-pressed="${state.runtime.filter===value}">${label}</button>`).join("")}</div><div class="panel-body terminal" data-terminal-scroll><pre aria-label="Live runtime terminal output" aria-live="polite">${lines||"No live output for this filter."}</pre></div>`;
+  return `<div class="panel-title terminal-heading"><span>${t("Live runtime output")}</span><span>${state.runtime.latestSequence?t`SEQ ${state.runtime.latestSequence}`:t("WAITING")}</span></div><div class="terminal-filters" role="group" aria-label="${t("Filter live terminal output")}">${filters.map(([value,label])=>`<button type="button" data-terminal-filter="${value}" aria-pressed="${state.runtime.filter===value}">${label}</button>`).join("")}</div><div class="panel-body terminal" data-terminal-scroll><pre aria-label="${t("Live runtime terminal output")}" aria-live="polite">${lines||t("No live output for this filter.")}</pre></div>`;
 }
 function terminalPanel(session){
   return `<section class="panel live-terminal" data-runtime-terminal>${terminalPanelContent(session)}</section>`;
@@ -778,51 +781,51 @@ function pairedHunkRows(diff){
 function renderUnifiedDiff(diff,search){
   if(hasStructuredHunkLines(diff)){
     const rendered=renderReviewRows(unifiedHunkRows(diff),diff.path,search);
-    return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${rendered.html}</pre></div>${rendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+    return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${rendered.html}</pre></div>${rendered.limited?`<div class="review-truncated"><strong>${t`Rendered first ${reviewRenderLineLimit} lines.`}</strong>${t("Open the file externally if you need the full patch body.")}</div>`:""}`;
   }
   const oldText=String(diff.old?.text??"");
   const newText=String(diff.new?.text??"");
   const oldRendered=renderReviewText(oldText,diff.oldPath??diff.path,search);
   const newRendered=renderReviewText(newText,diff.newPath??diff.path,search);
   const limited=oldRendered.limited||newRendered.limited;
-  return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${oldRendered.html}${newRendered.html}</pre></div>${limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+  return `<div class="review-unified"><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.path))}">${oldRendered.html}${newRendered.html}</pre></div>${limited?`<div class="review-truncated"><strong>${t`Rendered first ${reviewRenderLineLimit} lines.`}</strong>${t("Open the file externally if you need the full patch body.")}</div>`:""}`;
 }
 function renderSideBySideDiff(diff,search){
   if(hasStructuredHunkLines(diff)){
     const {oldRows,newRows}=pairedHunkRows(diff);
     const oldRendered=renderReviewRows(oldRows,diff.oldPath??diff.path,search);
     const newRendered=renderReviewRows(newRows,diff.newPath??diff.path,search);
-    return `<div class="review-side-by-side"><section><div class="review-pane-title">Baseline</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">Result</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+    return `<div class="review-side-by-side"><section><div class="review-pane-title">${t("Baseline")}</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">${t("Result")}</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>${t`Rendered first ${reviewRenderLineLimit} lines.`}</strong>${t("Open the file externally if you need the full patch body.")}</div>`:""}`;
   }
   const oldRendered=renderReviewText(diff.old?.text??"",diff.oldPath??diff.path,search);
   const newRendered=renderReviewText(diff.new?.text??"",diff.newPath??diff.path,search);
-  return `<div class="review-side-by-side"><section><div class="review-pane-title">Baseline</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">Result</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>Rendered first ${reviewRenderLineLimit} lines.</strong>Open the file externally if you need the full patch body.</div>`:""}`;
+  return `<div class="review-side-by-side"><section><div class="review-pane-title">${t("Baseline")}</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.oldPath??diff.path))}">${oldRendered.html}</pre></section><section><div class="review-pane-title">${t("Result")}</div><pre class="review-code syntax-demo-${escapeHtml(reviewLanguage(diff.newPath??diff.path))}">${newRendered.html}</pre></section></div>${oldRendered.limited||newRendered.limited?`<div class="review-truncated"><strong>${t`Rendered first ${reviewRenderLineLimit} lines.`}</strong>${t("Open the file externally if you need the full patch body.")}</div>`:""}`;
 }
 function reviewFilesMarkup(attempt){
   const files=filesForAttempt(attempt);
-  if(!files.length)return`<div class="review-empty">No changed files were captured for this attempt.</div>`;
+  if(!files.length)return`<div class="review-empty">${t("No changed files were captured for this attempt.")}</div>`;
   return `<div class="review-files" aria-labelledby="review-files-status">${files.map((entry)=>{
     const selected=entry.path===state.review.selectedPath&&attempt.id===state.review.selectedAttemptId;
     const rename=entry.oldPath&&entry.oldPath!==entry.path?`${entry.oldPath} → ${entry.path}`:entry.path;
-    return `<button type="button" class="review-file" data-review-attempt-id="${escapeHtml(attempt.id)}" data-review-path="${escapeHtml(entry.path)}" aria-pressed="${selected}"><span><strong class="review-file-path">${escapeHtml(rename)}</strong><span class="review-file-meta">${escapeHtml(entry.status)} · +${escapeHtml(entry.additions)} / -${escapeHtml(entry.deletions)}</span></span><span class="step-pill ${escapeHtml(entry.status)}">${escapeHtml(entry.status)}</span></button>`;
+    return `<button type="button" class="review-file" data-review-attempt-id="${escapeHtml(attempt.id)}" data-review-path="${escapeHtml(entry.path)}" aria-pressed="${selected}"><span><strong class="review-file-path">${escapeHtml(rename)}</strong><span class="review-file-meta">${escapeHtml(t(entry.status))} · +${escapeHtml(entry.additions)} / -${escapeHtml(entry.deletions)}</span></span><span class="step-pill ${escapeHtml(entry.status)}">${escapeHtml(t(entry.status))}</span></button>`;
   }).join("")}</div>`;
 }
 function reviewDiffMarkup(attempt){
   const selectedPath=state.review.selectedPath;
   const selected=filesForAttempt(attempt).find((entry)=>entry.path===selectedPath);
   const activeDiff=state.review.diff&&state.review.diff.attemptId===attempt.id&&state.review.diff.path===selectedPath?state.review.diff:null;
-  const modeButtons=`<div class="review-diff-modes"><button type="button" data-diff-mode="unified" aria-pressed="${state.review.diffMode==="unified"}">Unified</button><button type="button" data-diff-mode="side-by-side" aria-pressed="${state.review.diffMode==="side-by-side"}">Side-by-side</button></div>`;
-  if(!selected)return `<div class="review-diff" aria-labelledby="review-diff-status"><div class="review-diff-toolbar"><span id="review-diff-status" tabindex="-1">Review diff</span>${modeButtons}</div><div class="review-empty">Select one changed file to load its bounded diff.</div></div>`;
-  let body=`<div class="review-loading">Select a changed file to inspect diff evidence.</div>`;
-  if(state.review.diffLoading&&state.review.selectedAttemptId===attempt.id)body=`<div class="review-loading">Loading diff evidence for ${escapeHtml(selected.path)}…</div>`;
+  const modeButtons=`<div class="review-diff-modes"><button type="button" data-diff-mode="unified" aria-pressed="${state.review.diffMode==="unified"}">${t("Unified")}</button><button type="button" data-diff-mode="side-by-side" aria-pressed="${state.review.diffMode==="side-by-side"}">${t("Side-by-side")}</button></div>`;
+  if(!selected)return `<div class="review-diff" aria-labelledby="review-diff-status"><div class="review-diff-toolbar"><span id="review-diff-status" tabindex="-1">${t("Review diff")}</span>${modeButtons}</div><div class="review-empty">${t("Select one changed file to load its bounded diff.")}</div></div>`;
+  let body=`<div class="review-loading">${t("Select a changed file to inspect diff evidence.")}</div>`;
+  if(state.review.diffLoading&&state.review.selectedAttemptId===attempt.id)body=`<div class="review-loading">${t`Loading diff evidence for ${escapeHtml(selected.path)}…`}</div>`;
   else if(state.review.diffError&&state.review.selectedAttemptId===attempt.id)body=`<div class="review-error">${escapeHtml(state.review.diffError)}</div>`;
-  else if(activeDiff?.binary)body=`<div class="review-binary"><strong>Binary file</strong>${escapeHtml(selected.path)} cannot be rendered inline.</div>`;
+  else if(activeDiff?.binary)body=`<div class="review-binary"><strong>${t("Binary file")}</strong>${t`${escapeHtml(selected.path)} cannot be rendered inline.`}</div>`;
   else if(activeDiff){
     const search=state.review.diffSearch.trim();
     const rendered=state.review.diffMode==="side-by-side"?renderSideBySideDiff(activeDiff,search):renderUnifiedDiff(activeDiff,search);
-    body=`${activeDiff.truncated?`<div class="review-truncated"><strong>Server response truncated.</strong>Inspect the bounded text below or open the file externally.</div>`:""}${rendered}`;
+    body=`${activeDiff.truncated?`<div class="review-truncated"><strong>${t("Server response truncated.")}</strong>${t("Inspect the bounded text below or open the file externally.")}</div>`:""}${rendered}`;
   }
-  return `<div class="review-diff" aria-labelledby="review-diff-status"><div class="review-diff-toolbar"><label for="review-diff-search"><span id="review-diff-status" tabindex="-1">Review diff</span><input id="review-diff-search" type="search" value="${escapeHtml(state.review.diffSearch)}" placeholder="Search loaded diff"></label>${modeButtons}</div>${body}</div>`;
+  return `<div class="review-diff" aria-labelledby="review-diff-status"><div class="review-diff-toolbar"><label for="review-diff-search"><span id="review-diff-status" tabindex="-1">${t("Review diff")}</span><input id="review-diff-search" type="search" value="${escapeHtml(state.review.diffSearch)}" placeholder="${t("Search loaded diff")}"></label>${modeButtons}</div>${body}</div>`;
 }
 function workspaceMarkup(session,attempt){
   const restoreCurrent=reviewCheckpointTarget(session,"initial");
@@ -830,10 +833,10 @@ function workspaceMarkup(session,attempt){
   const runningIndex=session.steps.findIndex((step)=>step.status==="running");
   const runningStep=runningIndex===-1?null:session.steps[runningIndex];
   const cancelling=state.review.cancel.sessionId===session.id&&state.review.cancel.stepIndex===runningIndex&&(state.review.cancel.pending||state.review.cancel.requested);
-  return `<section class="panel workspace-panel"><div class="panel-title">Workspace identity</div><div class="panel-body workspace-identity" aria-labelledby="workspace-status"><div id="workspace-status" class="workspace-alert ${session.workspace?"workspace-ready":""}"><strong>${session.workspace?"Execution workspace ready":"Workspace not prepared"}</strong>${escapeHtml(prepareWorkspaceMessage(session))}</div><dl class="workspace-grid"><div><dt>Source project</dt><dd>${escapeHtml(session.projectRoot)}</dd></div><div><dt>Execution workspace</dt><dd>${escapeHtml(session.workspace?.executionRoot??"Not prepared")}</dd></div><div><dt>Current checkpoint</dt><dd>${escapeHtml(session.workspace?.currentCheckpointId??"initial")}</dd></div><div><dt>Base OID</dt><dd>${escapeHtml(session.workspace?.baseOid??"Unavailable")}</dd></div></dl><div class="workspace-actions">${restoreCurrent?`<button type="button" class="danger-button" data-restore-checkpoint-id="initial">Restore initial filesystem</button>`:""}${restoreAccepted&&restoreAccepted.checkpointId!=="initial"?`<button type="button" class="danger-button" data-restore-checkpoint-id="${escapeHtml(restoreAccepted.checkpointId)}">Restore accepted filesystem</button>`:""}</div>${runningStep?`<div class="step-actions"><button type="button" class="cancel-step" data-step-action="cancel" data-step-index="${runningIndex}" ${cancelling?"disabled":""}>${cancelling?`Cancellation requested for attempt ${escapeHtml(stepAttempt(runningStep))}`:`Request cancel attempt ${escapeHtml(stepAttempt(runningStep))}`}</button></div>`:""}</div></section>`;
+  return `<section class="panel workspace-panel"><div class="panel-title">${t("Workspace identity")}</div><div class="panel-body workspace-identity" aria-labelledby="workspace-status"><div id="workspace-status" class="workspace-alert ${session.workspace?"workspace-ready":""}"><strong>${session.workspace?t("Execution workspace ready"):t("Workspace not prepared")}</strong>${escapeHtml(prepareWorkspaceMessage(session))}</div><dl class="workspace-grid"><div><dt>${t("Source project")}</dt><dd>${escapeHtml(session.projectRoot)}</dd></div><div><dt>${t("Execution workspace")}</dt><dd>${escapeHtml(session.workspace?.executionRoot??t("Not prepared"))}</dd></div><div><dt>${t("Current checkpoint")}</dt><dd>${escapeHtml(session.workspace?.currentCheckpointId??"initial")}</dd></div><div><dt>${t("Base OID")}</dt><dd>${escapeHtml(session.workspace?.baseOid??t("Unavailable"))}</dd></div></dl><div class="workspace-actions">${restoreCurrent?`<button type="button" class="danger-button" data-restore-checkpoint-id="initial">${t("Restore initial filesystem")}</button>`:""}${restoreAccepted&&restoreAccepted.checkpointId!=="initial"?`<button type="button" class="danger-button" data-restore-checkpoint-id="${escapeHtml(restoreAccepted.checkpointId)}">${t("Restore accepted filesystem")}</button>`:""}</div>${runningStep?`<div class="step-actions"><button type="button" class="cancel-step" data-step-action="cancel" data-step-index="${runningIndex}" ${cancelling?"disabled":""}>${cancelling?t`Cancellation requested for attempt ${escapeHtml(stepAttempt(runningStep))}`:t`Request cancel attempt ${escapeHtml(stepAttempt(runningStep))}`}</button></div>`:""}</div></section>`;
 }
 function historicalCommandMarkup(command){
-  if(!command)return"No command executed at this checkpoint.";
+  if(!command)return t("No command executed at this checkpoint.");
   const heading=`$ ${escapeHtml(command.command?.join(" ")??"")}`;
   const streams=["stdout","stderr"].flatMap((stream)=>{
     const output=command[stream];
@@ -847,7 +850,7 @@ function historicalCommandMarkup(command){
 function renderMigration(session){
   const attempt=syncReviewSelection(session);
   const command=attempt?.snapshot?.command??session.currentSnapshot?.command;
-  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">Migration plan</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):"Observation step"}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(step.status.replaceAll("_"," "))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">Risk: ${escapeHtml(stepRisk(step))}</span></div><div class="step-meta"><span class="step-attempt">Attempt ${escapeHtml(stepAttempt(step))}</span></div><div class="step-dependencies"><strong>Depends on:</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):"none")}</div></div>`;}).join("")}</div></section><div class="preview-workspace">${previewCard(session,"source")}${previewCard(session,"target")}${terminalPanel(session)}</div>${workspaceMarkup(session,attempt)}<section class="panel review-files-panel"><div class="panel-title" id="review-files-status" tabindex="-1">Changed files</div><div class="panel-body">${attempt?reviewFilesMarkup(attempt):`<div class="review-empty">No attempt evidence is selected at this checkpoint.</div>`}</div></section><section class="panel review-diff-panel"><div class="panel-title">Diff evidence</div><div class="panel-body">${attempt?reviewDiffMarkup(attempt):`<div class="review-empty">Run a migration step to capture per-file diff evidence.</div>`}</div></section><section class="panel history-terminal"><div class="panel-title" id="historical-command-output" tabindex="-1">Historical command output</div><div class="panel-body terminal"><pre>${historicalCommandMarkup(command)}</pre></div></section></div>`;
+  $("#migration-view").innerHTML=`<div class="migration-grid"><section class="panel steps-panel"><div class="panel-title">${t("Migration plan")}</div><div class="panel-body">${session.steps.map((step,index)=>{const dependencies=stepDependencies(step);return `<div class="step ${step.status} ${index===session.cursor?"current":""}"><strong>${index+1}. ${escapeHtml(step.title)}</strong><small>${escapeHtml(step.description)}</small><small>${step.action?escapeHtml(step.action.command.join(" ")):t("Observation step")}</small><div class="step-status-row"><span class="step-id">${escapeHtml(step.id??`step-${index+1}`)}</span><span class="step-pill ${escapeHtml(step.status)}">${escapeHtml(t(step.status.replaceAll("_"," ")))}</span><span class="step-pill risk-pill risk-${escapeHtml(stepRisk(step))}">${t`Risk: ${escapeHtml(t(stepRisk(step)))}`}</span></div><div class="step-meta"><span class="step-attempt">${t`Attempt ${escapeHtml(stepAttempt(step))}`}</span></div><div class="step-dependencies"><strong>${t("Depends on:")}</strong> ${escapeHtml(dependencies.length?dependencies.join(", "):t("none"))}</div></div>`;}).join("")}</div></section><div class="preview-workspace">${previewCard(session,"source")}${previewCard(session,"target")}${terminalPanel(session)}</div>${workspaceMarkup(session,attempt)}<section class="panel review-files-panel"><div class="panel-title" id="review-files-status" tabindex="-1">${t("Changed files")}</div><div class="panel-body">${attempt?reviewFilesMarkup(attempt):`<div class="review-empty">${t("No attempt evidence is selected at this checkpoint.")}</div>`}</div></section><section class="panel review-diff-panel"><div class="panel-title">${t("Diff evidence")}</div><div class="panel-body">${attempt?reviewDiffMarkup(attempt):`<div class="review-empty">${t("Run a migration step to capture per-file diff evidence.")}</div>`}</div></section><section class="panel history-terminal"><div class="panel-title" id="historical-command-output" tabindex="-1">${t("Historical command output")}</div><div class="panel-body terminal"><pre>${historicalCommandMarkup(command)}</pre></div></section></div>`;
   const reviewDiffSearch=$("#review-diff-search");
   if(reviewDiffSearch)reviewDiffSearch.value=state.review.diffSearch;
 }
@@ -868,7 +871,7 @@ function renderReviewControls(session){
   $("#review-reject").disabled=reviewIndex===-1||actionPending||historical;
   $("#review-return-current").hidden=!historical;
   $("#review-evidence-warning").hidden=!historical;
-  $("#review-evidence-warning").textContent=historical?"Historical evidence is selected. Return to the current attempt before accepting or rejecting.":"";
+  $("#review-evidence-warning").textContent=historical?t("Historical evidence is selected. Return to the current attempt before accepting or rejecting."):"";
   if(historical){
     $("#review-accept").setAttribute("aria-describedby","review-evidence-warning");
     $("#review-reject").setAttribute("aria-describedby","review-evidence-warning");
@@ -877,8 +880,8 @@ function renderReviewControls(session){
     $("#review-reject").removeAttribute("aria-describedby");
   }
   if(reviewIndex!==-1){
-    $("#review-accept").textContent=`Accept step ${reviewIndex+1}`;
-    $("#review-reject").textContent=`Reject step ${reviewIndex+1}`;
+    $("#review-accept").textContent=t`Accept step ${reviewIndex+1}`;
+    $("#review-reject").textContent=t`Reject step ${reviewIndex+1}`;
   }
 }
 
@@ -903,10 +906,10 @@ function syncPlanEditorValidation({preserveStatus=false}={}){
   $("#plan-editor-steps").querySelectorAll("[data-error-path]").forEach((element)=>{element.textContent=planIssue(element.dataset.errorPath);});
   $("#plan-editor-save").disabled=state.planEditor.saving||state.planEditor.stale||state.planEditor.issues.length>0;
   if(preserveStatus){status.textContent=previousStatus;status.className=previousClass;}
-  else if(state.planEditor.saving){status.textContent="Saving plan without executing commands…";status.className="loading";}
-  else if(state.planEditor.stale){status.textContent="Server state changed. This draft can no longer be saved.";status.className="error";}
-  else if(state.planEditor.issues.length){status.textContent=`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
-  else{status.textContent="Ready to save. No commands will be executed.";status.className="";}
+  else if(state.planEditor.saving){status.textContent=t("Saving plan without executing commands…");status.className="loading";}
+  else if(state.planEditor.stale){status.textContent=t("Server state changed. This draft can no longer be saved.");status.className="error";}
+  else if(state.planEditor.issues.length){status.textContent=t`Fix ${state.planEditor.issues[0].path}: ${state.planEditor.issues[0].message}`;status.className="error";}
+  else{status.textContent=t("Ready to save. No commands will be executed.");status.className="";}
 }
 
 function renderPlanEditor({preserveStatus=false}={}){
@@ -916,12 +919,12 @@ function renderPlanEditor({preserveStatus=false}={}){
   const locked=state.planEditor.saving;
   const last=draft.steps.length-1;
   $("#plan-editor-steps").innerHTML=draft.steps.map((step,index)=>{
-    const title=step.title.trim()||`Untitled step ${index+1}`;
-    const argv=step.command.map((argument,argumentIndex)=>`<div class="plan-argv-row"><input type="text" data-field="argument" data-step-index="${index}" data-argument-index="${argumentIndex}" value="${escapeHtml(argument)}" aria-label="Argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}><button type="button" class="plan-remove" data-action="remove-argument" data-step-index="${index}" data-argument-index="${argumentIndex}" aria-label="Remove argument ${argumentIndex+1}" ${locked||!step.actionEnabled?"disabled":""}>Remove</button>${inlinePlanError(`/steps/${index}/action/command/${argumentIndex}`)}</div>`).join("");
-    const dependencyChoices=draft.steps.slice(0,index).map((candidate,candidateIndex)=>`<label><input type="checkbox" data-field="dependsOn" data-step-index="${index}" data-dependency-id="${escapeHtml(candidate.id)}" ${step.dependsOn.includes(candidate.id)?"checked":""} ${locked?"disabled":""}> <span>${escapeHtml(candidate.title.trim()||`Untitled step ${candidateIndex+1}`)} <code>${escapeHtml(candidate.id)}</code></span></label>`).join("");
+    const title=step.title.trim()||t`Untitled step ${index+1}`;
+    const argv=step.command.map((argument,argumentIndex)=>`<div class="plan-argv-row"><input type="text" data-field="argument" data-step-index="${index}" data-argument-index="${argumentIndex}" value="${escapeHtml(argument)}" aria-label="${t`Argument ${argumentIndex+1}`}" ${locked||!step.actionEnabled?"disabled":""}><button type="button" class="plan-remove" data-action="remove-argument" data-step-index="${index}" data-argument-index="${argumentIndex}" aria-label="${t`Remove argument ${argumentIndex+1}`}" ${locked||!step.actionEnabled?"disabled":""}>${t("Remove")}</button>${inlinePlanError(`/steps/${index}/action/command/${argumentIndex}`)}</div>`).join("");
+    const dependencyChoices=draft.steps.slice(0,index).map((candidate,candidateIndex)=>`<label><input type="checkbox" data-field="dependsOn" data-step-index="${index}" data-dependency-id="${escapeHtml(candidate.id)}" ${step.dependsOn.includes(candidate.id)?"checked":""} ${locked?"disabled":""}> <span>${escapeHtml(candidate.title.trim()||t`Untitled step ${candidateIndex+1}`)} <code>${escapeHtml(candidate.id)}</code></span></label>`).join("");
     const dependencyIssues=planDependencyIssues(index).map((issue)=>`<span class="inline-error" data-error-path="${issue.path}">${escapeHtml(planIssue(issue.path))}</span>`).join("");
-    return `<details class="plan-step" open><summary><span class="plan-step-index">${String(index+1).padStart(2,"0")}</span><span class="plan-step-title">${escapeHtml(title)}</span></summary><div class="plan-step-content"><div class="plan-step-actions"><button type="button" data-action="move-up" data-step-index="${index}" aria-label="Move step ${index+1} up" ${locked||index===0?"disabled":""}>↑</button><button type="button" data-action="move-down" data-step-index="${index}" aria-label="Move step ${index+1} down" ${locked||index===last?"disabled":""}>↓</button><button type="button" class="plan-remove" data-action="remove-step" data-step-index="${index}" ${locked?"disabled":""}>Delete</button></div><div class="plan-step-metadata"><div class="plan-risk-grid"><label>Step ID<input type="text" value="${escapeHtml(step.id)}" readonly aria-readonly="true" aria-label="Step ID ${index+1}"></label><label>Risk<select data-field="risk" data-step-index="${index}" ${locked?"disabled":""}><option value="low" ${stepRisk(step)==="low"?"selected":""}>Low</option><option value="medium" ${stepRisk(step)==="medium"?"selected":""}>Medium</option><option value="high" ${stepRisk(step)==="high"?"selected":""}>High</option></select>${inlinePlanError(`/steps/${index}/risk`)}</label></div><fieldset class="plan-dependency-fieldset"><legend class="field-label">Depends on earlier steps</legend><div class="plan-dependency-list">${dependencyChoices||`<span class="plan-dependency-hint">No earlier steps yet.</span>`}</div><div class="plan-dependency-issues">${dependencyIssues}</div></fieldset></div><div class="plan-field-grid"><label>Title<input type="text" data-field="title" data-step-index="${index}" value="${escapeHtml(step.title)}" ${locked?"disabled":""}>${inlinePlanError(`/steps/${index}/title`)}</label><label>Description<textarea data-field="description" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.description)}</textarea>${inlinePlanError(`/steps/${index}/description`)}</label><label class="plan-field-wide">Expected result<textarea data-field="expected" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.expected)}</textarea>${inlinePlanError(`/steps/${index}/expected`)}</label></div><label class="plan-action-toggle"><input type="checkbox" data-field="actionEnabled" data-step-index="${index}" ${step.actionEnabled?"checked":""} ${locked?"disabled":""}> Run a command for this step</label><div class="plan-action-fields" ${step.actionEnabled?"":`aria-disabled="true"`}><div class="plan-argv-list">${argv||`<span class="muted">No arguments yet.</span>`}</div>${inlinePlanError(`/steps/${index}/action/command`)}<button type="button" data-action="add-argument" data-step-index="${index}" ${locked||!step.actionEnabled?"disabled":""}>+ Add argument</button><label>Working directory<input type="text" data-field="cwd" data-step-index="${index}" value="${escapeHtml(step.cwd)}" ${locked||!step.actionEnabled?"disabled":""}>${inlinePlanError(`/steps/${index}/action/cwd`)}</label></div></div></details>`;
-  }).join("")||`<div class="plan-empty">No plan steps. Add one or save an empty plan.</div>`;
+    return `<details class="plan-step" open><summary><span class="plan-step-index">${String(index+1).padStart(2,"0")}</span><span class="plan-step-title">${escapeHtml(title)}</span></summary><div class="plan-step-content"><div class="plan-step-actions"><button type="button" data-action="move-up" data-step-index="${index}" aria-label="${t`Move step ${index+1} up`}" ${locked||index===0?"disabled":""}>↑</button><button type="button" data-action="move-down" data-step-index="${index}" aria-label="${t`Move step ${index+1} down`}" ${locked||index===last?"disabled":""}>↓</button><button type="button" class="plan-remove" data-action="remove-step" data-step-index="${index}" ${locked?"disabled":""}>${t("Delete")}</button></div><div class="plan-step-metadata"><div class="plan-risk-grid"><label>${t("Step ID")}<input type="text" value="${escapeHtml(step.id)}" readonly aria-readonly="true" aria-label="${t`Step ID ${index+1}`}"></label><label>${t("Risk")}<select data-field="risk" data-step-index="${index}" ${locked?"disabled":""}><option value="low" ${stepRisk(step)==="low"?"selected":""}>${t("Low")}</option><option value="medium" ${stepRisk(step)==="medium"?"selected":""}>${t("Medium")}</option><option value="high" ${stepRisk(step)==="high"?"selected":""}>${t("High")}</option></select>${inlinePlanError(`/steps/${index}/risk`)}</label></div><fieldset class="plan-dependency-fieldset"><legend class="field-label">${t("Depends on earlier steps")}</legend><div class="plan-dependency-list">${dependencyChoices||`<span class="plan-dependency-hint">${t("No earlier steps yet.")}</span>`}</div><div class="plan-dependency-issues">${dependencyIssues}</div></fieldset></div><div class="plan-field-grid"><label>${t("Title")}<input type="text" data-field="title" data-step-index="${index}" value="${escapeHtml(step.title)}" ${locked?"disabled":""}>${inlinePlanError(`/steps/${index}/title`)}</label><label>${t("Description")}<textarea data-field="description" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.description)}</textarea>${inlinePlanError(`/steps/${index}/description`)}</label><label class="plan-field-wide">${t("Expected result")}<textarea data-field="expected" data-step-index="${index}" ${locked?"disabled":""}>${escapeHtml(step.expected)}</textarea>${inlinePlanError(`/steps/${index}/expected`)}</label></div><label class="plan-action-toggle"><input type="checkbox" data-field="actionEnabled" data-step-index="${index}" ${step.actionEnabled?"checked":""} ${locked?"disabled":""}> ${t("Run a command for this step")}</label><div class="plan-action-fields" ${step.actionEnabled?"":`aria-disabled="true"`}><div class="plan-argv-list">${argv||`<span class="muted">${t("No arguments yet.")}</span>`}</div>${inlinePlanError(`/steps/${index}/action/command`)}<button type="button" data-action="add-argument" data-step-index="${index}" ${locked||!step.actionEnabled?"disabled":""}>${t("+ Add argument")}</button><label>${t("Working directory")}<input type="text" data-field="cwd" data-step-index="${index}" value="${escapeHtml(step.cwd)}" ${locked||!step.actionEnabled?"disabled":""}>${inlinePlanError(`/steps/${index}/action/cwd`)}</label></div></div></details>`;
+  }).join("")||`<div class="plan-empty">${t("No plan steps. Add one or save an empty plan.")}</div>`;
   $("#plan-editor-add").disabled=locked;
   $("#plan-editor-cancel").disabled=false;
   syncPlanEditorValidation({preserveStatus});
@@ -974,7 +977,7 @@ async function savePlan(){
   if(saveError){renderPlanEditor();$("#plan-editor-status").textContent=saveError.message;$("#plan-editor-status").className="error";return;}
   renderSession(session);
   closePlanEditor();
-  refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+  refreshSessions().catch((error)=>{$("#health").textContent=t`session list refresh failed: ${error.message}`;});
 }
 
 function renderSession(session){
@@ -991,18 +994,18 @@ function renderSession(session){
   }
   $("#empty").classList.add("hidden");$("#workbench").classList.remove("hidden");
   $("#session-title").textContent=session.title;$("#session-path").textContent=session.projectRoot;
-  $("#workbench-badge").textContent=session.workbench==="execution"?"EXECUTION EXPLORER":"MIGRATION CENTER";
-  $("#session-status").textContent=session.status;
+  $("#workbench-badge").textContent=session.workbench==="execution"?t("EXECUTION EXPLORER"):t("MIGRATION CENTER");
+  $("#session-status").textContent=t(session.status);
   const editPlan=$("#edit-plan");
   const prepareWorkspace=$("#prepare-workspace");
   prepareWorkspace.hidden=session.workbench!=="migration";
   prepareWorkspace.disabled=state.sessionAction.pending||Boolean(session.workspace);
-  prepareWorkspace.textContent=session.workspace?"Workspace prepared":"Prepare workspace";
+  prepareWorkspace.textContent=session.workspace?t("Workspace prepared"):t("Prepare workspace");
   editPlan.hidden=session.workbench!=="migration";
   editPlan.disabled=!canEditPlan(session);
   if(!editPlan.hidden&&editPlan.disabled){
     editPlan.setAttribute("aria-describedby","edit-plan-reason");
-    editPlan.setAttribute("title","Plan editing is available only before the migration starts.");
+    editPlan.setAttribute("title",t("Plan editing is available only before the migration starts."));
   }else{
     editPlan.removeAttribute("aria-describedby");
     editPlan.removeAttribute("title");
@@ -1022,7 +1025,7 @@ function renderSession(session){
   $("#run-next").dataset.index=String(nextIndex);
   $("#run-next").textContent=runButtonLabel(session,nextIndex);
   renderTimeline(session);
-  $("#notes-title").textContent=session.cursor<0?"Notes":"Notes for step "+(session.cursor+1);
+  $("#notes-title").textContent=session.cursor<0?t("Notes"):t`Notes for step ${session.cursor+1}`;
   renderAnnotations(session);
   $("#note-form").classList.toggle("hidden",session.cursor<0);
   renderSessions();
@@ -1117,7 +1120,7 @@ async function mutateActiveSession(path,body){
     }catch(refreshError){
       if(state.active?.id===sessionId)renderSession(state.active);
       alert(mutationError.message);
-      $("#health").textContent=`session refresh failed: ${refreshError.message}`;
+      $("#health").textContent=t`session refresh failed: ${refreshError.message}`;
       return;
     }
     const currentStep=runIndex>=0?state.active?.steps[runIndex]:null;
@@ -1132,14 +1135,14 @@ async function mutateActiveSession(path,body){
       const currentNewer=state.active?.id===sessionId&&isCandidateSessionNewer(session,state.active);
       if(candidateNewer)renderSession(session);
       else if(state.active)renderSession(state.active);
-      if(candidateNewer||currentNewer)$("#health").textContent=`session refresh failed: ${error.message}`;
+      if(candidateNewer||currentNewer)$("#health").textContent=t`session refresh failed: ${error.message}`;
       else alert(error.message);
     }
-    await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+    await refreshSessions().catch((error)=>{$("#health").textContent=t`session list refresh failed: ${error.message}`;});
     return;
   }
   renderSession(session);
-  await refreshSessions().catch((error)=>{$("#health").textContent=`session list refresh failed: ${error.message}`;});
+  await refreshSessions().catch((error)=>{$("#health").textContent=t`session list refresh failed: ${error.message}`;});
 }
 async function prepareWorkspace(){
   const session=state.active;
@@ -1202,8 +1205,8 @@ function openRestoreDialog(checkpointId,trigger){
   state.review.restore.target=target;
   state.review.restore.trigger=trigger;
   state.review.restore.pending=false;
-  $("#restore-checkpoint-description").innerHTML=`<strong>${escapeHtml(target.label)}</strong>\nRef: ${escapeHtml(target.ref)}\nOID: ${escapeHtml(target.oid)}\nExecution root: ${escapeHtml(target.executionRoot)}`;
-  $("#restore-checkpoint-status").textContent="Restore changes only the managed execution workspace.";
+  $("#restore-checkpoint-description").innerHTML=`<strong>${escapeHtml(target.label)}</strong>\n${t`Ref: ${escapeHtml(target.ref)}\nOID: ${escapeHtml(target.oid)}\nExecution root: ${escapeHtml(target.executionRoot)}`}`;
+  $("#restore-checkpoint-status").textContent=t("Restore changes only the managed execution workspace.");
   $("#restore-checkpoint-dialog").showModal();
   $("#restore-checkpoint-cancel").focus();
 }
@@ -1212,7 +1215,7 @@ async function confirmRestoreDialog(){
   const target=state.review.restore.target;
   if(!session||!target||state.review.restore.pending)return;
   state.review.restore.pending=true;
-  $("#restore-checkpoint-status").textContent=`Restoring ${target.checkpointId} in the managed workspace…`;
+  $("#restore-checkpoint-status").textContent=t`Restoring ${target.checkpointId} in the managed workspace…`;
   const request=++state.review.restore.request;
   let restored;
   let restoreError;
@@ -1268,12 +1271,12 @@ function submitAnnotation(){
   const body={stepIndex:session.cursor,kind,text,tags:annotationTags()};
   if(kind==="bookmark"){
     const attempt=migrationAttempts(session).find((candidate)=>candidate.id===state.review.selectedAttemptId&&candidate.stepIndex===session.cursor);
-    if(!attempt){alert("Select persisted attempt evidence before adding a bookmark.");return;}
+    if(!attempt){alert(t("Select persisted attempt evidence before adding a bookmark."));return;}
     const type=$("#annotation-target-type").value||"diff";
     const target={type};
     if(type==="command")target.stream=$("#annotation-command-stream").value||"stdout";
     else if(state.review.selectedPath)target.path=state.review.selectedPath;
-    else{alert("Select a changed file before adding this bookmark.");return;}
+    else{alert(t("Select a changed file before adding this bookmark."));return;}
     const line=Number($("#annotation-target-line").value);
     if(Number.isInteger(line)&&line>0)target.line=line;
     body.attemptId=attempt.id;
@@ -1310,14 +1313,14 @@ async function performAnnotationJump(annotation,sessionId,initialRequest){
   if(request!==state.annotationJump.request||state.active?.id!==sessionId)return;
   let sought;
   try{sought=await api(`/api/sessions/${sessionId}/seek`,{method:"POST",body:JSON.stringify({stepIndex:annotation.stepIndex})});}
-  catch(error){if(request===state.annotationJump.request&&state.active?.id===sessionId)$("#health").textContent=`evidence jump failed: ${error.message}`;return;}
+  catch(error){if(request===state.annotationJump.request&&state.active?.id===sessionId)$("#health").textContent=t`evidence jump failed: ${error.message}`;return;}
   if(request!==state.annotationJump.request||state.active?.id!==sessionId)return;
   renderSession(sought);
   const attempt=migrationAttempts(sought).find((candidate)=>candidate.id===annotation.attemptId&&candidate.stepIndex===annotation.stepIndex);
   const target=annotation.target;
   const pathExists=["file","diff"].includes(target.type)&&filesForAttempt(attempt).some((file)=>file.path===target.path);
   const commandExists=target.type==="command"&&typeof attempt?.snapshot?.command?.[target.stream]==="string";
-  if(!attempt||(!pathExists&&!commandExists)){$("#health").textContent="evidence jump failed: bookmarked evidence is unavailable";return;}
+  if(!attempt||(!pathExists&&!commandExists)){$("#health").textContent=t("evidence jump failed: bookmarked evidence is unavailable");return;}
   state.review.selectedAttemptId=attempt.id;
   state.review.selectedPath=pathExists?target.path:"";
   resetReviewDiff();
@@ -1408,7 +1411,7 @@ $("#project-path").oninput=()=>{
   $("#onboarding-preview-action").disabled=true;
   $("#onboarding-detection").classList.add("hidden");
   clearOnboardingPreview();
-  setOnboardingStatus("Path changed. Inspect this boundary before continuing.","warning");
+  setOnboardingStatus(t("Path changed. Inspect this boundary before continuing."),"warning");
 };
 document.querySelectorAll('input[name="onboarding-workbench"]').forEach((input)=>input.onchange=invalidateOnboardingPreview);
 $("#onboarding-session-title").oninput=invalidateOnboardingPreview;
@@ -1423,18 +1426,18 @@ $("#onboarding-file").onchange=async(event)=>{
   const request=++state.onboarding.importRequest;
   invalidateOnboardingPreview();
   $("#onboarding-preview-action").disabled=true;
-  setOnboardingStatus(`Reading ${file.name}…`,"loading");
+  setOnboardingStatus(t`Reading ${file.name}…`,"loading");
   try{
     const text=await file.text();
     if(request!==state.onboarding.importRequest)return;
     $("#onboarding-import").value=text;
     invalidateOnboardingPreview();
     $("#onboarding-preview-action").disabled=!state.onboarding.inspection;
-    setOnboardingStatus(`Loaded ${file.name}. Preview the safety gate to validate it.`,"success");
+    setOnboardingStatus(t`Loaded ${file.name}. Preview the safety gate to validate it.`,"success");
   }catch(error){
     if(request!==state.onboarding.importRequest)return;
     $("#onboarding-preview-action").disabled=!state.onboarding.inspection;
-    setOnboardingStatus(`Could not read JSON file: ${error.message}`,"error");
+    setOnboardingStatus(t`Could not read JSON file: ${error.message}`,"error");
   }finally{
     if(event.target.files?.[0]===file)event.target.value="";
   }
@@ -1461,7 +1464,7 @@ $("#plan-editor-steps").oninput=(event)=>{
   else state.planEditor.draft=updatePlanStep(state.planEditor.draft,stepIndex,{[target.dataset.field]:target.dataset.field==="actionEnabled"?target.checked:target.value});
   const card=target.closest(".plan-step");
   if(target.dataset.field==="title"){
-    const title=state.planEditor.draft.steps[stepIndex].title.trim()||`Untitled step ${stepIndex+1}`;
+    const title=state.planEditor.draft.steps[stepIndex].title.trim()||t`Untitled step ${stepIndex+1}`;
     const summary=card?.querySelector(".plan-step-title");
     if(summary)summary.textContent=title;
   }
@@ -1574,5 +1577,5 @@ $("#note-form").onsubmit=async(event)=>{event.preventDefault();try{await submitA
 $("#annotation-tag-filter").oninput=()=>{if(state.active)renderAnnotations(state.active);};
 $("#notes").onclick=(event)=>{const button=event.target.closest("[data-annotation-id]");if(!button)return;const annotation=state.active?.annotations?.find((candidate)=>candidate.id===button.dataset.annotationId);jumpToAnnotation(annotation);};
 
-try{const health=await api("/api/health");state.onboarding.allowedRoot=typeof health.allowedRoot==="string"?health.allowedRoot:"";$("#health").textContent="● engine online";$("#allowed-root").textContent=state.onboarding.allowedRoot;await refreshSessions();}catch(error){$("#health").textContent=`offline: ${error.message}`;}
+try{const health=await api("/api/health");state.onboarding.allowedRoot=typeof health.allowedRoot==="string"?health.allowedRoot:"";$("#health").textContent=t("● engine online");$("#allowed-root").textContent=state.onboarding.allowedRoot;await refreshSessions();}catch(error){$("#health").textContent=t`offline: ${error.message}`;}
 await refreshRecentProjects();

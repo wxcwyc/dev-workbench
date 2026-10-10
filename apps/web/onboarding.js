@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 const WORKBENCHES = new Set(["execution", "migration"]);
 
 function isNonEmptyString(value) {
@@ -35,41 +36,41 @@ export function parseSessionImport(text) {
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
     const position = error.message.match(/position\s+(\d+)/i);
-    if (!position) throw new Error(`Invalid JSON: ${error.message}`);
+    if (!position) throw new Error(t`Invalid JSON: ${error.message}`);
 
     const offset = Number(position[1]);
     const preceding = text.slice(0, offset);
     const lines = preceding.split(/\r\n|\r|\n/);
     const line = lines.length;
     const column = lines.at(-1).length + 1;
-    throw new Error(`Invalid JSON at line ${line}, column ${column}`);
+    throw new Error(t`Invalid JSON at line ${line}, column ${column}`);
   }
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Imported session must be an object");
+    throw new Error(t("Imported session must be an object"));
   }
   return parsed;
 }
 
 export function buildOnboardingInput({ inspection, workbench, title, imported } = {}) {
   if (!isNonEmptyString(inspection?.projectRoot)) {
-    throw new Error("inspection.projectRoot must be a non-empty string");
+    throw new Error(t("inspection.projectRoot must be a non-empty string"));
   }
   if (!WORKBENCHES.has(workbench)) {
-    throw new Error("workbench must be execution or migration");
+    throw new Error(t("workbench must be execution or migration"));
   }
   if (!isNonEmptyString(title)) {
-    throw new Error("title must be a non-empty string");
+    throw new Error(t("title must be a non-empty string"));
   }
   if (imported?.workbench !== undefined && imported.workbench !== workbench) {
-    throw new Error(`Imported workbench ${imported.workbench} does not match selected workbench ${workbench}`);
+    throw new Error(t`Imported workbench ${imported.workbench} does not match selected workbench ${workbench}`);
   }
 
   if (imported === undefined || imported === null) {
     return { title, workbench, projectRoot: inspection.projectRoot, steps: [] };
   }
   if (typeof imported !== "object" || Array.isArray(imported)) {
-    throw new Error("Imported session must be an object");
+    throw new Error(t("Imported session must be an object"));
   }
 
   return {
@@ -89,7 +90,7 @@ export function summarizeOnboarding(input = {}) {
     steps: source.map((step, index) => {
       const action = step?.action;
       return {
-        title: isNonEmptyString(step?.title) ? step.title : `Step ${index + 1}`,
+        title: isNonEmptyString(step?.title) ? step.title : t`Step ${index + 1}`,
         command: Array.isArray(action?.command) && action.command.every((argument) => typeof argument === "string")
           ? action.command.map(formatArgument).join(" ")
           : "",
@@ -101,11 +102,11 @@ export function summarizeOnboarding(input = {}) {
 }
 
 export function formatApiError(body) {
-  const message = isNonEmptyString(body?.error) ? body.error : "Request failed";
+  const message = isNonEmptyString(body?.error) ? t(body.error) : t("Request failed");
   if (!Array.isArray(body?.details)) return message;
 
   const details = body.details
     .filter((detail) => isNonEmptyString(detail?.path) && isNonEmptyString(detail?.message))
-    .map((detail) => `${detail.path}: ${detail.message}`);
+    .map((detail) => `${detail.path}: ${t(detail.message)}`);
   return [message, ...details].join("\n");
 }
