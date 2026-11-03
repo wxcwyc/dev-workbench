@@ -1,26 +1,63 @@
 # Dev Workbench
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+**每一步都看得见，每一次改动都可审查，出错后可以恢复。**
 
-**通过逐步观察执行过程和项目变化，理解软件。**
+Dev Workbench 是一款本地优先的开发工作台，帮助开发者理解程序执行过程，并逐步审查复杂的软件迁移。
 
-一个用于多数软件项目的本地开发辅助工具。它不替用户隐藏执行过程，而是把执行、状态变化、文件差异和个人理解组织到一条可操控的时间线上。
+它将执行轨迹、命令输出、文件变化、实时预览和审查记录整合到一条可交互的时间线上。
 
-项目共享一个事件溯源执行内核，并提供两个工作台：
+**它有什么不同？**
 
-- **Execution Explorer**：回放解释器、规则引擎、算法或 Agent 的结构化 trace，查看程序位置、目标、堆栈、绑定和每步注释。
-- **Migration Center**：在工作台管理的隔离 Git worktree 中逐步运行迁移计划，成功步骤先进入 review gate；可以检查逐文件 diff、拒绝并从基线重试、取消长任务、保存证据书签，以及把真实文件恢复到已接受 checkpoint。源分支和源工作树不会被迁移命令直接修改。
+- **执行轨迹回放：** 逐步查看程序执行位置、调用栈、变量绑定、分支、失败和回溯。
+- **逐步审查迁移：** 在受管 Git Worktree 中执行迁移计划，不直接修改原始工作树。
+- **检查每次变更：** 在接受修改之前查看命令输出、文件 Diff 和实时预览。
+- **失败后恢复：** 可以拒绝步骤、从精确基线重试，或恢复到已经接受的 Git 检查点。
+- **本地优先：** 项目和会话数据保留在本机。
 
-## 项目文档
+> 你可以导入自己或外部 AI Agent 生成的 Trace 和迁移计划。Dev Workbench 当前不是编码 Agent，而是为程序执行和代码变更提供可观察、可审查、可恢复的工作环境。
 
-- [项目创建目的与产品原则](docs/PROJECT_PURPOSE.md)
-- [初始技术方案与当前边界](docs/INITIAL_SOLUTION.md)
-- [总体开发计划与下一阶段功能方案](docs/DEVELOPMENT_PLAN.md)
-- [架构与安全边界](docs/ARCHITECTURE.md)
+## 为什么需要 Dev Workbench？
 
-## 启动
+AI 辅助开发让代码修改越来越快，但理解和审查这些修改仍然困难。
 
-项目目前处于持续开发阶段。要求 **Node.js 22+**；迁移工作区与检查点功能还需要 **Git**。没有运行时 npm 依赖，无需安装依赖或执行构建。
+当自动化任务或大型迁移完成后，你应该能够回答：
+
+- 每一步究竟执行了什么？
+- 哪些文件发生了变化？
+- 命令产生了什么结果？
+- 能否拒绝某个步骤，而不丢失之前的工作？
+- 能否恢复到一个已确认正确的检查点？
+
+Dev Workbench 希望让这些问题成为开发过程的一部分。
+
+## 两个工作台
+
+### 1. Migration Center — 逐步审查代码迁移
+
+在独立管理的 Git Worktree 中执行多步骤迁移。
+
+1. 打开现有本地项目。
+2. 准备迁移工作区。
+3. 检查并确认每一条命令。
+4. 查看命令输出、文件 Diff 和实时预览。
+5. 接受或拒绝每个步骤。
+6. 从已验证的基线重试，或恢复已接受的检查点。
+
+迁移命令不会直接在原始工作树中执行。
+
+### 2. Execution Explorer — 理解程序如何运行
+
+回放解释器、算法、规则引擎和 Agent 的结构化执行轨迹。
+
+- 前进、后退和逐步回放。
+- 查看源码位置和中间状态。
+- 跟踪变量绑定和调用栈。
+- 理解分支、失败和回溯。
+- 添加注释和证据书签。
+
+## 快速开始
+
+要求：Node.js 22+；迁移工作区需要 Git。
 
 ```bash
 git clone https://github.com/wxcwyc/dev-workbench.git
@@ -28,141 +65,35 @@ cd dev-workbench
 npm start
 ```
 
-打开 `http://127.0.0.1:4177`，然后选择内置的逻辑调试或框架迁移示例。
+浏览器打开：
 
-界面支持轻量中英文，在页面加载时跟随浏览器的首选语言：`zh` / `zh-*` 使用简体中文，其余语言使用英文。调整浏览器首选语言后刷新页面即可；项目内容、代码、路径和命令输出保留原文。
+http://127.0.0.1:4177
 
-默认允许打开当前用户目录中的项目。可以收窄边界：
+无需安装 npm 依赖，也无需执行构建。
 
-```bash
-DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
-```
+## 安全与执行边界
 
-开发时可以使用 `npm run dev` 自动重启服务器。`DEV_WORKBENCH_PORT` 可调整端口，默认值为 `4177`。会话、最近项目和受管工作区保存在已从 Git 排除的 `.dev-workbench/` 中。
+- 迁移命令运行在受管 Git Worktree 中。
+- 每条命令都需要明确确认。
+- 修改完成后进入审查流程。
+- Git 检查点支持恢复已接受的工作。
+- 应用默认只绑定本机 localhost。
 
-## 打开本地项目
+注意：Git Worktree 隔离不等于操作系统沙箱，命令仍然具有当前用户的权限。
 
-点击 **Open local project**，输入 `DEV_WORKBENCH_ALLOWED_ROOT` 内的绝对路径或相对路径。工作台会在不运行项目命令的前提下，只读识别 Git、package manager、语言和常见框架，并显示探测证据与警告。随后可以：
+## 当前能力边界
 
-1. 选择 Execution 或 Migration 工作台并填写会话标题；
-2. 可选粘贴或上传 trace/plan JSON；
-3. 在创建前检查规范化后的步骤、argv 参数、工作目录、影响分类和允许目录边界；Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
-4. 确认安全预览后创建会话。
+- Execution Explorer 当前内置 Prolog Runtime Adapter，支持纯 Horn 子集。
+- 其他解释器和工具可以通过 Trace Adapter 协议接入。
+- 迁移计划由用户或外部工具提供，目前不提供原生 AI Coding Agent 编排。
+- 当前版本面向可信本地环境，不适合直接作为公网服务部署。
 
-最近成功创建的项目会出现在 **Recent projects** 中；重新打开时仍会再次探测路径和项目事实，不会复用旧计划。接入和创建会话本身不会运行任何命令。Migration 需要先由用户点击 **Prepare workspace** 创建受管 Git worktree，随后每个实际命令仍需逐步明确确认。失败或取消后的 retry 会先校验并恢复该 attempt 的基线；Accept、Reject 和真实 checkpoint restore 是不同操作，restore 还会显示并校验精确的 OID 与 execution root。
+## 参与项目
 
-## 高级入口：直接导入会话 JSON
+欢迎提交 Issue、功能建议和 Pull Request。
 
-原始 JSON 导入仍作为高级快捷方式保留。执行回放示例：
+如果你在真实项目中使用 Dev Workbench，我们尤其希望了解你的执行、审查和恢复体验。
 
-```json
-{
-  "title": "Parser walkthrough",
-  "workbench": "execution",
-  "projectRoot": "/absolute/path/to/project",
-  "trace": [
-    {
-      "title": "Read token",
-      "explanation": "The parser consumes the first token.",
-      "state": {
-        "program": ["parse(Expression)"],
-        "currentLine": 1,
-        "goals": ["parse term"],
-        "stack": [{ "rule": "expression", "goals": ["term"], "bindings": {} }]
-      }
-    }
-  ]
-}
-```
+## License
 
-迁移计划示例（假设项目已包含 `scripts/migrate.mjs`）：
-
-```json
-{
-  "title": "Migrate site",
-  "workbench": "migration",
-  "projectRoot": "/absolute/path/to/project",
-  "metadata": {
-    "sourceUrl": "http://127.0.0.1:3000",
-    "targetUrl": "http://127.0.0.1:4321"
-  },
-  "steps": [
-    {
-      "id": "create-target-shell",
-      "title": "Create target shell",
-      "description": "Initialize the new framework.",
-      "risk": "medium",
-      "dependsOn": [],
-      "action": { "command": ["node", "scripts/migrate.mjs", "shell"] }
-    }
-  ]
-}
-```
-
-命令必须是 argv 数组，不接受 shell 字符串。工作目录必须位于项目根目录内，每一步都需要在 UI 中确认后才执行。
-
-## 流式提交 Trace
-
-先创建一个空的 Execution 会话，然后向 `/api/sessions/{sessionId}/trace` 提交 `application/json` 或 `application/x-ndjson`。事件的 `sequence` 必须从当前步骤数开始连续递增：
-
-```json
-{"protocolVersion":"1.0","sessionId":"SESSION_ID","sequence":0,"kind":"branch","title":"Choose rule","state":{"goals":["parent(X, Y)"]}}
-```
-
-服务会逐条校验、持久化并通过会话 SSE 更新 UI。若 NDJSON 中途出现坏行，响应会返回已接受的事件数量，之前的事件不会回滚或丢失。
-
-内置逻辑示例由 `packages/prolog-adapter` 中的 Prolog runtime 实时执行，不再读取手写 trace。也可以为已有 Execution 会话生成 NDJSON：
-
-```bash
-node packages/prolog-adapter/src/cli.js \
-  --source examples/logic-trace/program.pl \
-  --query "grandfather(X, Y)?" \
-  --session SESSION_ID
-```
-
-CLI 将 NDJSON 写入标准输出，需要提交到 trace 接口才能导入会话。
-
-当前 runtime 支持纯 Horn 子集：事实、规则、原子与复合项、变量、合一、深度优先搜索和回溯；暂不支持 cut、否定、算术、动态谓词或 SWI-Prolog 内建谓词。可通过 `GET /api/adapters` 查询 manifest 和 capability。
-
-## 当前能力
-
-- 不可变步骤事件和 JSON 会话持久化；
-- 时间轴 seek、前进、回放和逐步注释；
-- 项目文件树快照及新增/修改/删除比较；
-- Git HEAD、status 和工作树 diff 捕获；
-- 无 shell 的显式命令执行；
-- 同一会话互斥运行；
-- SSE 实时更新；
-- 两个独立工作台和可导入协议；
-- 真实项目只读探测、安全预览和最近项目入口；
-- Migration 计划编辑器仅在 pristine Migration session 中可编辑 title、description、expected text、argv、cwd、risk 和 earlier-step dependsOn；稳定 ID 只读，保存只做整 plan 替换，并支持 review gate 与高风险确认；
-- Migration 命令只在工作台拥有的 Git worktree 中执行；每次 attempt 保存基线、结果 checkpoint、文件 manifest 和命令证据；
-- 失败/取消后的基线恢复重试、精确 attempt 取消，以及 accepted checkpoint 的二次确认恢复；
-- 按需加载的逐文件 unified/side-by-side diff、搜索、历史 attempt 审查和安全的 Markdown 注释、标签、持久证据书签；
-- 内置 Prolog runtime trace 与框架迁移示例。
-
-## 测试
-
-```bash
-npm test
-```
-
-其中 `test/migration-recovery-e2e.test.js` 会创建真实临时 Git 仓库，通过实际 HTTP、SSE、命令、preview、review、retry、cancel、diff、bookmark 和 restore 路径验证完整恢复闭环，并断言源仓库 HEAD、index、status 和 tracked files 保持不变。
-
-下一步开发范围和验收条件见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
-
-## 本地执行边界
-
-服务只绑定 `127.0.0.1`，并校验 Host/Origin 与当前 loopback 地址和端口匹配。项目路径受允许根目录约束，命令不通过 shell 字符串解释，执行与恢复操作需要明确确认。
-
-受管 Git worktree 提供工作区隔离，不是操作系统沙箱：命令仍具有当前用户的权限。请使用可信的本地项目和计划。当前版本面向可信本地环境，尚未提供公网部署所需的身份认证。完整边界和限制见 [架构与安全边界](docs/ARCHITECTURE.md)。
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。报告问题时请附复现步骤，提交代码修改前请运行 `npm test`。
-
-仓库的中英文简介见 [REPOSITORY_DESCRIPTION.md](docs/REPOSITORY_DESCRIPTION.md)。详细设计与规划文档目前使用中文或中英混合文本。
-
-## 许可证
-
-[MIT](LICENSE) © 2026 wxcwyc。允许使用、修改和再分发，包括商业使用，但须保留版权及许可声明。软件不提供担保。
+MIT

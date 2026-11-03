@@ -1,25 +1,63 @@
 # Dev Workbench
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+**See every step. Review every change. Restore with confidence.**
 
-**Understand software by stepping through its execution and changes.**
+Dev Workbench is a local-first workbench for understanding program execution and reviewing multi-step software migrations.
 
-Dev Workbench is a local-first developer tool for replaying execution traces and reviewing project migrations one step at a time. It brings program state, command output, file diffs, live previews, and your own notes into a shared timeline.
+It brings execution traces, command output, file changes, live previews, and review decisions into one interactive timeline.
 
-The project is in active development. It runs locally with Node.js and has no runtime npm dependencies.
+**What makes it different?**
 
-## Two workbenches
+- **Replay execution:** Step through structured traces and inspect source positions, stacks, variable bindings, branches, failures, and backtracking.
+- **Review migrations:** Execute migration plans in managed Git worktrees, without running migration commands directly in your source working tree.
+- **Inspect every change:** Review command output, file diffs, and live previews before accepting a step.
+- **Recover safely:** Reject changes, retry from an exact baseline, or restore an accepted Git checkpoint.
+- **Stay local:** Your projects and session data remain on your machine.
 
-| Workbench | What you can do |
-| --- | --- |
-| **Execution Explorer** | Replay structured traces from interpreters, algorithms, rule engines, or agents. Inspect source positions, goals, stacks, bindings, branches, and backtracking. |
-| **Migration Center** | Run a migration plan in a managed Git worktree. Review each result, inspect diffs, compare previews, accept or reject changes, retry from a baseline, and restore accepted checkpoints. |
+> Bring your own trace or migration plan. Dev Workbench is not a coding agent: it provides a reviewable execution environment for work produced by your scripts, tools, or AI agents.
 
-Both share an event-based execution core, session persistence, timeline, and annotation model. The included examples cover a Prolog query and a framework migration workflow.
+## Why Dev Workbench?
 
-## Quick start
+AI-assisted development makes code changes faster, but understanding and reviewing those changes is still difficult.
 
-Requirements: **Node.js 22+** and **Git** for migration workspaces and checkpoints.
+When a migration or automated task finishes, you should be able to answer:
+
+- What actually happened at each step?
+- Which files changed, and why?
+- What did the command produce?
+- Can I reject one step without losing the previous work?
+- Can I restore a known-good checkpoint?
+
+Dev Workbench makes these questions part of the development workflow.
+
+## Two Workbenches
+
+### 1. Migration Center — Review changes step by step
+
+Run a multi-step migration in a managed Git worktree.
+
+1. Open an existing local project.
+2. Prepare a migration workspace.
+3. Review and confirm each command.
+4. Inspect output, diffs, and live previews.
+5. Accept or reject each step.
+6. Retry from a verified baseline or restore an accepted checkpoint.
+
+Your original working tree is not directly modified by migration commands.
+
+### 2. Execution Explorer — Understand program behavior
+
+Replay structured execution traces from interpreters, algorithms, rule engines, and agents.
+
+- Step forward and backward through execution.
+- Inspect source positions and intermediate states.
+- Follow variable bindings and call stacks.
+- Understand branching, failure, and backtracking.
+- Add annotations and evidence bookmarks.
+
+## Quick Start
+
+Requirements: Node.js 22+ and Git for migration workspaces.
 
 ```bash
 git clone https://github.com/wxcwyc/dev-workbench.git
@@ -27,153 +65,33 @@ cd dev-workbench
 npm start
 ```
 
-Open **http://127.0.0.1:4177** and choose the logic debugger or migration example. No dependency installation or build step is required.
+Open http://127.0.0.1:4177 in your browser.
 
-The UI follows your browser's first preferred language: `zh` / `zh-*` selects Simplified Chinese; other languages select English. Change the browser preference and reload to switch. Project content, code, paths, and command output retain their original text.
+No dependency installation or build step is required.
 
-Use `npm run dev` for automatic server restart during development.
+## Safety and Execution Boundaries
 
-### Configuration
+- Migration commands run in managed Git worktrees.
+- Every command requires explicit confirmation.
+- Changes enter a review gate before acceptance.
+- Checkpoints support recovery of accepted work.
+- The application binds to localhost by default.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DEV_WORKBENCH_ALLOWED_ROOT` | Current user's home directory | Restricts which local projects can be opened. |
-| `DEV_WORKBENCH_PORT` | `4177` | Workbench HTTP port. |
+Git worktree isolation is not an operating-system sandbox. Commands still run with the current user's permissions.
 
-For example, in Bash or another POSIX shell:
+## Current Scope
 
-```bash
-DEV_WORKBENCH_ALLOWED_ROOT=/absolute/path/to/projects npm start
-```
+- Execution Explorer currently includes a Prolog runtime adapter supporting a pure Horn clause subset.
+- Other interpreters and tools can integrate through the trace adapter protocol.
+- Migration plans are supplied by the user or external tools; native AI coding-agent orchestration is not currently provided.
+- The current application is designed for trusted local environments, not public hosting.
 
-Sessions, recent projects, and managed workspaces are stored under `.dev-workbench/`, which is excluded from Git.
+## Contributing
 
-## Open your own project
+Issues, feature suggestions, and pull requests are welcome.
 
-1. Select **Open local project** and enter an absolute path or a path relative to the allowed root.
-2. Inspect the detected Git repository, package manager, languages, frameworks, and warnings. Inspection does not run project commands.
-3. Choose Execution or Migration, enter a session title, and optionally paste or upload a trace/plan JSON file.
-4. Review the normalized steps, command arguments, working directories, and safety boundary before creating the session.
-
-Recent projects are inspected again when reopened; old plans are not reused automatically. Creating a session does not execute commands.
-
-### Review a migration
-
-- Start from a clean Git repository and select **Prepare workspace** to create a managed detached worktree.
-- Before execution begins, edit step titles, descriptions, expected results, command arguments, working directories, risks, and dependencies. Step IDs remain stable.
-- Confirm each command before running it. High-risk steps require an additional confirmation.
-- Successful commands enter a review gate. Inspect file diffs and output, then **Accept step** or **Reject step**.
-- Retry failed, cancelled, or rejected attempts after confirming restoration of the exact attempt baseline.
-- Restore the initial or an accepted checkpoint after reviewing its full Git OID and execution path. Restore preserves recorded evidence and requires previews and commands to be stopped.
-
-Migration commands run in the managed worktree. The workbench does not run them directly in the source working tree. This is Git workspace separation, not an operating-system sandbox: executed commands still have your user's permissions.
-
-## Import traces and plans
-
-The **Import session JSON** entry also accepts sessions directly. Replace the example project path with your own allowed local path.
-
-### Execution trace
-
-```json
-{
-  "title": "Parser walkthrough",
-  "workbench": "execution",
-  "projectRoot": "/absolute/path/to/project",
-  "trace": [
-    {
-      "title": "Read token",
-      "explanation": "The parser consumes the first token.",
-      "state": {
-        "program": ["parse(Expression)"],
-        "currentLine": 1,
-        "goals": ["parse term"],
-        "stack": [{ "rule": "expression", "goals": ["term"], "bindings": {} }]
-      }
-    }
-  ]
-}
-```
-
-### Migration plan
-
-This example assumes your project contains `scripts/migrate.mjs`:
-
-```json
-{
-  "title": "Migrate site",
-  "workbench": "migration",
-  "projectRoot": "/absolute/path/to/project",
-  "steps": [
-    {
-      "id": "create-target-shell",
-      "title": "Create target shell",
-      "description": "Initialize the new framework.",
-      "risk": "medium",
-      "dependsOn": [],
-      "action": { "command": ["node", "scripts/migrate.mjs", "shell"] }
-    }
-  ]
-}
-```
-
-Commands must be argument arrays, not shell strings. Working directories must stay inside the project boundary. Importing a plan does not run it.
-
-### Stream trace events
-
-Create an empty Execution session, then send `application/json` or `application/x-ndjson` to `POST /api/sessions/{sessionId}/trace`. Event sequences must be consecutive, starting at the session's current step count:
-
-```json
-{"protocolVersion":"1.0","sessionId":"SESSION_ID","sequence":0,"kind":"branch","title":"Choose rule","state":{"goals":["parent(X, Y)"]}}
-```
-
-Events are validated, persisted, and delivered to the UI through Server-Sent Events (SSE). If a later NDJSON line is invalid, the response reports the accepted count and retains previously accepted events.
-
-The built-in logic example uses the runtime in `packages/prolog-adapter`. To generate NDJSON for an existing Execution session:
-
-```bash
-node packages/prolog-adapter/src/cli.js --source examples/logic-trace/program.pl --query "grandfather(X, Y)?" --session SESSION_ID
-```
-
-The CLI writes NDJSON to standard output; submit it to the trace endpoint to ingest it. The runtime supports pure Horn clauses: facts, rules, atoms, compound terms, variables, unification, depth-first search, and backtracking. It does not yet support cut, negation, arithmetic, dynamic predicates, or SWI-Prolog built-ins. `GET /api/adapters` exposes adapter manifests and capabilities.
-
-## Local execution boundary
-
-The server binds to `127.0.0.1` and checks Host/Origin against its loopback address and port. Project paths are checked against the allowed root, commands run without shell-string interpretation, and mutations require explicit confirmation.
-
-Use trusted local projects and plans. The current version is designed for a trusted local environment and has no authentication for public hosting. See [Architecture and execution boundaries](docs/ARCHITECTURE.md) for the full model and its limitations.
-
-## Development and tests
-
-```bash
-npm test
-```
-
-The tests cover protocol validation, adapters, execution state, project inspection, browser controllers, live previews, SSE, and migration recovery. The recovery end-to-end test creates real temporary Git repositories and exercises review, retry, cancel, diff, bookmarks, and restore while checking that source repository files and Git state remain unchanged.
-
-```text
-apps/server/              Local HTTP server and SSE coordination
-apps/web/                 Browser UI and English/Chinese messages
-packages/execution-core/  Session state, persistence, and terminal buffer
-packages/project-adapters/ Project inspection, commands, Git, and previews
-packages/protocol/        Versioned schemas and validation
-packages/adapter-sdk/     Adapter manifests and trace helpers
-packages/prolog-adapter/  Prolog runtime and NDJSON CLI
-examples/                 Logic and migration demos
-test/                     Automated regression and integration tests
-```
-
-Issues and pull requests are welcome. Include reproduction steps for bugs and run `npm test` before submitting code changes.
-
-## Project documentation
-
-The detailed design and planning documents currently contain Chinese or mixed Chinese/English text.
-
-- [Project purpose and product principles](docs/PROJECT_PURPOSE.md)
-- [Initial solution and scope](docs/INITIAL_SOLUTION.md)
-- [Development roadmap](docs/DEVELOPMENT_PLAN.md)
-- [Architecture and execution boundaries](docs/ARCHITECTURE.md)
-- [English and Chinese repository descriptions](docs/REPOSITORY_DESCRIPTION.md)
+If you use Dev Workbench in a real project, feedback about your workflow and review experience is especially valuable.
 
 ## License
 
-[MIT](LICENSE) © 2026 wxcwyc. Use, modification, and redistribution, including commercial use, are permitted subject to retaining the copyright and permission notice. The software is provided without warranty.
+MIT
