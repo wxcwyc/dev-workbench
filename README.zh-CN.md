@@ -6,6 +6,30 @@ Dev Workbench 是一款本地优先的开发工作台，帮助开发者理解程
 
 它将执行轨迹、命令输出、文件变化、实时预览和审查记录整合到一条可交互的时间线上。
 
+下方演示使用仓库内置的示例项目。
+
+<p align="center">
+  <img src="docs/assets/migration-center.png" alt="Dev Workbench 迁移中心：逐步审查迁移步骤、源与目标预览以及命令输出" width="100%">
+</p>
+
+## 实际运行演示
+
+### Migration Center — 在接受前逐步审查迁移
+
+通过一个真实运行的示例迁移，查看受管 Git Worktree、源/目标实时预览、命令输出、文件变更和可审查的 Diff。
+
+![Migration Center 操作演示](docs/assets/migration-demo.gif)
+
+![Migration Center 的审查证据和代码差异](docs/assets/migration-review.png)
+
+### Execution Explorer — 回放程序执行过程
+
+逐步运行 Prolog 查询，检查目标队列、变量绑定、规则选择、求解结果和回溯过程。
+
+![Execution Explorer 操作演示](docs/assets/execution-demo.gif)
+
+![Execution Explorer 的 Prolog 求解结果和执行时间线](docs/assets/execution-explorer.png)
+
 **它有什么不同？**
 
 - **执行轨迹回放：** 逐步查看程序执行位置、调用栈、变量绑定、分支、失败和回溯。

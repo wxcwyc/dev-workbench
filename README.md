@@ -6,6 +6,30 @@ Dev Workbench is a local-first workbench for understanding program execution and
 
 It brings execution traces, command output, file changes, live previews, and review decisions into one interactive timeline.
 
+The demos below use the sample projects included in this repository.
+
+<p align="center">
+  <img src="docs/assets/migration-center.png" alt="Dev Workbench Migration Center showing a reviewed migration step, source and target previews, and live command output" width="100%">
+</p>
+
+## See it in action
+
+### Migration Center — review a migration before accepting it
+
+Follow a real sample migration through managed Git worktrees, live source/target previews, command output, changed files, and a reviewable diff.
+
+![Migration Center walkthrough](docs/assets/migration-demo.gif)
+
+![Migration Center review evidence and diff](docs/assets/migration-review.png)
+
+### Execution Explorer — replay program behavior
+
+Step through a Prolog query and inspect goals, variable bindings, rule selection, solutions, and backtracking.
+
+![Execution Explorer walkthrough](docs/assets/execution-demo.gif)
+
+![Execution Explorer showing a Prolog solution and execution timeline](docs/assets/execution-explorer.png)
+
 **What makes it different?**
 
 - **Replay execution:** Step through structured traces and inspect source positions, stacks, variable bindings, branches, failures, and backtracking.
